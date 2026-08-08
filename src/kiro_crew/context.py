@@ -1414,12 +1414,12 @@ class ContextBuilder:
                 "critical point.\n"
                 "- Supporting bullets only if the reader would be STUCK without "
                 "them. Max 3. Each bullet is one short sentence.\n"
-                "- Take a position. Name your pick. Resolve \"it depends\" "
+                '- Take a position. Name your pick. Resolve "it depends" '
                 "immediately.\n"
                 "- Do NOT add: tables, headers, numbered lists > 3 items, "
-                "\"common pitfalls\", \"also consider\", multi-section layouts, "
-                "or any content that fails the test: \"would the reader be "
-                "stuck without this line?\"\n"
+                '"common pitfalls", "also consider", multi-section layouts, '
+                'or any content that fails the test: "would the reader be '
+                'stuck without this line?"\n'
                 "- Code blocks and commands are the answer — never cut them.\n"
                 "- Never compress for brevity: security warnings, "
                 "irreversible-action confirmations, and ordered multi-step "
@@ -1570,7 +1570,7 @@ class ContextBuilder:
         deployment's effective window), leaving that path byte-for-byte
         unchanged.
 
-        All providers — including ``provider_type="claude_code"`` — receive the
+        All providers — including external ACP adapters — receive the
         same injected context (critical rules, thread history, memory, skills,
         lessons); steering files are the one exception (see below). This keeps
         Claude Code at parity with kiro so dashboard/Slack UI contracts (diff
@@ -1578,12 +1578,11 @@ class ContextBuilder:
         behave identically across providers.
 
         *provider_type* is consumed again for the steering gate only: the
-        steering block below is injected solely on the CC backend
-        (``provider_type == "claude_code"``). kiro-cli loads an agent's
+        steering block below is injected for external ACP adapters. kiro-cli loads an agent's
         ``resources`` natively when spawned with ``--agent`` (acp/client.py
         ``_spawn``), so re-injecting steering on the ACP/kiro backend would
-        duplicate what kiro already loaded; the CC backend (claude-agent-acp)
-        does NOT read agent ``resources`` and still needs the explicit load.
+        duplicate what kiro already loaded; external adapters do NOT read Kiro
+        agent ``resources`` and still need the explicit load.
         Everything else stays at CC/ACP parity.
 
         For custom agents (non-kirocrew), skills and workspace identity
@@ -1591,7 +1590,7 @@ class ContextBuilder:
         lessons, critical rules, and hooks are injected for all agents.
         """
         is_custom = agent and agent != "kirocrew"
-        is_cc = provider_type == "claude_code"
+        needs_explicit_resources = provider_type in {"claude_code", "codex_acp"}
         caps = _resolve_caps(model_window)
         parts: list[str] = []
 
@@ -1719,11 +1718,11 @@ class ContextBuilder:
         # Steering files from agent config resources.
         # kiro-cli loads an agent's ``resources`` natively when spawned with
         # ``--agent`` (see acp/client.py ``_spawn``) — the same mechanism that
-        # lets us skip this for custom agents above. The CC backend
-        # (claude-agent-acp) does NOT read agent ``resources``, so only it needs
-        # the explicit load. Injecting on the ACP/kiro backend would duplicate
+        # lets us skip this for custom agents above. External ACP adapters do
+        # NOT read Kiro agent ``resources``, so they need the explicit load.
+        # Injecting on the ACP/kiro backend would duplicate
         # what kiro-cli already loaded.
-        if not is_custom and is_cc:
+        if not is_custom and needs_explicit_resources:
             steering_ctx = _load_steering_resources()
             if steering_ctx:
                 if lazy_skills and len(steering_ctx) > caps.steering:
@@ -1843,7 +1842,7 @@ class ContextBuilder:
         # skill's summary. The slice below is a defensive backstop only.
         # Mapped: CC only (kiro loads them natively). Unmapped: kirocrew only.
         # Shared with the post-compaction re-injection in build_message.
-        inject_skills, skill_globs = _skills_injection_plan(agent, is_cc=is_cc)
+        inject_skills, skill_globs = _skills_injection_plan(agent, is_cc=needs_explicit_resources)
         if inject_skills:
             # ON: usage-ranked top-K bounded by the skills section cap.
             # OFF (budget=None): legacy full skills dump, unchanged behavior.
@@ -2004,6 +2003,7 @@ class ContextBuilder:
         _user_bounds: tuple[int, int] | None = None
         _user_part_index: int | None = None
         is_cc = provider_type == "claude_code"
+        is_external_acp = provider_type in {"claude_code", "codex_acp"}
 
         # Session context on first message only
         if is_new_session:
@@ -2114,7 +2114,7 @@ class ContextBuilder:
         # mapping excludes and an unmapped custom agent cannot receive a block
         # its session-start context never contained.
         if not is_new_session and needs_reinjection:
-            _inject, _globs = _skills_injection_plan(agent, is_cc=is_cc)
+            _inject, _globs = _skills_injection_plan(agent, is_cc=is_external_acp)
             if _inject:
                 _cfg = KiroCrewConfig.load()
                 lazy_skills = bool(getattr(_cfg.skills, "lazy_load", False))

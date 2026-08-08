@@ -1,10 +1,10 @@
-"""Configuration loader for KiroCrew.
+"""Configuration loader for Kiro Crew.
 
 Config location: ~/.kiro/crew/config.json (overridden by KIROCREW_HOME)
 Credentials:    ~/.kiro/crew/.env (overridden by KIROCREW_HOME)
 
-KiroCrew is KiroACP-only: the sole provider is the ACP adapter driving the
-kiro-cli backend. This module handles session timeouts, hook rules, and the
+Kiro Crew uses one ACP provider implementation with Kiro CLI or Codex backends.
+This module handles session timeouts, hook rules, and the
 dashboard URL via the config file. (The dashboard *port* is set with the
 ``KIROCREW_PORT`` env var, not a config key.)
 """
@@ -822,7 +822,11 @@ class AgentConfig:
     )
     provider: str = field(
         default="acp",
-        metadata=_meta("Provider", "LLM provider backend (KiroACP / kiro-cli).", enum=["acp"]),
+        metadata=_meta(
+            "Provider",
+            "LLM provider backend (KiroACP / kiro-cli or Codex ACP).",
+            enum=["acp", "codex_acp"],
+        ),
     )
     default_agent: str = field(
         default="",
@@ -2187,7 +2191,7 @@ class DashboardConfig:
         default="auto",
         metadata=_meta(
             "Tips Model",
-            "Model ID for tips generation. Defaults to \"auto\" so it inherits the "
+            'Model ID for tips generation. Defaults to "auto" so it inherits the '
             "account's governed model; a hardcoded id can be rejected on accounts "
             "or partitions that do not serve it.",
         ),
@@ -2430,7 +2434,7 @@ class SkillsConfig:
         metadata=_meta(
             "Skill Judge Model",
             "Model used for the dedupe judge and the advisory pending review. "
-            "Defaults to \"auto\" to inherit the account's governed model; the "
+            'Defaults to "auto" to inherit the account\'s governed model; the '
             "value only gates whether the judge runs (any truthy value enables "
             "it) — the judge turn itself runs on the shared background session.",
         ),
@@ -2695,7 +2699,12 @@ _SECURITY_BOUNDED_FIELDS: tuple[tuple[str, str, int, int], ...] = (
     ("agent", "max_subagents", 0, SUBAGENT_AUTO_MAX_CEILING),
     ("agent", "subagent_max_turns", 1, SUBAGENT_MAX_TURNS_CEILING),
     ("agent", "chat_turn_timeout_secs", CHAT_TURN_TIMEOUT_MIN, CHAT_TURN_TIMEOUT_MAX),
-    ("dashboard", "loop_stall_exit_after_secs", LOOP_STALL_EXIT_AFTER_MIN, LOOP_STALL_EXIT_AFTER_MAX),
+    (
+        "dashboard",
+        "loop_stall_exit_after_secs",
+        LOOP_STALL_EXIT_AFTER_MIN,
+        LOOP_STALL_EXIT_AFTER_MAX,
+    ),
     ("session", "pool_size", 0, POOL_SIZE_MAX),
 )
 
@@ -4628,12 +4637,8 @@ class KiroCrewConfig:
                 subagent_spawn_stagger_secs=_safe_float(
                     agent_data.get("subagent_spawn_stagger_secs", 2.0), 2.0
                 ),
-                resource_pressure_gb=_safe_float(
-                    agent_data.get("resource_pressure_gb", 4.0), 4.0
-                ),
-                resource_critical_gb=_safe_float(
-                    agent_data.get("resource_critical_gb", 2.0), 2.0
-                ),
+                resource_pressure_gb=_safe_float(agent_data.get("resource_pressure_gb", 4.0), 4.0),
+                resource_critical_gb=_safe_float(agent_data.get("resource_critical_gb", 2.0), 2.0),
                 subagent_max_turns=agent_data.get("subagent_max_turns", 100),
                 subagent_timeout_secs=agent_data.get("subagent_timeout_secs", 1800),
                 subagent_stall_idle_secs=_safe_int(
@@ -4790,13 +4795,17 @@ class KiroCrewConfig:
                 ),
                 auto_add_documents=_read_auto_add_documents(knowledge_data),
                 auto_register_project_docs=bool(
-                    knowledge_data.get("auto_register_project_docs", True)),
+                    knowledge_data.get("auto_register_project_docs", True)
+                ),
                 auto_ingest_chunk_budget=_safe_nonnegative_int(
-                    knowledge_data.get("auto_ingest_chunk_budget", 150), 150),
+                    knowledge_data.get("auto_ingest_chunk_budget", 150), 150
+                ),
                 folder_ingest_chunk_budget=_safe_nonnegative_int(
-                    knowledge_data.get("folder_ingest_chunk_budget", 300), 300),
+                    knowledge_data.get("folder_ingest_chunk_budget", 300), 300
+                ),
                 dedup_every_n_sweeps=_safe_nonnegative_int(
-                    knowledge_data.get("dedup_every_n_sweeps", 12), 12),
+                    knowledge_data.get("dedup_every_n_sweeps", 12), 12
+                ),
                 doc_ingest_hosts=[
                     str(h)
                     for h in knowledge_data.get("doc_ingest_hosts", [])
@@ -5194,9 +5203,7 @@ class KiroCrewConfig:
                 archive_after_days=_safe_int(skills_data.get("archive_after_days", 90), 90),
                 pending_ttl_days=_safe_int(skills_data.get("pending_ttl_days", 30), 30),
                 generate_scripts=bool(skills_data.get("generate_scripts", True)),
-                judge_model=str(
-                    skills_data.get("judge_model", "auto") or "auto"
-                ),
+                judge_model=str(skills_data.get("judge_model", "auto") or "auto"),
                 extra_paths=[
                     p for p in _safe_list(skills_data.get("extra_paths")) if isinstance(p, str)
                 ],
@@ -5463,10 +5470,12 @@ class KiroCrewConfig:
     def create_provider_factory(self) -> Callable:
         """Return a factory that creates LLMProvider instances from config.
 
-        KiroCrew is KiroACP-only: the sole provider is the ACP adapter driving
-        the kiro-cli backend. The factory accepts an optional ``session_key`` to
+        The sole provider implementation drives Kiro CLI or Codex over ACP.
+        The factory accepts an optional ``session_key`` to
         create a per-session subdirectory under ``workspace_root()``.
         """
+        from kiro_crew.acp.types import ACP_BACKEND_CODEX
+        from kiro_crew.agent import acp_session_mcp_servers
         from kiro_crew.providers.acp import (
             AcpProvider,  # circular: acp -> client -> session -> config.loader
         )
@@ -5541,7 +5550,11 @@ class KiroCrewConfig:
             # …) are DISTINCT real kiro models and must pass through unchanged,
             # not get folded to Sonnet the way the claude_code path downgrades
             # them (the claude backend has no Haiku).
-            m = model_registry.to_acp_id(m) if m else m
+            if self.agent.provider == "codex_acp":
+                backend = ACP_BACKEND_CODEX
+            else:
+                backend = ""
+                m = model_registry.to_acp_id(m) if m else m
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only
@@ -5572,6 +5585,10 @@ class KiroCrewConfig:
                 mcp_gateway_overlay=_gw_overlay,
                 mcp_gateway_settings_mcp_json=_gw_settings,
                 mcp_gateway_socket=_gw_socket,
+                acp_backend=backend,
+                session_mcp_servers=(
+                    acp_session_mcp_servers(agent or "kirocrew") if backend else None
+                ),
             )
 
         return _acp

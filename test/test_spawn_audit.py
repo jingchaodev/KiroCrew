@@ -558,6 +558,10 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "cli_commands.py::_cleanup_app_crons_from_scheduler",
         "cli_doctor.py::_doctor",
         "cli_doctor.py::_doctor_mcp_tools",
+        # Read-only Kiro login diagnostic: fixed ``kiro-cli whoami`` argv, no
+        # shell, no cwd, no agent-influenced argument, and a 10-second timeout.
+        # It must use the host login rather than a sandbox-scrubbed environment.
+        "cli_doctor.py::_doctor_agent_backend",
         # Read-only diagnostic: `loginctl show-user <user> -p Linger --value`,
         # a fixed argv whose only variable is the invoking account name taken
         # from $USER/$LOGNAME (never agent-supplied). Same class as

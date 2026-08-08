@@ -39,6 +39,40 @@ _DEFAULT_MANAGED_MCPS = {
 }
 
 
+def test_acp_servers_from_map_emits_public_acp_shapes():
+    """A non-Kiro adapter must receive stdio and HTTP servers in ACP array form."""
+    import kiro_crew.agent as agent_mod
+
+    servers = {
+        "kirocrew-core": {
+            "command": "/usr/local/bin/kirocrew",
+            "args": ["mcp-core"],
+            "env": {"KIROCREW_HOME": "/tmp/crew"},
+            "autoApprove": ["spawn_status"],
+        },
+        "docs": {
+            "url": "https://example.test/mcp",
+            "headers": {"Authorization": "Bearer test"},
+        },
+        "off": {"command": "off", "disabled": True},
+    }
+
+    assert agent_mod.acp_servers_from_map(servers) == [
+        {
+            "name": "kirocrew-core",
+            "command": "/usr/local/bin/kirocrew",
+            "args": ["mcp-core"],
+            "env": [{"name": "KIROCREW_HOME", "value": "/tmp/crew"}],
+        },
+        {
+            "name": "docs",
+            "type": "http",
+            "url": "https://example.test/mcp",
+            "headers": [{"name": "Authorization", "value": "Bearer test"}],
+        },
+    ]
+
+
 def _run_install(tmp_path: Path, cfg_dir: Path, managed_mcps: dict | None = None, **kwargs) -> Path:  # type: ignore[return]
     """Run install_agent with all module globals patched to tmp_path."""
     kiro_dir = tmp_path / "kiro_agents"

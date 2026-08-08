@@ -158,6 +158,21 @@ kirocrew doctor
 kirocrew gateway
 ```
 
+To run this fork with an existing Codex login instead of Kiro CLI:
+
+```bash
+npm install -g @agentclientprotocol/codex-acp@1.1.14
+codex login status
+kirocrew config set agent.provider codex_acp
+kirocrew gateway
+```
+
+`codex-acp` reuses `~/.codex`; no Kiro login is needed. A previously installed
+`KiroCrew.app` may remain in `/Applications`, but it contains its own older
+backend. Do not run that bundle at the same time as the source gateway, and
+rebuild it with `make desktop` before expecting its launcher to use this fork's
+Codex support.
+
 ## Why Kiro Crew
 
 Most agent sessions end when the chat closes. Kiro Crew runs continuously on
@@ -424,13 +439,13 @@ main configuration with `kirocrew config get`, `set`, and `edit`.
 }
 ```
 
-`agent.provider` is fixed to `acp`. Kiro Crew drives `kiro-cli` over the Agent
-Client Protocol. Set the dashboard port with `KIROCREW_PORT` or
+`agent.provider` accepts `acp` (Kiro CLI) or `codex_acp` (the public Codex ACP
+adapter). Set the dashboard port with `KIROCREW_PORT` or
 `kirocrew gateway --port <n>`. Slack credentials live in `~/.kiro/crew/.env`
 rather than the JSON config.
 
 **Troubleshoot quickly.** Start with `kirocrew doctor`. For an ACP timeout,
-confirm `kiro-cli` is on `PATH` and logged in, then allow extra time for the
+confirm the selected backend (`kiro-cli` or `codex-acp`) is on `PATH` and logged in, then allow extra time for the
 first MCP startup. For memory search, check that the embedding
 model finished downloading under `~/.kiro/crew/models`. For a stale MCP configuration, run
 `kirocrew setup --agent-only`, or add `--clean` to rebuild it.

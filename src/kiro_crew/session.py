@@ -169,6 +169,26 @@ def _is_claude_backend(provider: Any) -> bool:
     return backend == "claude"
 
 
+def _is_codex_backend(provider: Any) -> bool:
+    """Return whether *provider* wraps the public Codex ACP adapter."""
+    backend = getattr(getattr(provider, "client", None), "backend", "")
+    return backend == "codex"
+
+
+def _is_external_acp_backend(provider: Any) -> bool:
+    """Return whether the provider owns one reconnectable ACP process per session."""
+    return _is_claude_backend(provider) or _is_codex_backend(provider)
+
+
+def _provider_label(provider: Any) -> str:
+    """Return the persisted config provider name for a live provider."""
+    if _is_claude_backend(provider):
+        return "claude_code"
+    if _is_codex_backend(provider):
+        return "codex_acp"
+    return "acp"
+
+
 def _provider_effectively_alive(provider: Any) -> bool:
     """Whether a session's provider should be treated as live (NOT stale).
 
@@ -992,9 +1012,7 @@ class SessionManager:
             return
         async with self._lock:
             if BACKGROUND_KEY not in self._sessions:
-                sess = _Session(
-                    provider=provider, is_new=False, agent=BACKGROUND_AGENT
-                )
+                sess = _Session(provider=provider, is_new=False, agent=BACKGROUND_AGENT)
                 self._sessions[BACKGROUND_KEY] = sess
                 logger.info("Background session created")
             else:
@@ -1970,11 +1988,7 @@ class SessionManager:
                 # cannot be displayed as an age directly, so project it back
                 # onto the wall clock the consumer subtracts from.
                 spawn = getattr(runtime, "_spawn_monotonic", None)
-                created = (
-                    now_wall - (now_mono - spawn)
-                    if isinstance(spawn, (int, float))
-                    else None
-                )
+                created = now_wall - (now_mono - spawn) if isinstance(spawn, (int, float)) else None
                 rows.append(
                     {
                         "key": label,
@@ -2507,7 +2521,9 @@ class SessionManager:
                         else:
                             _switch_model = model_registry.to_acp_id(model)
                             _cmp_pool = (
-                                model_registry.to_acp_id(_pool_model) if _pool_model else _pool_model
+                                model_registry.to_acp_id(_pool_model)
+                                if _pool_model
+                                else _pool_model
                             )
                         if _pool_model and _switch_model != _cmp_pool:
                             # This is an INHERITED value (the slot's persisted
@@ -2531,9 +2547,7 @@ class SessionManager:
                                 )
                             else:
                                 await provider.client.set_model(_switch_model)
-                                logger.info(
-                                    "Pool post-claim: switched model to %s", _switch_model
-                                )
+                                logger.info("Pool post-claim: switched model to %s", _switch_model)
                 logger.info(
                     "Claimed warm-pool process for %s (agent=%s)", key, agent or self._pool_agent
                 )
@@ -2569,10 +2583,10 @@ class SessionManager:
             # build_session_replay on the first prompt (provider_switch_replay flag).
             _provider_switched = False
             if resume_sid:
-                is_cc_now = (
-                    ClaudeCodeProvider is not None and isinstance(provider, ClaudeCodeProvider)
-                ) or _is_claude_backend(provider)
-                current_provider = "claude_code" if is_cc_now else "acp"
+                is_standalone_cc = ClaudeCodeProvider is not None and isinstance(
+                    provider, ClaudeCodeProvider
+                )
+                current_provider = "claude_code" if is_standalone_cc else _provider_label(provider)
                 if detect_provider_switch(self._session_map, key, current_provider):
                     resume_sid = None
                     _provider_switched = True
@@ -2687,7 +2701,7 @@ class SessionManager:
                     _cwd_str = provider.cwd
                     if not is_stateless and isinstance(provider, AcpProvider):
                         sid = provider.client._session_id
-                        _prov_label = "claude_code" if _is_claude_backend(provider) else "acp"
+                        _prov_label = _provider_label(provider)
                         if sid:
                             self._session_map.set(key, sid, provider=_prov_label, cwd=_cwd_str)
                     elif (
@@ -3006,7 +3020,7 @@ class SessionManager:
         """
         try:
             session = self._sessions.get(key)
-            if session and _is_claude_backend(session.provider):
+            if session and _is_external_acp_backend(session.provider):
                 # session_map entry stays — claude SDK preserves the same
                 # session ID across the compact_boundary, no delete needed.
                 # The timeout wraps both semaphore acquisition and compact()
@@ -3341,19 +3355,13 @@ class SessionManager:
                     try:
                         await waiter(timeout=timeout)
                     except asyncio.TimeoutError:
-                        logger.debug(
-                            "drain_active_turns: post-cancel wait_turn_done timed out"
-                        )
+                        logger.debug("drain_active_turns: post-cancel wait_turn_done timed out")
                     except Exception:
-                        logger.debug(
-                            "drain_active_turns: wait_turn_done failed", exc_info=True
-                        )
+                        logger.debug("drain_active_turns: wait_turn_done failed", exc_info=True)
 
         try:
             await asyncio.wait_for(
-                asyncio.gather(
-                    *[_drain_one(p) for p in unfinished], return_exceptions=True
-                ),
+                asyncio.gather(*[_drain_one(p) for p in unfinished], return_exceptions=True),
                 # A hair above the per-session budget so an internally-bounded
                 # cancel resolves as its own timeout rather than the gather being
                 # cancelled out from under it.
@@ -3471,7 +3479,7 @@ class SessionManager:
                         # on next startup doesn't see a missing entry, default
                         # to "acp", and falsely fire a switch for users still
                         # on claude_code.
-                        _prov_label = "claude_code" if _is_claude_backend(sess.provider) else "acp"
+                        _prov_label = _provider_label(sess.provider)
                         self._session_map.set(key, sid, provider=_prov_label, cwd=_cwd_str)
                 elif ClaudeCodeProvider is not None and isinstance(
                     sess.provider, ClaudeCodeProvider
@@ -3692,11 +3700,7 @@ class SessionManager:
         key = self._fold_key(key)
         session = self._sessions.get(key)
         if session:
-            if (
-                cleanup
-                and key.startswith(_SUBAGENT_PREFIX)
-                and not self._is_continuable_key(key)
-            ):
+            if cleanup and key.startswith(_SUBAGENT_PREFIX) and not self._is_continuable_key(key):
                 try:
                     session_id = session.provider.session_id
                     if session_id:

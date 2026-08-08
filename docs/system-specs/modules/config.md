@@ -559,7 +559,7 @@ class AgentConfig:
     approval_mode: str = "auto"    # "auto" or "interactive"
     streaming: bool = True
     model: str = "auto"            # resolved from agent config
-    provider: str = "acp"          # fixed to "acp" (kiro-cli) — the only provider
+    provider: str = "acp"          # "acp" (kiro-cli) or "codex_acp"
     sandbox: str = "auto"          # default "auto" (namespace on Linux, seatbelt on macOS; delegates to kiro-cli's internal sandbox on macOS when enabled); "off" skips Kiro Crew's sandbox
     sandbox_allow_no_isolation: bool = False  # SEC-009: acknowledge running un-isolated when no sandbox backend exists; false = loud SECURITY warning, true = info-level
     enforce_denied_commands: str = "all"  # "all" or "kirocrew"

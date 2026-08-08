@@ -24,6 +24,7 @@ from kiro_crew.acp.session_handle import AcpSessionHandle
 from kiro_crew.acp.session_provider import AcpSessionProvider
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
+    ACP_BACKEND_CODEX,
     EVENT_COMPACTION_STATUS,
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
@@ -93,7 +94,9 @@ def _write_cli_overlay(work_dir: Path, model: str, effort: str) -> None:
             model_cfg.pop(other_key, None)
     model_defaults[model] = model_cfg
     existing["chat.modelDefaults"] = model_defaults
-    atomic_write(cli_json, json.dumps(existing, indent=2))  # atomic: readers never see a partial file (#426)
+    atomic_write(
+        cli_json, json.dumps(existing, indent=2)
+    )  # atomic: readers never see a partial file (#426)
 
 
 def _write_tool_search_overlay(work_dir: Path, enabled: bool) -> None:
@@ -139,7 +142,9 @@ def _write_tool_search_overlay(work_dir: Path, enabled: bool) -> None:
         # later build flips the global default on.
         existing.pop("toolSearch.minPct", None)
         existing.pop("toolSearch.minTokens", None)
-    atomic_write(cli_json, json.dumps(existing, indent=2))  # atomic: readers never see a partial file (#426)
+    atomic_write(
+        cli_json, json.dumps(existing, indent=2)
+    )  # atomic: readers never see a partial file (#426)
 
 
 def _clear_cli_overlay_effort(work_dir: Path, model: str) -> None:
@@ -244,6 +249,7 @@ class AcpProvider(LLMProvider):
         mcp_gateway_settings_mcp_json: str | Path | None = None,
         mcp_gateway_socket: str | Path | None = None,
         permission_mode: str | None = None,
+        session_mcp_servers: list[dict[str, Any]] | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {
             "work_dir": work_dir,
@@ -260,6 +266,7 @@ class AcpProvider(LLMProvider):
             # kiro-cli path — fully inert; a companion-registered backend threads
             # it.
             "permission_mode": permission_mode,
+            "session_mcp_servers": session_mcp_servers,
         }
         if agent:
             kwargs["agent"] = agent
@@ -284,7 +291,7 @@ class AcpProvider(LLMProvider):
         # True/False = write the kiro settings overlay deterministically so the
         # KiroCrew toggle is authoritative over any global kiro setting.
         self._tool_search = tool_search
-        if not self.is_claude_backend:
+        if not self.is_external_backend:
             # Recover overlay-persisted levels (server-restart resilience) and
             # write the overlay BEFORE the first spawn so kiro-cli reads it on
             # session/new. Caller-provided overrides win — only fill gaps.
@@ -317,6 +324,16 @@ class AcpProvider(LLMProvider):
         return self._client.backend == ACP_BACKEND_CLAUDE
 
     @property
+    def is_codex_backend(self) -> bool:
+        """True when this provider talks to the public Codex ACP adapter."""
+        return self._client.backend == ACP_BACKEND_CODEX
+
+    @property
+    def is_external_backend(self) -> bool:
+        """True when the backend loads configuration from ACP session params."""
+        return self.is_claude_backend or self.is_codex_backend
+
+    @property
     def is_session_sharing_eligible(self) -> bool:
         """True when this provider can host multiplexed subagent sessions.
 
@@ -325,7 +342,7 @@ class AcpProvider(LLMProvider):
         Code backend uses AcpClient (one process per session) and is never
         eligible, so subagents fall back to the legacy per-process path.
         """
-        return not self.is_claude_backend
+        return not self.is_external_backend
 
     async def _start_kiro_runtime(self) -> None:
         """Spawn an AcpRuntime + session; time the kiro cold-start split.
@@ -759,7 +776,7 @@ class AcpProvider(LLMProvider):
         the model is not effort-capable or no level resolves. Called before
         every (re)spawn so resume/restart keeps the same level.
         """
-        if self.is_claude_backend:
+        if self.is_external_backend:
             return
         model = self._client._model
         level = self._resolve_effort()
@@ -778,7 +795,7 @@ class AcpProvider(LLMProvider):
         when no toggle value was supplied (``self._tool_search is None``).
         Called before every (re)spawn so resume/restart keeps the same setting.
         """
-        if self.is_claude_backend or self._tool_search is None:
+        if self.is_external_backend or self._tool_search is None:
             return
         try:
             _write_tool_search_overlay(self._client._work_dir, self._tool_search)
@@ -863,7 +880,7 @@ class AcpProvider(LLMProvider):
         # Older claude-agent-acp builds advertise no 'effort' config option;
         # attempting to push would fail with 'Unknown config option' and reset
         # the session. Report unsupported so the dashboard leaves the UI as-is.
-        if self.is_claude_backend and not self._client.supports_config_option("effort"):
+        if self.is_external_backend and not self._client.supports_config_option("effort"):
             logger.info("change_effort skipped — claude-agent-acp build exposes no 'effort' option")
             return False
         # Accept any level the dynamic validation set knows about — ACP backends
@@ -884,7 +901,7 @@ class AcpProvider(LLMProvider):
         self._effort_per_model[model] = level
         self._apply_effort_overlay()
         try:
-            if self.is_claude_backend:
+            if self.is_external_backend:
                 await self._set_claude_effort(level)
             else:
                 await self._client.send_command("/effort", args={"level": level})
@@ -892,7 +909,7 @@ class AcpProvider(LLMProvider):
             # Roll back to the prior state before propagating to the caller.
             if _prev is None:
                 self._effort_per_model.pop(model, None)
-                if not self.is_claude_backend:
+                if not self.is_external_backend:
                     _clear_cli_overlay_effort(self._client._work_dir, model)
             else:
                 self._effort_per_model[model] = _prev
@@ -905,7 +922,7 @@ class AcpProvider(LLMProvider):
             "ACP effort live-changed: model=%s effort=%s backend=%s",
             model,
             level,
-            "claude" if self.is_claude_backend else "kiro",
+            self._client.backend or "kiro",
         )
         return True
 
@@ -930,7 +947,7 @@ class AcpProvider(LLMProvider):
         if not model_supports_effort(model):
             return False
         self._effort_per_model.pop(model, None)
-        if self.is_claude_backend:
+        if self.is_external_backend:
             # No live "reset to default" — caller must reset the session.
             logger.info("ACP effort cleared (claude); session reset needed for default")
             return False
@@ -953,7 +970,7 @@ class AcpProvider(LLMProvider):
         self._apply_effort_overlay()
         self._apply_tool_search_overlay()
 
-        if not self.is_claude_backend:
+        if not self.is_external_backend:
             # ── Kiro unified path: AcpRuntime + AcpSessionHandle ──
             # Spawn a runtime, create/resume a session, wrap in
             # AcpSessionProvider. One process hosts parent + all subagent
@@ -976,7 +993,7 @@ class AcpProvider(LLMProvider):
         must not break session start. The kiro backend already gets effort
         from the cli.json overlay at spawn, so this is a no-op there.
         """
-        if not self.is_claude_backend:
+        if not self.is_external_backend:
             return
         level = self._resolve_effort()
         if not level:
@@ -1041,7 +1058,7 @@ class AcpProvider(LLMProvider):
         # /experiment, /hooks) flow through as conversational prompt text;
         # this is a softer failure mode than the previous -32601
         # "Method not found" hard error.
-        if self.is_claude_backend:
+        if self.is_external_backend:
             async for e in self._client.stream_events(command):
                 yield self._to_llm_event(e)
             return

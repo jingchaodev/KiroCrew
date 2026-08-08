@@ -700,7 +700,7 @@ class TestAcpClientSessionKey:
 
 
 class TestAcpClientBackendSelection:
-    """Verify the right backend binary is launched for kiro vs claude."""
+    """Verify the right backend binary is launched for each ACP backend."""
 
     @pytest.fixture(autouse=True)
     def _reset_claude_cache(self):
@@ -765,6 +765,39 @@ class TestAcpClientBackendSelection:
         ):
             with pytest.raises(AcpError, match="claude-agent-acp not found"):
                 await client._spawn()
+
+    @pytest.mark.asyncio
+    async def test_spawn_codex_backend_uses_configured_adapter(self, tmp_path):
+        """A Codex selection must never fall through to the kiro-cli launcher."""
+        codex_acp = tmp_path / "codex-acp"
+        codex_acp.write_text("#!/bin/sh\n", encoding="utf-8")
+        codex_acp.chmod(0o755)
+        codex_path = "/Applications/ChatGPT.app/Contents/Resources/codex"
+        client = AcpClient(
+            work_dir=tmp_path,
+            acp_backend="codex",
+            extra_env={"CODEX_PATH": codex_path},
+        )
+        with (
+            patch.dict(os.environ, {"CODEX_ACP_BIN": str(codex_acp)}, clear=False),
+            patch("kiro_crew.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"),
+            patch(
+                "kiro_crew.acp.client.wrap_argv",
+                side_effect=lambda argv, mode, **kwargs: (argv, None),
+            ),
+            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("kiro_crew.session._track_pid"),
+            patch("kiro_crew.session._track_session_pid"),
+        ):
+            mock_proc = MagicMock(pid=12345, returncode=None)
+            mock_proc.stderr = None
+            mock_exec.return_value = mock_proc
+
+            await client._spawn()
+
+            argv = list(strip_spawn_shim(mock_exec.call_args.args))
+            assert argv == [str(codex_acp)]
+            assert mock_exec.call_args.kwargs["env"]["CODEX_PATH"] == codex_path
 
     @pytest.mark.asyncio
     async def test_spawn_kiro_backend_unchanged(self, tmp_path):
@@ -3579,6 +3612,83 @@ class TestInitializeSession:
         client._drain_notifications.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_codex_uses_standard_protocol_and_config_options(self, tmp_path):
+        """Codex speaks ACP v1 and must not receive Kiro's agent mode id."""
+        client = self._make_client(tmp_path, acp_backend="codex", model="gpt-test")
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_send(method, params):
+            calls.append((method, params))
+            return len(calls)
+
+        async def fake_wait(req_id, timeout=50.0):
+            if req_id == 1:
+                return {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
+            if req_id == 2:
+                return {
+                    "sessionId": "codex-session",
+                    "modes": {
+                        "availableModes": [{"id": "read-only"}, {"id": "agent"}],
+                        "currentModeId": "read-only",
+                    },
+                    "configOptions": [
+                        {"id": "model", "type": "select", "currentValue": "gpt-default"}
+                    ],
+                }
+            return {}
+
+        client._send_request = fake_send  # type: ignore[assignment]
+        client._wait_for_response = fake_wait  # type: ignore[assignment]
+        client._drain_notifications = AsyncMock()  # type: ignore[assignment]
+
+        await client._initialize_session()
+
+        assert calls[0][1]["protocolVersion"] == 1
+        assert "elicitation" not in calls[0][1]["clientCapabilities"]
+        assert all(method != "session/set_mode" for method, _ in calls)
+        assert (
+            "session/set_config_option",
+            {
+                "sessionId": "codex-session",
+                "configId": "model",
+                "value": "gpt-test",
+            },
+        ) in calls
+
+    @pytest.mark.asyncio
+    async def test_codex_session_new_receives_explicit_mcp_servers(self, tmp_path):
+        """External adapters need Kiro Crew's tools in the ACP request itself."""
+        client = self._make_client(tmp_path, acp_backend="codex")
+        client._session_mcp_servers = [
+            {
+                "name": "kirocrew-core",
+                "command": "/usr/local/bin/kirocrew",
+                "args": ["mcp-core"],
+                "env": [{"name": "KIROCREW_HOME", "value": "/tmp/crew"}],
+            }
+        ]
+        sent: list[tuple[str, dict]] = []
+
+        async def fake_send(method, params):
+            sent.append((method, params))
+            return 1
+
+        client._send_request = fake_send  # type: ignore[assignment]
+        client._wait_for_response = AsyncMock(return_value={"sessionId": "codex-session"})
+
+        await client._new_session_following_substitution()
+
+        assert sent == [
+            (
+                "session/new",
+                {
+                    "cwd": str(tmp_path),
+                    "mcpServers": client._session_mcp_servers,
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
     async def test_session_resume_success(self, tmp_path):
         """session/load succeeds when file exists and kiro-cli supports it."""
         client = self._make_client(tmp_path)
@@ -4274,6 +4384,26 @@ class TestSendCommand:
         assert result == "[redacted]"
 
 
+class TestSteering:
+    @pytest.mark.asyncio
+    async def test_codex_uses_public_adapter_steering_extension(self, tmp_path):
+        from kiro_crew.acp.types import ACP_BACKEND_CODEX
+
+        client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CODEX)
+        client._session_id = "codex-session"
+        client._send_request = AsyncMock(return_value=12)
+
+        assert client.supports_steer is True
+        assert await client.steer("change direction") is True
+        client._send_request.assert_awaited_once_with(
+            "_session/steering",
+            {
+                "sessionId": "codex-session",
+                "prompt": [{"type": "text", "text": "change direction"}],
+            },
+        )
+
+
 class TestCancelSession:
     """Tests for cancel_session."""
 
@@ -4453,6 +4583,36 @@ class TestExtractToolEvent:
         assert event is not None
         assert event.kind == EVENT_TOOL_CALL
         assert event.title == "Read"
+
+    def test_codex_mcp_metadata_populates_trusted_identity(self, tmp_path):
+        from kiro_crew.acp.types import ACP_BACKEND_CODEX, JsonRpcMessage
+
+        client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CODEX)
+        msg = JsonRpcMessage(
+            method="session/update",
+            params={
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "codex-mcp-1",
+                    "title": "mcp.kirocrew-cron.cron_list",
+                    "kind": "execute",
+                    "rawInput": {
+                        "server": "kirocrew-cron",
+                        "tool": "cron_list",
+                        "arguments": {},
+                    },
+                    "_meta": {"is_mcp_tool_call": True},
+                }
+            },
+        )
+
+        event = client._extract_tool_event(msg)
+
+        assert event is not None
+        assert event.mcp_server_name == "kirocrew-cron"
+        assert event.tool_name == "cron_list"
+        assert client._tool_call_mcp_server["codex-mcp-1"] == "kirocrew-cron"
+        assert client._tool_call_tool_name["codex-mcp-1"] == "cron_list"
 
     def test_tool_call_with_diff_content(self):
         client = AcpClient()
@@ -7009,15 +7169,11 @@ class TestIsTransientRawError:
         # Session expiry with a co-occurring 5xx token: the session-expiry
         # branch must win (checked first).
         assert (
-            _is_transient_raw_error(
-                {"data": "DispatchFailure: session expired", "message": ""}
-            )
+            _is_transient_raw_error({"data": "DispatchFailure: session expired", "message": ""})
             is False
         )
         assert (
-            _is_transient_raw_error(
-                {"data": "ConnectionResetError: not logged in", "message": ""}
-            )
+            _is_transient_raw_error({"data": "ConnectionResetError: not logged in", "message": ""})
             is False
         )
         # A bare 401/403 — the shape an expired session actually arrives in.

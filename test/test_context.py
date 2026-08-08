@@ -215,9 +215,7 @@ class TestContextBuilder:
         """With the flag set on a continuing session, the index comes back
         wrapped in the marker so the model can still discover skills."""
         builder = self._reinject_builder(tmp_path)
-        msg, _ = builder.build_message(
-            "carry on", is_new_session=False, needs_reinjection=True
-        )
+        msg, _ = builder.build_message("carry on", is_new_session=False, needs_reinjection=True)
         assert "[REINJECTED AFTER COMPACTION" in msg
         assert "[END REINJECTED]" in msg
         assert "widget-maker" in msg, "the re-injected block must carry the skill index"
@@ -232,9 +230,7 @@ class TestContextBuilder:
         """A new session already gets the index from the session context;
         re-injecting would duplicate it in the same prompt."""
         builder = self._reinject_builder(tmp_path)
-        msg, _ = builder.build_message(
-            "first turn", is_new_session=True, needs_reinjection=True
-        )
+        msg, _ = builder.build_message("first turn", is_new_session=True, needs_reinjection=True)
         assert "[REINJECTED AFTER COMPACTION" not in msg
 
     def test_no_reinjection_for_an_unmapped_custom_agent(self, tmp_path):
@@ -924,7 +920,7 @@ class TestLoadSteeringResources:
 
         assert "SECRET" not in result
 
-    def test_steering_injected_for_cc_but_not_acp(self, tmp_path):
+    def test_steering_injected_for_external_acp_but_not_kiro(self, tmp_path):
         """kiro-cli loads an agent's ``resources`` natively when spawned with
         ``--agent`` (acp/client.py ``_spawn``), so build_session_context must
         NOT re-inject steering on the ACP backend — that would duplicate what
@@ -950,9 +946,13 @@ class TestLoadSteeringResources:
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             cc_ctx = builder.build_session_context(provider_type="claude_code")
+            codex_ctx = builder.build_session_context(provider_type="codex_acp")
             acp_ctx = builder.build_session_context(provider_type="acp")
 
         assert "STEERING_MARKER_XYZ" in cc_ctx, "CC backend must get explicit steering load"
+        assert (
+            "STEERING_MARKER_XYZ" in codex_ctx
+        ), "Codex ACP does not load Kiro agent resources and must get explicit steering"
         assert "STEERING_MARKER_XYZ" not in acp_ctx, (
             "ACP backend must NOT re-inject steering — kiro-cli loads agent "
             "resources natively via --agent"

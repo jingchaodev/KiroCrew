@@ -16,7 +16,7 @@ from pathlib import Path
 
 from kiro_crew import __version__ as _mc_version
 from kiro_crew import diagnostics, platform_compat
-from kiro_crew.acp.client import KIRO_CLI_BIN
+from kiro_crew.acp.client import KIRO_CLI_BIN, _resolve_codex_acp_bin
 from kiro_crew.agent import AGENT_FILENAME
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config import KiroCrewConfig
@@ -98,6 +98,43 @@ def _os_fix_hint(mac: str, linux: str, windows: str | None = None) -> str:
 # companion re-registers (see acp/client.py) — report it, when present, as that
 # optional seam rather than as a user-facing backend.
 _CLAUDE_ACP_BIN = "claude-agent-acp"
+
+
+def _doctor_agent_backend(provider: str, issues: list[str]) -> tuple[str, str | None]:
+    """Report the configured ACP backend and return its resolved executable."""
+    if provider == "codex_acp":
+        argv = _resolve_codex_acp_bin()
+        if argv:
+            print(f"  codex-acp:   ✅ {argv[0]}")
+            return provider, argv[0]
+        print("  codex-acp:   ❌ not found (the selected agent backend)")
+        print("               Install: npm install -g @agentclientprotocol/codex-acp@1.1.14")
+        issues.append("codex-acp")
+        return provider, None
+
+    kiro = shutil.which(KIRO_CLI_BIN)
+    if kiro:
+        print(f"  kiro-cli:    ✅ {kiro}")
+        # Check login status -- best-effort, never a hard failure.
+        try:
+            result = subprocess.run(
+                [KIRO_CLI_BIN, "whoami"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                print("  kiro login:  ✅")
+            else:
+                print("  kiro login:  ⏹ not logged in (run: kiro-cli login)")
+        except Exception:
+            print("  kiro login:  ⚠️  could not check")
+    else:
+        print("  kiro-cli:    ❌ not found (the selected agent backend)")
+        print("               Install kiro-cli per its docs, then: kiro-cli login")
+        issues.append("kiro-cli")
+    return "acp", kiro
+
 
 # Managed servers doctor must NEVER add to ``allowedTools``.
 #
@@ -551,29 +588,12 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
 
     # ── Dependencies ──
     print("Dependencies")
-    # kiro-cli is THE agent backend for the public build. claude-agent-acp is
-    # only the dormant protocol seam (re-registered by an internal companion),
-    # so report it as optional and report kiro-cli as the backend.
-    kiro = shutil.which(KIRO_CLI_BIN)
-    if kiro:
-        print(f"  kiro-cli:    ✅ {kiro}")
-        # Check login status — best-effort, never a hard failure
-        try:
-            r = subprocess.run(
-                [KIRO_CLI_BIN, "whoami"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if r.returncode == 0:
-                print("  kiro login:  ✅")
-            else:
-                print("  kiro login:  ⏹ not logged in (run: kiro-cli login)")
-        except Exception:
-            print("  kiro login:  ⚠️  could not check")
-    else:
-        print("  kiro-cli:    ⏭  not found (the agent backend)")
-        print("               Install kiro-cli per its docs, then: kiro-cli login")
+    try:
+        selected_provider = KiroCrewConfig.load().agent.provider
+    except Exception:
+        selected_provider = "acp"
+    backend, backend_executable = _doctor_agent_backend(selected_provider, issues)
+    kiro = backend_executable if backend == "acp" else None
 
     claude_acp = shutil.which(_CLAUDE_ACP_BIN)
     if claude_acp:
@@ -949,7 +969,12 @@ def _doctor(platform_boot_error: "Exception | None" = None, bundle: bool = False
 
     # ── Connectivity ──
     print("\nConnectivity")
-    if kiro:
+    if backend == "codex_acp":
+        if backend_executable:
+            print("  codex-acp:   ✅ adapter resolved (session handshake checked at first chat)")
+        else:
+            print("  codex-acp:   ❌ adapter unavailable")
+    elif kiro:
         kiro_result = subprocess.run(
             [KIRO_CLI_BIN, "--version"], capture_output=True, text=True, timeout=5
         )

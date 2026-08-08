@@ -142,9 +142,9 @@ class TestSessionManager:
         finally:
             mgr._recycling.pop("thread1", None)
 
-        assert replacement.needs_context_reinjection is False, (
-            "a recycle must not flag the fresh replacement session"
-        )
+        assert (
+            replacement.needs_context_reinjection is False
+        ), "a recycle must not flag the fresh replacement session"
         assert mgr.consume_needs_reinjection("thread1") is False
         await mgr.close_all()
 
@@ -2671,6 +2671,14 @@ class TestCompaction:
 
 class TestClaudeBackendCompaction:
     """Claude-agent-acp autocompact runs /compact in place — no recycle."""
+
+    def test_codex_backend_has_distinct_persisted_provider_label(self):
+        from kiro_crew.session import _provider_label
+
+        provider = MagicMock()
+        provider.client.backend = "codex"
+
+        assert _provider_label(provider) == "codex_acp"
 
     @pytest.mark.asyncio
     async def test_compact_session_claude_runs_in_place(self, cfg):

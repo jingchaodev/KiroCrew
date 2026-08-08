@@ -71,6 +71,18 @@ class TestStreamCommandRouting:
         assert len(events) == 1
         assert events[0].text == "ok"
 
+    @pytest.mark.asyncio
+    async def test_codex_backend_uses_per_session_client(self):
+        provider = _build_provider(backend="codex")
+        provider._client.ensure_ready = AsyncMock()
+        provider._client.supports_config_option = MagicMock(return_value=False)
+        provider._start_kiro_runtime = AsyncMock()
+
+        await provider.start()
+
+        provider._client.ensure_ready.assert_awaited_once()
+        provider._start_kiro_runtime.assert_not_awaited()
+
 
 class TestToLlmEventFieldPropagation:
     """The provider reconstructs each AcpEvent via _to_llm_event; new fields

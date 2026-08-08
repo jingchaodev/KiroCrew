@@ -24,13 +24,14 @@ own gate model is [computer-use](../system-specs/modules/computer-use.md).
 
 | File | Owner | Purpose | Read by |
 |------|-------|---------|---------|
-| `~/.kiro/agents/kirocrew.json` | Kiro Crew gateway (`agent.rebuild_agent_config`) | The rendered Kiro agent: model + tools + merged `mcpServers` | kiro-cli, when spawned as the `kirocrew` agent |
+| `~/.kiro/agents/kirocrew.json` | Kiro Crew gateway (`agent.rebuild_agent_config`) | The rendered agent source: model + tools + merged `mcpServers` | kiro-cli directly; Kiro Crew converts its MCP map to public ACP shapes for Codex |
 | `~/.kiro/settings/mcp.json` | User | Kiro global MCP servers | kiro-cli for all agents; merged into Kiro Crew's agent file at render time |
 | `~/.kiro/crew/mcp.json` | User, via the dashboard MCP panel | specific to Kiro Crew additions and per-server tool disables | Kiro Crew gateway only |
 
 `rebuild_agent_config()` writes exactly **one** file, `~/.kiro/agents/kirocrew.json`.
-There is no second rendered agent file and no agent-file renderer for any other
-provider: Kiro Crew is KiroACP-only.
+There is no second rendered agent file. Codex does not read the Kiro file;
+`acp_session_mcp_servers()` translates enabled stdio/HTTP entries and passes
+them in ACP `session/new` / `session/load` parameters.
 
 ### Provider-global scopes come from the platform seam, not the core
 

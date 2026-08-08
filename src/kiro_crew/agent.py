@@ -456,6 +456,59 @@ _MANAGED_MCP_SERVERS: dict[str, dict] = {
 }
 
 
+def _acp_name_value_pairs(value: object) -> list[dict[str, str]]:
+    """Convert a Kiro mapping into ACP's ordered name/value representation."""
+    if isinstance(value, dict):
+        return [
+            {"name": str(name), "value": str(item)}
+            for name, item in value.items()
+            if isinstance(name, str) and isinstance(item, (str, int, float, bool))
+        ]
+    if isinstance(value, list):
+        return [
+            {"name": str(item["name"]), "value": str(item["value"])}
+            for item in value
+            if isinstance(item, dict) and "name" in item and "value" in item
+        ]
+    return []
+
+
+def acp_servers_from_map(servers: object) -> list[dict[str, Any]]:
+    """Translate Kiro's named MCP map into the public ACP server array."""
+    if not isinstance(servers, dict):
+        return []
+    result: list[dict[str, Any]] = []
+    for name, raw_spec in servers.items():
+        if not isinstance(name, str) or not isinstance(raw_spec, dict):
+            continue
+        if raw_spec.get("disabled") is True:
+            continue
+        url = raw_spec.get("url")
+        if isinstance(url, str) and url:
+            result.append(
+                {
+                    "name": name,
+                    "type": str(raw_spec.get("type") or "http"),
+                    "url": url,
+                    "headers": _acp_name_value_pairs(raw_spec.get("headers")),
+                }
+            )
+            continue
+        command = raw_spec.get("command")
+        if not isinstance(command, str) or not command:
+            continue
+        args = raw_spec.get("args")
+        result.append(
+            {
+                "name": name,
+                "command": command,
+                "args": [str(arg) for arg in args] if isinstance(args, list) else [],
+                "env": _acp_name_value_pairs(raw_spec.get("env")),
+            }
+        )
+    return result
+
+
 def _extra_mcp_servers() -> dict[str, dict]:
     """Edition-contributed MCP servers from the active PlatformContext.
 
@@ -1539,6 +1592,15 @@ def build_agent_config() -> dict:
     # spec. build_agent_config stays pure (no disk writes) so its many
     # read-only callers don't mutate managed-state as a side effect.
     return config
+
+
+def acp_session_mcp_servers(agent: str = "kirocrew") -> list[dict[str, Any]]:
+    """Resolve an agent's MCP servers for adapters that do not read Kiro files."""
+    if not agent or agent == "kirocrew":
+        config = build_agent_config()
+    else:
+        config = _load_json(kiro_agents_dir_path() / f"{agent}.json")
+    return acp_servers_from_map(config.get("mcpServers", {}))
 
 
 def _refresh_dynamic_fields(config: dict) -> None:
@@ -2743,9 +2805,7 @@ def ensure_agent_materialized(agent: str | None) -> bool:
         rebuild_agent_config()
         return agent_file.exists()
     except Exception:
-        logger.warning(
-            "ensure_agent_materialized failed for agent %r", agent, exc_info=True
-        )
+        logger.warning("ensure_agent_materialized failed for agent %r", agent, exc_info=True)
         return False
 
 

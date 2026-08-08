@@ -462,8 +462,8 @@ than an automatic readiness failure.
 > isolation seed, and the `kirocrew doctor` surfacing of over-broad
 > `permissions.deny` rules) guarded against a user's `~/.claude/settings.json`
 > `Bash(*)` rule aborting commands upstream of KiroCrew's gate. It was specific
-> to the `claude-agent-acp` backend and was **deleted** when KiroCrew became
-> KiroACP / `kiro-cli`-only (`agent.provider` fixed to `acp`). kiro-cli's
+> to the `claude-agent-acp` backend and was **deleted** when the standalone
+> Claude provider was removed. The Kiro backend's
 > permission model routes every tool decision back through KiroCrew's
 > `HookManager.on_tool_call` gate, so there is no equivalent upstream-deny gap.
 

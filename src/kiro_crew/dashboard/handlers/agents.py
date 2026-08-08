@@ -669,6 +669,77 @@ def _advertised_cc_models(request: web.Request) -> list[dict]:
     return []
 
 
+def _codex_models(request: web.Request) -> list[dict]:
+    """Return the live Codex ACP catalog in dashboard wire format.
+
+    ``codex-acp`` exposes the legacy ACP ``models.availableModels`` list as one
+    row per (model, reasoning-effort) pair, for example
+    ``gpt-5.6-sol[low]`` and ``gpt-5.6-sol[high]``.  Kiro Crew already controls
+    reasoning effort through Kiro Crew's separate ``effort`` config option, while its
+    model switch uses the ``model`` config option.  That option accepts the base
+    id only, so collapse the legacy rows to one base-model row here.
+
+    The list comes from a live session rather than a static catalog because it
+    is also the account-entitlement signal.  An empty result is therefore
+    "not ready", not "this account has no models"; :func:`api_models` turns it
+    into a 503 so the frontend keeps polling until a Codex session initializes.
+    """
+    try:
+        state: DashboardState = request.app["state"]
+        providers = state.sessions.active_providers()
+    except (KeyError, AttributeError):
+        return []
+
+    for provider in reversed(providers):
+        getter = getattr(provider, "available_models", None)
+        if not callable(getter):
+            continue
+        try:
+            advertised = getter()
+        except Exception:
+            continue
+        if not advertised:
+            continue
+
+        rows: list[dict] = [
+            {
+                "model_name": "auto",
+                "display_name": "Auto",
+                "description": "Use the model configured by Codex",
+                "context_window": model_registry.model_window("auto")
+                or model_registry.REFERENCE_WINDOW_TOKENS,
+            }
+        ]
+        seen: set[str] = {"auto"}
+        for item in advertised:
+            if not isinstance(item, dict):
+                continue
+            legacy_id = str(item.get("modelId") or "").strip()
+            if not legacy_id:
+                continue
+            # codex-acp's legacy model state encodes effort as ``model[effort]``.
+            # Only remove a terminal bracket group; brackets elsewhere remain a
+            # literal part of a forward-compatible model id.
+            base_id = re.sub(r"\[[^\[\]]+\]$", "", legacy_id).strip()
+            key = base_id.lower()
+            if not base_id or key in seen:
+                continue
+            seen.add(key)
+            display = str(item.get("name") or base_id)
+            display = re.sub(r"\s+\([^()]+\)$", "", display).strip() or base_id
+            rows.append(
+                {
+                    "model_name": base_id,
+                    "display_name": display,
+                    "description": str(item.get("description") or ""),
+                    "context_window": model_registry.model_window(base_id)
+                    or model_registry.REFERENCE_WINDOW_TOKENS,
+                }
+            )
+        return rows if len(rows) > 1 else []
+    return []
+
+
 def _entitled_kiro_models(request: web.Request, models: list[dict]) -> list[dict]:
     """Narrow the ``--list-models`` catalog to what a live session advertises.
 
@@ -832,8 +903,11 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
             # After "auto", never before it: "auto" is the configured default in
             # the general case and leads the list.
             merged.insert(
-                1 if merged and _normalize_model_key(merged[0].get("model_name", "")) == "auto"
-                else 0,
+                (
+                    1
+                    if merged and _normalize_model_key(merged[0].get("model_name", "")) == "auto"
+                    else 0
+                ),
                 {
                     "model_name": canonical_default,
                     "display_name": canonical_default,
@@ -854,6 +928,22 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
 
 async def api_models(request: web.Request) -> web.Response:
     """GET /api/models — list available models from the live kiro-cli ACP session."""
+    cfg = KiroCrewConfig.load()
+    if cfg.agent.provider == "codex_acp":
+        models = _codex_models(request)
+        if not models:
+            # A successful auto-only/empty response is cached by the frontend as
+            # a complete catalog.  503 keeps its degraded-list retry loop alive
+            # until the first Codex ACP session advertises account entitlements.
+            return web.json_response(
+                {
+                    "error": "codex model list not ready",
+                    "code": "codex_models_not_ready",
+                },
+                status=503,
+            )
+        return web.json_response(models)
+
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
     # (--no-interactive does not suppress it, and there is no opt-out env var),

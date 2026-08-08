@@ -19,8 +19,9 @@ check fails it prints a specific fix command.
 
 ### "kiro-cli not found in PATH"
 
-`kiro-cli` is the agent backend and is required: `agent.provider` is fixed to
-`acp`, and the gateway spawns `kiro-cli acp --agent <name>` for every session.
+This error applies when `agent.provider=acp`; the gateway then spawns
+`kiro-cli acp --agent <name>` for every session. With
+`agent.provider=codex_acp`, verify `codex-acp` instead.
 
 ```bash
 which kiro-cli   # should print a path; empty means it is not on PATH

@@ -38,6 +38,33 @@ class TestFixHint:
         assert cli_doctor._os_fix_hint("brew x", "linux x") == "linux x"
 
 
+class TestAgentBackend:
+    """Doctor reports the backend selected in config, not a hard-coded Kiro CLI."""
+
+    def test_codex_backend_reports_adapter_without_requiring_kiro(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setattr(cli_doctor, "_resolve_codex_acp_bin", lambda: ["/opt/bin/codex-acp"])
+        issues: list[str] = []
+
+        backend, executable = cli_doctor._doctor_agent_backend("codex_acp", issues)
+
+        assert (backend, executable) == ("codex_acp", "/opt/bin/codex-acp")
+        assert "codex-acp:   ✅ /opt/bin/codex-acp" in capsys.readouterr().out
+        assert issues == []
+
+    def test_missing_codex_adapter_is_actionable(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(cli_doctor, "_resolve_codex_acp_bin", lambda: None)
+        issues: list[str] = []
+
+        backend, executable = cli_doctor._doctor_agent_backend("codex_acp", issues)
+
+        assert (backend, executable) == ("codex_acp", None)
+        out = capsys.readouterr().out
+        assert "npm install -g @agentclientprotocol/codex-acp@1.1.14" in out
+        assert issues == ["codex-acp"]
+
+
 class TestDataHome:
     """`kirocrew doctor` Data Home section — location + leftover legacy home."""
 

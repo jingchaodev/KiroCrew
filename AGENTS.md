@@ -10,8 +10,8 @@ open before touching that subsystem: see
 
 Kiro Crew is an open-source personal AI agent: chat from Slack, a web dashboard, or
 the CLI; run multi-step tasks unattended; schedule cron jobs; keep memory across
-sessions. It drives an LLM through the KiroACP provider (the ACP adapter running
-`kiro-cli` over ACP JSON-RPC) plus MCP tools.
+sessions. It drives an LLM through ACP: either KiroACP (`kiro-cli`) or the
+public Codex ACP adapter, plus MCP tools.
 
 - **Backend:** Python package `kiro_crew` in `src/kiro_crew/`.
 - **Frontend:** React + TS + Vite SPA in `website/`; the built `dist/` is staged
@@ -74,10 +74,10 @@ This repo is the de-Amazoned public fork of an internal package. Never re-add:
 - **Keep these stubbed** (public symbols preserved as no-ops so the import graph
   holds): `sso_status.py`, `browser/auth.py`, `dashboard/handlers/sso_login.py`,
   `tunnel/manager.py`, `aim_agents.py`.
-- **Other providers.** Kiro Crew is KiroACP-only: `agent.provider` is fixed to
-  `acp` and kiro-cli is REQUIRED. Keep the dormant `ACP_BACKEND_CLAUDE` /
-  `_is_claude` seam in `acp/client.py` so an internal companion can re-register
-  Claude Code; do NOT re-add the public registration glue.
+- **Unscoped providers.** This fork supports `acp` (Kiro) and `codex_acp`
+  through the same ACP boundary. Keep the dormant `ACP_BACKEND_CLAUDE` /
+  `_is_claude` seam, but do not add provider-specific behavior outside the ACP
+  client/provider seam.
 - **OSS-flipped defaults:** always-on in-process embeddings, Piper TTS by default,
   a default-open Slack enterprise gate, lazy STT extras.
 - **Fork UX divergences:** the Channels app is hidden from the App Store and the

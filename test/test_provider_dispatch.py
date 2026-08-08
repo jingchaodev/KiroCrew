@@ -21,16 +21,14 @@ class TestAcpPerAgentModel:
 
     @staticmethod
     def _acp_cfg():
-        # KiroCrew is KiroACP-only, so the factory is always acp; a plain
-        # instance keeps construction side-effect-free (AcpProvider.__init__
-        # builds an AcpClient without spawning kiro-cli).
+        # A plain config selects the default Kiro ACP backend and keeps
+        # construction side-effect-free (AcpProvider.__init__ builds an
+        # AcpClient without spawning kiro-cli).
         return KiroCrewConfig()
 
     def test_custom_agent_threads_its_declared_model(self):
         cfg = self._acp_cfg()
-        with patch.object(
-            KiroCrewConfig, "_resolve_named_agent_model", return_value="gpt-5.6-sol"
-        ):
+        with patch.object(KiroCrewConfig, "_resolve_named_agent_model", return_value="gpt-5.6-sol"):
             provider = cfg.create_provider_factory()(
                 session_key="cron:job:run", agent="smle-triage-canary"
             )
@@ -41,9 +39,7 @@ class TestAcpPerAgentModel:
 
     def test_model_override_wins_over_agent_model(self):
         cfg = self._acp_cfg()
-        with patch.object(
-            KiroCrewConfig, "_resolve_named_agent_model", return_value="gpt-5.6-sol"
-        ):
+        with patch.object(KiroCrewConfig, "_resolve_named_agent_model", return_value="gpt-5.6-sol"):
             provider = cfg.create_provider_factory()(
                 session_key="cron:job:run",
                 agent="smle-triage-canary",
@@ -86,9 +82,7 @@ class TestAcpPerAgentModel:
         # The new global fallback must not overtake an agent that pins a model.
         cfg = self._acp_cfg()
         cfg.agent.model = "claude-sonnet-4.6"
-        with patch.object(
-            KiroCrewConfig, "_resolve_named_agent_model", return_value="gpt-5.6-sol"
-        ):
+        with patch.object(KiroCrewConfig, "_resolve_named_agent_model", return_value="gpt-5.6-sol"):
             provider = cfg.create_provider_factory()(
                 session_key="cron:job:run", agent="pinned-agent"
             )
@@ -100,9 +94,31 @@ class TestAcpPerAgentModel:
         # also carries a cc_model still runs its kiro model. Asserted on the real
         # resolver via its agents_dir seam, locking the resolver's contract.
         (tmp_path / "kiro-cc.json").write_text(
-            json.dumps({"name": "kiro-cc", "model": "gpt-5.6-sol",
-                        "cc_model": "claude-opus-4.6"})
+            json.dumps({"name": "kiro-cc", "model": "gpt-5.6-sol", "cc_model": "claude-opus-4.6"})
         )
-        assert KiroCrewConfig._resolve_named_agent_model(
-            "kiro-cc", agents_dir=tmp_path
-        ) == "gpt-5.6-sol"
+        assert (
+            KiroCrewConfig._resolve_named_agent_model("kiro-cc", agents_dir=tmp_path)
+            == "gpt-5.6-sol"
+        )
+
+
+def test_codex_provider_factory_selects_adapter_and_injects_agent_mcps():
+    """Selecting codex_acp must construct an external ACP provider with tools."""
+    cfg = KiroCrewConfig()
+    cfg.agent.provider = "codex_acp"
+    cfg.agent.model = "gpt-test"
+    mcp_servers = [
+        {
+            "name": "kirocrew-core",
+            "command": "/usr/local/bin/kirocrew",
+            "args": ["mcp-core"],
+            "env": [],
+        }
+    ]
+    with patch("kiro_crew.agent.acp_session_mcp_servers", return_value=mcp_servers):
+        provider = cfg.create_provider_factory()(session_key="dashboard:default")
+
+    assert provider.client.backend == "codex"
+    assert provider.client._model == "gpt-test"
+    assert provider.client._session_mcp_servers == mcp_servers
+    assert provider.is_session_sharing_eligible is False

@@ -50,11 +50,17 @@ logger = logging.getLogger("kiro_crew.config.loader")
 # Fields with enum constraints and their allowed values
 _ENUM_FIELDS: list[tuple[str, str, list[str]]] = [
     ("agent", "approval_mode", ["auto", "interactive"]),
-    ("agent", "provider", ["acp"]),
+    ("agent", "provider", ["acp", "codex_acp"]),
     ("agent", "sandbox", ["auto", "off"]),
     ("agent", "log_level", ["DEBUG", "INFO", "WARNING", "ERROR"]),
     ("memory", "embedding_provider", ["llama_cpp"]),
 ]
+
+
+def test_agent_provider_schema_offers_codex_acp():
+    metadata = AgentConfig.__dataclass_fields__["provider"].metadata
+    assert metadata["enum"] == ["acp", "codex_acp"]
+
 
 # Top-level keys recognised by the schema. Keep the property strategy aligned
 # with the loader's emitted config sections as new sections are added.
@@ -206,8 +212,9 @@ def test_dashboard_tailscale_hydrates_and_survives_a_round_trip() -> None:
             False
         ), bad
     assert (
-        _load_from_dict({"dashboard": {"tailscale": {"enabled": "true"}}})
-        .dashboard.tailscale.enabled
+        _load_from_dict(
+            {"dashboard": {"tailscale": {"enabled": "true"}}}
+        ).dashboard.tailscale.enabled
         is False
     )
 
@@ -340,9 +347,7 @@ class TestMalformedConfigValuesNeverCrashLoad:
         assert cfg.wecom.hard_threshold_pct == 95
 
     def test_non_numeric_wecom_thresholds_fall_back(self):
-        cfg = _load_from_dict(
-            {"wecom": {"soft_threshold_pct": "lots", "hard_threshold_pct": None}}
-        )
+        cfg = _load_from_dict({"wecom": {"soft_threshold_pct": "lots", "hard_threshold_pct": None}})
         assert cfg.wecom.soft_threshold_pct == 80
         assert cfg.wecom.hard_threshold_pct == 95
 
@@ -3053,8 +3058,9 @@ class TestKnowledgeAutoIngest:
         assert cfg.knowledge.auto_add_documents is False
 
     def test_canonical_wins_over_legacy(self) -> None:
-        cfg = _load_from_dict({"knowledge": {
-            "auto_add_documents": False, "auto_ingest_doc_links": True}})
+        cfg = _load_from_dict(
+            {"knowledge": {"auto_add_documents": False, "auto_ingest_doc_links": True}}
+        )
         assert cfg.knowledge.auto_add_documents is False
 
     def test_round_trip_settles_on_the_canonical_key(self) -> None:
@@ -3117,12 +3123,15 @@ class TestKnowledgeAutoIngest:
         # A key absent from the allowlist is rejected by PATCH /api/config/kirocrew,
         # so its toggle would render and then fail to save.
         from kiro_crew.dashboard.handlers.core import _EDITABLE_CONFIG
-        for key in ("knowledge.auto_add_documents",
-                    "knowledge.auto_register_project_docs",
-                    "knowledge.auto_ingest_artifacts",
-                    "knowledge.auto_ingest_chunk_budget",
-                    "knowledge.folder_ingest_chunk_budget",
-                    "knowledge.dedup_every_n_sweeps"):
+
+        for key in (
+            "knowledge.auto_add_documents",
+            "knowledge.auto_register_project_docs",
+            "knowledge.auto_ingest_artifacts",
+            "knowledge.auto_ingest_chunk_budget",
+            "knowledge.folder_ingest_chunk_budget",
+            "knowledge.dedup_every_n_sweeps",
+        ):
             assert key in _EDITABLE_CONFIG, key
 
 
@@ -3720,9 +3729,7 @@ class TestAppAgentDispatch(unittest.TestCase):
             with unittest.mock.patch.object(loader, "kiro_agents_dir", lambda: d):
                 cfg = self._config()
                 assert loader.resolve_agent_bindings(cfg, "mochi").kiro_agent == "mochi"
-                assert (
-                    loader.resolve_agent_bindings(cfg, "mochi--mochi").kiro_agent == "kirocrew"
-                )
+                assert loader.resolve_agent_bindings(cfg, "mochi--mochi").kiro_agent == "kirocrew"
 
     def test_stem_is_used_when_no_name_is_declared(self):
         # With no `name` the stem is the only identifier, so it is trusted there.
@@ -3775,8 +3782,7 @@ class TestAppAgentDispatch(unittest.TestCase):
                 # default silently, which is the mismatch this change removes.
                 for stem in ("junk", "broken"):
                     assert (
-                        loader.resolve_agent_bindings(cfg, agent_name=stem).kiro_agent
-                        == "kirocrew"
+                        loader.resolve_agent_bindings(cfg, agent_name=stem).kiro_agent == "kirocrew"
                     )
 
     def test_lookup_does_no_filesystem_io(self):
@@ -4044,9 +4050,7 @@ class TestAppAgentDispatch(unittest.TestCase):
 
             with unittest.mock.patch.object(loader, "kiro_agents_dir", lambda: d):
                 with unittest.mock.patch.object(loader, "_MATERIALIZED_AGENTS", frozenset()):
-                    with unittest.mock.patch.object(
-                        loader, "_MATERIALIZED_AGENTS_READY", False
-                    ):
+                    with unittest.mock.patch.object(loader, "_MATERIALIZED_AGENTS_READY", False):
                         assert asyncio.run(_on_loop()).kiro_agent == "kirocrew"
 
 
@@ -4082,9 +4086,7 @@ class TestWeixinConfig(unittest.TestCase):
         self.assertEqual(cfg.weixin.allowed_user_ids, [])
 
     def test_blank_and_duplicate_ids_are_dropped(self):
-        cfg = _load_from_dict(
-            {"weixin": {"allowed_user_ids": ["  wxid_a  ", "wxid_a", "", "   "]}}
-        )
+        cfg = _load_from_dict({"weixin": {"allowed_user_ids": ["  wxid_a  ", "wxid_a", "", "   "]}})
         self.assertEqual(cfg.weixin.allowed_user_ids, ["wxid_a"])
 
     def test_dm_policy_defaults_to_deny_by_default(self):

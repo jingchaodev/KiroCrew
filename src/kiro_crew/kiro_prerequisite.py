@@ -1,7 +1,7 @@
 """Cross-platform Kiro CLI readiness detection.
 
-The public KiroCrew provider is KiroACP-only, so a healthy, authenticated
-``kiro-cli`` is a hard runtime prerequisite. This module's job is to answer one
+When the Kiro ACP provider is selected, a healthy, authenticated ``kiro-cli``
+is a hard runtime prerequisite. This module's job is to answer one
 question about the gateway host: **is there a Kiro CLI that runs, and is it
 signed in?** It answers that by running the CLI's own read-only probes
 (``--version``, then ``whoami``) inside the OS sandbox.
@@ -610,9 +610,7 @@ def _project_identity_database(source: Path, destination: Path) -> bool:
                     if not table_rows:
                         continue
                     placeholders = ",".join("?" * len(table_rows[0]))
-                    staged.executemany(
-                        f'INSERT INTO "{table}" VALUES ({placeholders})', table_rows
-                    )
+                    staged.executemany(f'INSERT INTO "{table}" VALUES ({placeholders})', table_rows)
     except sqlite3.Error:
         with contextlib.suppress(OSError):
             os.unlink(str(destination))
@@ -709,7 +707,9 @@ def _ensure_auth_staging_parent(home: Path) -> Path:
             # private directory. Only abort if a non-directory we cannot clear is
             # STILL sitting here; otherwise fall through to the idempotent mkdir.
             # (#561, concurrent-boot race)
-            if staging_parent.is_symlink() or (staging_parent.exists() and not staging_parent.is_dir()):
+            if staging_parent.is_symlink() or (
+                staging_parent.exists() and not staging_parent.is_dir()
+            ):
                 raise OSError(
                     f"Kiro auth staging root {staging_parent} is not a private "
                     "directory and could not be reset"
@@ -1868,9 +1868,7 @@ class KiroPrerequisiteService:
             # cannot even resolve itself without its real-home registry — so the
             # isolated probe reported such CLIs signed-out even though a real
             # session authenticates fine.
-            whoami = await self._audited_identity_probe(
-                self._viable_binary, isolate_home=False
-            )
+            whoami = await self._audited_identity_probe(self._viable_binary, isolate_home=False)
             if whoami.ok:
                 await asyncio.to_thread(self._mark_setup_complete)
             self._status = PrerequisiteStatus(

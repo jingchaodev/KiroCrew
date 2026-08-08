@@ -1,8 +1,8 @@
 ## LLM Provider Abstraction
 
-KiroCrew drives a single LLM backend: `kiro-cli` over ACP. The `LLMProvider`
-interface is retained as a thin seam (consumers depend only on the ABC), but
-there is exactly one concrete provider — `agent.provider` is fixed to `acp`.
+Kiro Crew drives Kiro CLI or Codex through one ACP implementation. The
+`LLMProvider` interface remains the consumer boundary; `AcpProvider` selects
+the subprocess from `agent.provider` (`acp` or `codex_acp`).
 
 ### Architecture
 
@@ -20,7 +20,7 @@ there is exactly one concrete provider — `agent.provider` is fixed to `acp`.
             ┌──────┴──────┐
             │ AcpProvider │
             │ acp.py      │
-            │ kiro-cli    │
+            │ Kiro/Codex  │
             └─────────────┘
 ```
 
@@ -28,9 +28,8 @@ there is exactly one concrete provider — `agent.provider` is fixed to `acp`.
 **deleted** during de-Amazoning, along with their config fields and the
 multi-provider dispatch factory. `acp/client.py` keeps a dormant
 `ACP_BACKEND_CLAUDE` seam (`AcpProvider` can in principle drive
-`claude-agent-acp`) so an internal companion can re-register a Claude backend,
-but the public provider factory never selects it — `kiro-cli` is the only
-backend.
+`claude-agent-acp`) so an internal companion can re-register a Claude backend.
+The public factory selects Kiro or Codex; the Claude seam remains unreachable.
 See [`../features/claude-code-provider.md`](../features/claude-code-provider.md).
 
 ### LLMProvider ABC (`providers/base.py`)
@@ -73,13 +72,14 @@ Provider-agnostic event dataclass (aliased from `AcpEvent`):
 
 ### AcpProvider (`providers/acp.py`)
 
-The sole provider. Spawns a long-lived `kiro-cli acp --agent <name>` subprocess
-and speaks JSON-RPC 2.0 over stdio.
+The sole provider implementation. It uses a shared Kiro runtime for `acp`, or
+a reconnectable per-session `codex-acp` process for `codex_acp`, and speaks
+JSON-RPC 2.0 over stdio in both cases.
 
 **Dormant backend seam:** `AcpProvider`/`AcpClient` retain an `acp_backend`
 parameter (`"" ` → kiro-cli; `"claude"` / `ACP_BACKEND_CLAUDE` → `claude-agent-acp`)
 so an internal companion can re-register a Claude backend over the same
-client. **The public provider factory only ever selects kiro-cli** — the claude
+client. **The public provider factory selects Kiro or Codex** — only the Claude
 branch is unreachable in this build. Its binary-resolution + config-isolation
 details live in [`acp-client.md`](acp-client.md); do not re-add the registration
 glue or a provider selector (see the repo-root `CLAUDE.md`).
@@ -112,14 +112,14 @@ glue or a provider selector (see the repo-root `CLAUDE.md`).
 ```json
 {
   "agent": {
-    "provider": "acp",
+    "provider": "codex_acp",
     "model": "auto"
   }
 }
 ```
 
-- `agent.provider` is fixed to `"acp"` (enum `["acp"]`); there is no provider to choose.
-- `create_provider_factory()` returns a `Callable` that creates the kiro-cli `AcpProvider`.
+- `agent.provider` accepts `"acp"` or `"codex_acp"`.
+- `create_provider_factory()` creates the matching `AcpProvider` and injects converted agent MCP servers for Codex.
 
 ### MCP Server Registration
 

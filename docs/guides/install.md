@@ -25,17 +25,24 @@ Node is only needed to *build* the dashboard. The prebuilt wheel, the DMG, and
 the AppImage all ship the dashboard already bundled, so end users of those
 artifacts need neither Node nor a compiler.
 
-### Agent backend: `kiro-cli` (required)
+### Agent backend: Kiro CLI or Codex ACP
 
-Kiro Crew drives an LLM through the **`kiro-cli`** agent over the
+Kiro Crew drives an LLM over the
 [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol)
-(ACP). It is the only provider: `agent.provider` is fixed to `acp`, and the
-gateway spawns `kiro-cli acp --agent <name>`.
+(ACP). The default `acp` provider spawns `kiro-cli acp --agent <name>`; this
+fork also supports `codex_acp` through the public `codex-acp` adapter.
 
 Install `kiro-cli` per its own docs, put it on your `PATH`, and log in:
 
 ```bash
 kiro-cli login
+```
+
+For Codex, install the adapter and select it instead:
+
+```bash
+npm install -g @agentclientprotocol/codex-acp@1.1.14
+kirocrew config set agent.provider codex_acp
 ```
 
 If `kiro-cli` is not on `PATH`, spawning a session fails with

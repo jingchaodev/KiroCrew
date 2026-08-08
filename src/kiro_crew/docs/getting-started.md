@@ -63,13 +63,20 @@ The dashboard has to be built before the backend install, because the built
 `website/dist` is staged into the package and served by the gateway. `make
 build` does both steps plus a `.venv`.
 
-### Agent backend: `kiro-cli` (required)
+### Agent backend: Kiro CLI or Codex ACP
 
-`kiro-cli` is the only provider (`agent.provider` is fixed to `acp`). Install it
-per its own docs, make sure the binary resolves on your `PATH`, and log in:
+The default provider is `kiro-cli`. Install it per its own docs, make sure the
+binary resolves on your `PATH`, and log in:
 
 ```bash
 kiro-cli login
+```
+
+To use Codex instead, install the public adapter and select it:
+
+```bash
+npm install -g @agentclientprotocol/codex-acp@1.1.14
+kirocrew config set agent.provider codex_acp
 ```
 
 On the first dashboard launch, the Set up Kiro page walks through installing the
