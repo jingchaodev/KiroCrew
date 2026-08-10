@@ -61,21 +61,23 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[voice]"
 
 # 4. Configure and verify
-kirocrew setup               # data dir, agent backend, Slack tokens (optional)
+kirocrew setup               # data dir, agent backend (channels connect later)
 kirocrew doctor              # verify everything works
-kirocrew gateway             # start server (dashboard + Slack)
+kirocrew gateway             # start server (dashboard + messaging channels)
 ```
 
 The dashboard is at `http://localhost:5476`.
 
-**Dashboard-only mode**: skip Slack tokens during `kirocrew setup` to run
-without Slack.
+**Messaging channels are optional**: the default `kirocrew setup` configures
+none, and the dashboard + CLI work without any channel credentials. Connect
+Slack, Discord, Telegram, Teams, Webex, WeCom, or WeChat later, or run
+`kirocrew setup --slack` for the guided Slack path.
 
 ## Development Skills (agents and humans)
 
 The contributor workflow is codified as agent-loadable skills in
-[`skills/kirocrew-dev/`](skills/kirocrew-dev/) — the canonical definition of
-how code gets written, tested, and reviewed here:
+[`src/kiro_crew/builtin_skills/kirocrew-dev/`](src/kiro_crew/builtin_skills/kirocrew-dev/)
+— the canonical definition of how code gets written, tested, and reviewed here:
 
 - **`kirocrew-worktree-dev`** — the HARD RULE workflow: every change in a git
   worktree, the blocking build gates, the built-dist gotcha, preview paths.
@@ -451,7 +453,7 @@ depends on *where your branch lives*:
 
 | Check | Fork PR | Branch pushed to `kirodotdev/KiroCrew` |
 | --- | --- | --- |
-| **Opus 5 Review** | Skipped (neutral — not a failure) | Runs |
+| **Opus 4.8 Review** | Skipped (neutral — not a failure) | Runs |
 | **GPT 5.6 Review** | Skipped | Runs |
 | **Design Review** | Skipped | Runs |
 | Tests, lint, typecheck, CodeQL, coverage, build | Run normally | Run normally |

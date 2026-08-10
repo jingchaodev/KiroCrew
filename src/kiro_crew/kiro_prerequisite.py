@@ -809,24 +809,18 @@ def _allowlisted_env(
 ) -> dict[str, str]:
     """Filter *environ* down to *allowed*, honoring Windows' case-insensitive env.
 
-    Windows environment names are case-INSENSITIVE and CPython upper-cases every
-    key, so ``os.environ.items()`` yields ``SYSTEMROOT`` — never the
-    ``SystemRoot`` spelling Microsoft documents and these allowlists write. A
-    literal membership test therefore drops exactly the variables it was
-    extended to carry, and the failure is silent at the boundary and fatal in the
-    child: a Windows process launched without ``SystemRoot`` cannot load system
-    DLLs, so probe and sign-in spawns die with an unrelated-looking error.
-
-    Folding on Windows only, rather than upper-casing the lists, keeps POSIX
-    exact: ``PATH`` and ``Path`` are genuinely different variables there, and a
-    case-insensitive match would let a lookalike through. Mirrors
-    ``apps.registry._is_safe_env_key``.
+    Thin wrapper binding this module's allowlists to the shared matching
+    convention — exact on POSIX, case-folded on Windows. The rationale (why a
+    literal membership test silently drops ``SystemRoot`` on Windows, killing
+    probe and sign-in spawns with an unrelated-looking error, and why POSIX
+    must stay exact) lives on :func:`platform_compat.env_key_allowed`.
     """
 
-    if not platform_compat.IS_WINDOWS:
-        return {key: value for key, value in environ.items() if key in allowed}
-    folded = {name.upper() for name in allowed}
-    return {key: value for key, value in environ.items() if key.upper() in folded}
+    return {
+        key: value
+        for key, value in environ.items()
+        if platform_compat.env_key_allowed(key, allowed)
+    }
 
 
 def _probe_env(environ: MutableMapping[str, str], search_path: str) -> dict[str, str]:
@@ -1099,7 +1093,13 @@ async def _run_process(
                 extra_visible_dirs=extra_visible_dirs,
             )
             if spawn_argv and not os.path.isabs(spawn_argv[0]):
-                resolved_wrapper = shutil.which(spawn_argv[0], path=os.defpath)
+                # Off the loop: a miss walks the whole ``PATH`` once per name to
+                # report where the tool actually is, so a stalled network mount
+                # anywhere on it would otherwise freeze the gateway rather than
+                # just this probe.
+                resolved_wrapper = await asyncio.to_thread(
+                    platform_compat.trusted_system_bin, spawn_argv[0]
+                )
                 if not resolved_wrapper:
                     raise OSError(f"sandbox wrapper is unavailable: {spawn_argv[0]}")
                 spawn_argv[0] = resolved_wrapper

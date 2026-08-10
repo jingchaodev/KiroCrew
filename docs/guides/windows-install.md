@@ -125,6 +125,21 @@ same posture as running the tool yourself in a shell. Config is read live, so no
 gateway restart is needed. Without it, the affected paths answer a clear 422 naming
 the remedy rather than failing obscurely.
 
+**The model picker and the credit pill follow chat's posture, not their own.**
+`/api/models`, the credit pill's `whoami` identity fetch and its `/usage` scrape
+spawn the same `kiro-cli` binary chat does, at the same `agent.sandbox` tier — so
+on this platform they succeed and fail together with chat, rather than one working
+while the other 503s. Concretely:
+
+- **Default install** (`agent.sandbox` unset → `"auto"`): Windows has no backend,
+  so chat *and* these reads all need the opt-in above. Without it `/api/models`
+  answers 503 with `code: "model_list_sandbox_unavailable"` and a log line naming
+  the remedy, and the picker falls back to offering only `auto`.
+- **`agent.sandbox` explicitly `"off"`** (isolation deferred to kiro-cli's own
+  internal sandbox): all of them run, and none of them need the opt-in. Note that
+  an explicit `"off"` now logs a one-time `SECURITY` warning where no OS-level
+  isolation ends up active.
+
 ## Per-feature status on Windows
 
 | Feature | Status on Windows |
@@ -140,6 +155,7 @@ the remedy rather than failing obscurely.
 | STT (whisper / optional cloud transcription) | works |
 | Voice reply (Piper TTS) | not yet — upstream rhasspy/piper ships no Windows binary; Polly (optional) works if the `aws` CLI is present **and** the `agent.sandbox_allow_unsandboxed_exec` opt-in above is set — the `aws polly` spawn routes through `wrap_argv`, which fail-closes where no OS sandbox backend exists. Without it synthesis returns no audio and the log names that setting |
 | SSH tunnel (`kirocrew cloud` remote dashboard) | not yet — needs the OpenSSH client on `PATH` and a signal-handling audit |
+| MCP server tool listing (dashboard MCP page, `kirocrew doctor`) | **built-in servers work, no opt-in** — with no sandbox backend the probe falls back to reading `kirocrew-core` / `-cron` / `-computer`'s own tool declaration instead of spawning them, and logs a WARNING noting that `ok` means "declared" rather than "handshake succeeded" (it does not verify the server can start; set `agent.sandbox_allow_unsandboxed_exec` to probe for real). A **third-party** server has no declaration to read, so its listing needs that opt-in — its binary is named by config and spawning it is what the sandbox exists to confine. The third-party server itself is unaffected: kiro-cli launches it from the agent config without this probe, so its tools still work in chat |
 | MCP gateway (opt-in, OFF by default) | works — a named-pipe transport replaces the AF_UNIX socket, and the peer check uses `GetNamedPipeClientProcessId` + a SID comparison in place of `SO_PEERCRED`. Still opt-in: set `mcp_gateway.enabled` to turn it on |
 | Papyrus (LaTeX editor, opt-in builtin) | works, **but compiling and git need the `agent.sandbox_allow_unsandboxed_exec` opt-in above** — like chat, its spawns route through `wrap_argv`, which fail-closes where no OS sandbox backend exists. Without it, compile and clone/commit/push/pull answer a clear 422 (`compiler_sandbox_unavailable` / `git_sandbox_unavailable`) naming the remedy rather than a bare "internal error". The managed Tectonic compiler is Windows-pinned (`x86_64-pc-windows-msvc`); Windows-on-ARM has no upstream asset and keeps the manual install path |
 

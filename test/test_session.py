@@ -1348,9 +1348,12 @@ class TestCompactCallback:
     @pytest.mark.asyncio
     async def test_compact_session_defers_when_turn_never_drains(self, cfg, caplog, monkeypatch):
         """A still-running turn (semaphore held) must NEVER be killed for
-        compaction: after _COMPACT_TIMEOUT_SECS the attempt is deferred —
+        compaction: after COMPACT_WAIT_TIMEOUT_SECS the attempt is deferred —
         session intact, no callback — and re-triggered at the next turn end."""
-        monkeypatch.setattr("kiro_crew.session._COMPACT_TIMEOUT_SECS", 0.1)
+        # Only the outer cap is scaled: the inner status wait clamps to
+        # _COMPACT_RESULT_WAIT_FLOOR_SECS (5s) — patch that too if a test
+        # needs the inner wait itself to time out quickly.
+        monkeypatch.setattr("kiro_crew.session.COMPACT_WAIT_TIMEOUT_SECS", 0.1)
         mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
         # Hold the semaphore and never release -> simulates a long-running turn.
         provider, _, _ = await mgr.get_or_create("dashboard:chat-1")
@@ -1938,6 +1941,64 @@ class TestDestroy:
                 await mgr.destroy("k1")
         # finally block still runs
         mock_delete.assert_called_once_with("k1")
+
+
+class TestDiscardConversation:
+    """Tests for discard_conversation() — the poisoned-conversation escape.
+
+    Unlike destroy(), the session-map ENTRY must survive: it carries the
+    Slack thread/channel linkage (and feeds the reverse thread→session sync
+    index), so deleting it would silently unlink a mirrored session. Only
+    the resume sid is cleared, forcing the next turn to cold-start a fresh
+    native conversation."""
+
+    @pytest.mark.asyncio
+    async def test_discard_shuts_down_and_clears_only_sid(self, cfg):
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        provider, _, _ = await mgr.get_or_create("k1")
+        mgr.release("k1")
+        with (
+            patch.object(mgr._session_map, "clear_sid") as mock_clear,
+            patch.object(mgr._session_map, "delete") as mock_delete,
+        ):
+            await mgr.discard_conversation("k1")
+        provider.shutdown.assert_awaited_once()
+        mock_clear.assert_called_once_with("k1")
+        mock_delete.assert_not_called()
+        assert not mgr.has_session("k1")
+
+    @pytest.mark.asyncio
+    async def test_discard_preserves_slack_linkage(self, cfg):
+        """Regression for the poisoned-conversation escalation: a Slack-linked
+        session that discards its rejected conversation must keep its thread
+        binding, or the recovered answer is not mirrored and later inbound
+        replies fork a new conversation."""
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        await mgr.get_or_create("k1")
+        mgr.release("k1")
+        mgr._session_map.set("k1", "sid-poisoned")
+        mgr._session_map.set_slack_link("k1", "1234.5678", "C0FFEE")
+        await mgr.discard_conversation("k1")
+        # sid gone → next turn cold-starts instead of session/load-ing the poison
+        assert not mgr._session_map.get("k1")
+        # ...but the Slack linkage survives.
+        assert mgr.get_slack_link("k1") == ("1234.5678", "C0FFEE")
+        # ...and the dropped sid is stashed, so a false-positive discard is
+        # diagnosable and manually reversible (the native conversation still
+        # exists on disk; only the pointer was cleared).
+        assert mgr._session_map.get_discarded_sid("k1") == "sid-poisoned"
+
+    @pytest.mark.asyncio
+    async def test_discard_shutdown_exception_still_clears_sid(self, cfg):
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        provider, _, _ = await mgr.get_or_create("k1")
+        mgr.release("k1")
+        provider.shutdown = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch.object(mgr._session_map, "clear_sid") as mock_clear:
+            with pytest.raises(RuntimeError, match="boom"):
+                await mgr.discard_conversation("k1")
+        # finally block still runs
+        mock_clear.assert_called_once_with("k1")
 
 
 class TestContextInfo:
@@ -3263,7 +3324,9 @@ class TestCompactTimeout:
 
         with (
             patch("kiro_crew.session._is_claude_backend", return_value=True),
-            patch("kiro_crew.session._COMPACT_TIMEOUT_SECS", 0.05),
+            # Only the outer cap is scaled — see _COMPACT_RESULT_WAIT_FLOOR_SECS
+            # note above if the inner wait must time out quickly.
+            patch("kiro_crew.session.COMPACT_WAIT_TIMEOUT_SECS", 0.05),
         ):
             await mgr._compact_session("k1", 92.0)
 

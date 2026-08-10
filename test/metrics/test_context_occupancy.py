@@ -66,6 +66,24 @@ class TestContextOccupancyBasics:
         assert out["p50_pct"] == 50.0
         assert out["max_pct"] == 90.0
 
+    @pytest.mark.parametrize(
+        ("occupancies", "field", "expected"),
+        [
+            ([10, 20, 30, 40], "p50_pct", 20.0),
+            ([10, 20, 30, 40, 50, 60], "p90_pct", 60.0),
+        ],
+    )
+    def test_percentiles_use_nearest_rank(
+        self, _isolated_shards, occupancies, field, expected
+    ):
+        """Select the value at ceil(percentile * sample count), 1-indexed."""
+        _write(
+            _isolated_shards,
+            [_row("chat-1", pct * 10_000) for pct in occupancies],
+        )
+
+        assert usage_mod.context_occupancy(14)[field] == expected
+
     def test_peak_is_per_session_not_global(self, _isolated_shards):
         _write(_isolated_shards, [
             _row("chat-hot", 950_000),
@@ -170,3 +188,16 @@ class TestContextOccupancyLatestWins:
         # ...while the peak still remembers how close the session got.
         assert s["peak_pct"] == 90.0
         assert s["turns"] == 2
+
+    @pytest.mark.parametrize("stored_surface", ["task_runner", "taskrunner"])
+    def test_taskrunner_surface_uses_canonical_spelling(
+        self, _isolated_shards, stored_surface
+    ):
+        _write(
+            _isolated_shards,
+            [_row("taskrunner:run:task0", 500_000, surface=stored_surface)],
+        )
+
+        session = usage_mod.context_occupancy(14)["sessions"][0]
+
+        assert session["surface"] == "taskrunner"

@@ -11,6 +11,7 @@ to auto-sync newly discovered servers into the agent config.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import ntpath
@@ -30,8 +31,12 @@ from kiro_crew import platform_compat
 from kiro_crew.config.paths import data_home, kiro_agents_dir
 from kiro_crew.env import augmented_path
 from kiro_crew.hooks import safe_read_file
-from kiro_crew.mcp_utils import mcp_server_alias
-from kiro_crew.sandbox import create_subprocess_limited, sandboxed_spawn_argv
+from kiro_crew.mcp_utils import kiro_entry_client_id, kiro_entry_scopes, mcp_server_alias
+from kiro_crew.sandbox import (
+    SandboxUnavailableError,
+    create_subprocess_limited,
+    sandboxed_spawn_argv,
+)
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
@@ -112,6 +117,67 @@ def _warn_unresolvable_once(name: str, command: str) -> None:
         return
     _unresolvable_warned.add(key)
     logger.warning("MCP probe failed [%s]: command not found: %s", name, command)
+
+
+#: Servers whose probe has already reported a missing sandbox backend. Keyed by
+#: name only (not by command): the cause is the HOST lacking a backend, not
+#: anything about the server, so it recurs identically for every server on every
+#: discovery cycle. Without this ledger a four-server config logged four
+#: identical multi-line remedy paragraphs per cycle, forever.
+_probe_sandbox_warned: set[str] = set()
+
+
+#: Managed servers already served from the in-process declaration. Same shape and
+#: reason as _probe_sandbox_warned: the trigger is the HOST having no backend, so
+#: it recurs for every managed server on every discovery cycle.
+_managed_in_process_warned: set[str] = set()
+
+
+def _warn_managed_in_process_once(name: str) -> None:
+    """Record the in-process fallback once per managed server.
+
+    Logged rather than silent because it is a security-relevant substitution: the
+    listing is served WITHOUT the handshake that proves the server can start, so
+    ``ok`` here means "this package declares these tools", not "the server
+    answered". An operator reading the dashboard should be able to find out which
+    of the two they are looking at.
+    """
+    if name in _managed_in_process_warned:
+        logger.debug("MCP probe [%s]: still serving the declared tool list", name)
+        return
+    _managed_in_process_warned.add(name)
+    # WARNING, not info: `ok` on this path does not mean the handshake succeeded,
+    # and the default log level is WARNING — at info the substitution would be
+    # invisible on exactly the hosts where it always happens.
+    logger.warning(
+        "MCP probe [%s]: no OS-level sandbox backend, so the tool list is read from "
+        "this package's own declaration instead of a handshake. The tools are "
+        "correct (it is the same declaration the server serves), but this does NOT "
+        "verify the server can start. Set agent.sandbox_allow_unsandboxed_exec=true "
+        "to probe it for real.",
+        name,
+    )
+
+
+def _warn_probe_sandbox_unavailable_once(name: str) -> None:
+    """WARNING on first sight per server, DEBUG thereafter.
+
+    Mirrors :func:`_warn_unresolvable_once`. The message names the PROBE as the
+    thing that could not run, so a reader is not sent debugging a server that
+    kiro-cli is launching successfully from the agent config.
+    """
+    if name in _probe_sandbox_warned:
+        logger.debug("MCP probe [%s]: still no sandbox backend (already reported)", name)
+        return
+    _probe_sandbox_warned.add(name)
+    logger.warning(
+        "MCP probe skipped [%s]: no OS-level sandbox backend on this host, so "
+        "Kiro Crew cannot spawn the server to enumerate its tools. The server "
+        "itself is unaffected — kiro-cli launches it from the agent config "
+        "without this probe. Set agent.sandbox_allow_unsandboxed_exec=true to "
+        "enable probing (the dashboard will otherwise show it with 0 tools).",
+        name,
+    )
 
 
 def _clear_unresolvable(name: str, command: str) -> None:
@@ -299,6 +365,11 @@ class McpServerInfo:
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    # Remote-only OAuth hints carried verbatim to the runtime, which owns the
+    # authorization exchange. Kiro Crew never enforces scopes and never registers
+    # a client — it only refuses to lose these fields while syncing.
+    scopes: list[str] = field(default_factory=list)
+    client_id: str = ""
     status: str = "unknown"  # unknown | ok | error | probing | outdated | disabled
     tools: list[str] = field(default_factory=list)
     error: str = ""
@@ -340,6 +411,17 @@ class McpServerInfo:
             d["url"] = self.url
             if self.headers:
                 d["headers"] = self.headers
+            # Not redacted: requested scopes and a public OAuth client id are
+            # non-secret configuration the user needs to see.
+            #
+            # These are the INTERNAL key names, matching the dashboard's
+            # ``McpServer`` type. This dict is an API response, never a file
+            # kiro-cli reads, so it must NOT be translated to the wire names —
+            # ``kiro_oauth_wire_entry`` is applied on the emit paths instead.
+            if self.scopes:
+                d["scopes"] = list(self.scopes)
+            if self.client_id:
+                d["clientId"] = self.client_id
         if self.disabled_tools:
             d["disabledTools"] = self.disabled_tools
         if self.disabled:
@@ -519,6 +601,29 @@ def _load_mcp_json() -> dict[str, Any]:
     return merged
 
 
+def _spec_scopes(spec: dict) -> list[str]:
+    """Requested OAuth scopes from a spec, dropping anything malformed.
+
+    On-disk specs are untrusted (hand-edited files, other tools), so a
+    non-list or a list with non-string members degrades to "no scopes"
+    rather than propagating a bad shape into the agent config.
+
+    Reads kiro-cli's ``oauthScopes`` as well as Kiro Crew's internal ``scopes``:
+    files we emit for kiro-cli carry the former, so a discovery pass that knew
+    only the latter would report a scoped server as unscoped.
+    """
+    return kiro_entry_scopes(spec)
+
+
+def _spec_client_id(spec: dict) -> str:
+    """Public OAuth client id from a spec, or "" when absent/malformed.
+
+    Accepts kiro-cli's nested ``oauth.clientId`` as well as the internal
+    top-level key, for the same round-trip reason as ``_spec_scopes``.
+    """
+    return kiro_entry_client_id(spec)
+
+
 def _server_from_spec(name: str, spec: dict, source: str) -> McpServerInfo:
     return McpServerInfo(
         name=name,
@@ -527,6 +632,8 @@ def _server_from_spec(name: str, spec: dict, source: str) -> McpServerInfo:
         env=spec.get("env", {}),
         url=spec.get("url", ""),
         headers=spec.get("headers", {}),
+        scopes=_spec_scopes(spec),
+        client_id=_spec_client_id(spec),
         source=source,
     )
 
@@ -538,6 +645,58 @@ _MANAGED_SERVER_SUBCOMMANDS = {
     "kirocrew-computer": "mcp-computer",
 }
 _MANAGED_SERVER_NAMES = set(_MANAGED_SERVER_SUBCOMMANDS)
+
+# Managed server name -> the module whose ``_list_tools()`` declares its tools.
+# These are the SAME functions the stdio shim serves ``tools/list`` from, so
+# calling them in-process returns exactly what a spawn would have returned.
+_MANAGED_SERVER_TOOL_MODULES = {
+    "kirocrew-core": "kiro_crew.mcp_core",
+    "kirocrew-cron": "kiro_crew.mcp_cron",
+    "kirocrew-computer": "kiro_crew.mcp_computer",
+}
+
+
+def _managed_tools_in_process(name: str) -> list[str] | None:
+    """Tool names for a managed server, read WITHOUT spawning it.
+
+    A managed server's tool list is a static declaration in this package —
+    ``mcp_core._list_tools()`` and friends, the very functions the stdio shim
+    answers ``tools/list`` from. Spawning a child to ask ourselves what we
+    ourselves declare is pure overhead, and it made the listing depend on a
+    sandbox backend: ``sandboxed_spawn_argv`` fail-closes where none exists (any
+    Windows host, macOS >= 26), so the built-in tools showed as 0 on the dashboard
+    even though kiro-cli was serving them fine.
+
+    Reading them in-process removes that dependency outright — no subprocess, so
+    no sandbox to be unavailable and no unsandboxed-execution question to answer.
+    That is the whole point: the alternative designs either require an
+    ``agent.sandbox_allow_unsandboxed_exec`` opt-in for a read-only listing, or
+    exempt an agent-writable package from the sandbox. This needs neither.
+
+    Imported lazily: these modules pull in the validation/artifacts graph, which
+    cannot be imported at this module's import time (circular). ``_list_tools`` is
+    a pure read of schemas plus config — no I/O of its own, no side effects, and
+    cheap enough for a discovery cycle.
+
+    Returns ``None`` when *name* is not managed or the read fails, so the caller
+    falls back to the ordinary spawn-and-handshake path rather than reporting a
+    wrong answer. An EMPTY list is a real result, not a failure:
+    ``mcp_computer._list_tools()`` returns ``[]`` by design while the keystone
+    enable is off — which is also what a spawned probe reports.
+    """
+    module_name = _MANAGED_SERVER_TOOL_MODULES.get(name)
+    if module_name is None:
+        return None
+    try:
+        module = importlib.import_module(module_name)
+        tools = module._list_tools()
+    except Exception:
+        logger.debug("in-process tool read failed for %s; will probe", name, exc_info=True)
+        return None
+    if not isinstance(tools, list):
+        return None
+    return [n for t in tools if isinstance(t, dict) and (n := t.get("name"))]
+
 
 # Cached resolved (command, args) — avoids subprocess.run on every list_servers() call.
 _resolved_managed_invocation: dict[str, tuple[str, list[str]]] = {}
@@ -1109,6 +1268,68 @@ async def probe_server(server: McpServerInfo) -> McpServerInfo:
         server.status = "error"
         server.error = f"command not found: {server.command}"
         _warn_unresolvable_once(server.name, server.command)
+    except SandboxUnavailableError as exc:
+        # The PROBE could not run — this says nothing about the server, and the
+        # two must not be reported alike. Ahead of the generic clause, which would
+        # render this as a server fault.
+        #
+        # For one of OUR OWN managed servers there is a better answer than an
+        # error: its tool list is a static declaration in this package
+        # (``mcp_core._list_tools()`` and friends — the very functions the stdio
+        # shim answers ``tools/list`` from), so read it directly. That is what
+        # keeps the built-in tools listed on a host with no sandbox backend (any
+        # Windows host, macOS >= 26) without asking the operator for an
+        # ``agent.sandbox_allow_unsandboxed_exec`` opt-in for a read-only listing.
+        #
+        # Deliberately a FALLBACK, not the primary path. Two reasons:
+        #   * the spawn is the only thing that proves the server can actually
+        #     START. `_fix_stale_managed_command` exists because that invocation
+        #     does go stale ("command not found: kirocrew; the built-in cron/core
+        #     tools then never load"), and short-circuiting on the name alone would
+        #     report `ok` for a managed server that cannot run — changing what `ok`
+        #     means in the shared `_cache_probe` store, silently, for the one
+        #     surface that used to catch it.
+        #   * importing these modules runs package code IN THE GATEWAY PROCESS,
+        #     which the gateway does not otherwise do (they are absent from
+        #     sys.modules at boot). The package dir is writable by the same uid the
+        #     agent runs as and is not on the sensitive-path floor, so on a host
+        #     where the sandbox DOES work, importing beats the isolation the spawn
+        #     provides. Reaching here means the sandbox could not confine anything
+        #     anyway, so the import adds no exposure the refused spawn had not
+        #     already conceded — and it is the only way to serve the listing there.
+        managed_tools = _managed_tools_in_process(server.name)
+        if managed_tools is not None:
+            server.status = "ok"
+            server.tools = managed_tools
+            server.error = ""
+            _warn_managed_in_process_once(server.name)
+            return server
+        #
+        # The wrap is deliberately KEPT rather than skipped for Kiro Crew's own
+        # managed servers. "It is our own code" is not the same claim as "the code
+        # is unmodified": the package directory is writable by the same uid the
+        # agent runs as and is not on the sensitive-path floor, so a prompt-injected
+        # agent can edit an editable checkout (or the console script) and an
+        # unwrapped probe would then execute it outside the sandbox on the next
+        # automatic probe_all(). Skipping the wrap for a managed server would make
+        # this the one unsandboxed spawn path in the codebase; the sibling paths
+        # (script crons, script hooks, Papyrus compile/git) all keep the wrap and
+        # require the opt-in on a backendless host, and this now matches them.
+        #
+        # So what changes is the REPORTING. The `mcp_probe_` prefix is
+        # machine-readable, mirroring the `code` field on the dashboard's JSON error
+        # bodies, so a presentation layer can tell an unfixable-by-retry probe
+        # limitation apart from a genuine handshake failure without parsing prose.
+        server.status = "error"
+        server.error = (
+            f"mcp_probe_sandbox_unavailable: Kiro Crew could not probe this server "
+            f"because no OS-level sandbox backend is available on this host. The "
+            f"server itself may be fine — kiro-cli launches it from the agent "
+            f"config without this probe, so its tools can still work in chat. "
+            f"Set agent.sandbox_allow_unsandboxed_exec=true to enable probing. "
+            f"({_sanitize_probe_error(exc)})"
+        )
+        _warn_probe_sandbox_unavailable_once(server.name)
     except Exception as exc:
         server.status = "error"
         server.error = _sanitize_probe_error(exc)
@@ -1364,7 +1585,7 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
     """Find MCP servers in mcp.json that need syncing to the agent config.
 
     Returns new servers not yet in the agent config, plus existing servers
-    whose env, command, or args have diverged from the mcp.json source.
+    whose source-owned transport fields have diverged from mcp.json.
     """
     agent_cfg = _load_agent_config()
     agent_mcp = agent_cfg.get("mcpServers", {})
@@ -1382,18 +1603,39 @@ def discover_servers_to_sync() -> list[McpServerInfo]:
             command=spec.get("command", ""),
             args=spec.get("args"),
             env=spec.get("env") or {},
+            url=spec.get("url", ""),
+            headers=spec.get("headers") or {},
+            scopes=_spec_scopes(spec),
+            client_id=_spec_client_id(spec),
             source="discovered",
         )
         if name not in agent_names:
             out.append(info)
         else:
-            # Include existing local servers with divergent command or env.
             # Args divergence is intentionally excluded: user-customized
             # args (e.g. --include-tools additions) are preserved by
             # install_agent()'s setdefault merge, so triggering a full
             # rebuild on args-only differences is wasted work.
             existing = agent_mcp[name]
-            if not isinstance(existing, dict) or info.is_remote:
+            if not isinstance(existing, dict):
+                continue
+            if info.is_remote:
+                existing_headers = existing.get("headers") or {}
+                # scopes/clientId are source-owned transport fields like url and
+                # headers: a registry Connect that adds or changes them must
+                # re-sync, or the agent config keeps authorizing the old shape.
+                #
+                # Reaching this set is not permission to rewrite anything: each
+                # consumer guards its own surface, so the two that Kiro Crew does
+                # not own -- the kiro-global file and the Claude Code sidecar --
+                # decide for themselves what an existing entry allows.
+                if (
+                    existing.get("url", "") != info.url
+                    or existing_headers != info.headers
+                    or _spec_scopes(existing) != info.scopes
+                    or _spec_client_id(existing) != info.client_id
+                ):
+                    out.append(info)
                 continue
             existing_env = existing.get("env", {})
             if not isinstance(existing_env, dict):
@@ -1519,6 +1761,31 @@ def sync_to_agent_config(servers: list[McpServerInfo]) -> bool:
     return added or bool(servers)
 
 
+def kirocrew_managed_names() -> set[str]:
+    """Server names the dashboard store owns, and may therefore be rewritten.
+
+    A usable dict under the ``kirocrew`` scope (``<data home>/mcp.json``) is the
+    one signal that Kiro Crew owns a name -- the same discriminator the agent-spec
+    emit path uses for its OAuth hints, so ownership means one thing everywhere.
+
+    Every write to a config surface we do NOT own -- the kiro-global
+    ``mcp.json``, the Claude Code ``~/.mcp.json`` sidecar -- must be gated on
+    this. Discovery merges ALL scopes, so a name present only in a user's global
+    file reaches the sync set exactly like a managed one; without the gate a
+    Kiro Crew sync would rewrite a server the user configured by hand, and the
+    fields it reconstructs (url, OAuth hints) would silently replace theirs.
+
+    A malformed store value is skipped for the same reason the merge skips it: it
+    contributed nothing, so it cannot make the name ours.
+    """
+    by_source = _load_mcp_json_by_source()
+    return {
+        name
+        for name, spec in by_source.get(SCOPE_KIROCREW, {}).items()
+        if isinstance(spec, dict)
+    }
+
+
 def register_servers_for_cc(
     servers: list[McpServerInfo],
     mcp_json_path: Path | None = None,
@@ -1527,6 +1794,9 @@ def register_servers_for_cc(
 
     Adds entries without removing existing ones. CC-side complement
     to sync_to_agent_config() which handles kiro-side registration.
+
+    A remote that already has an entry is left alone entirely -- see the loop
+    below for why this surface is add-only for remotes.
 
     Returns True if any servers were added or updated.
     """
@@ -1542,12 +1812,29 @@ def register_servers_for_cc(
 
     mcp = existing.setdefault("mcpServers", {})
     changed = False
+    # OAuth hints ride along when a remote is first registered, and only for a
+    # name we own -- see kirocrew_managed_names.
+    _managed = kirocrew_managed_names()
 
     for s in servers:
         if s.is_remote:
+            # Add-only: a remote already present here keeps whatever it holds.
+            # This writer rebuilds an entry from scratch rather than merging into
+            # it, and ownership on this surface is name-only -- a managed
+            # server's moved url is indistinguishable from a user's own
+            # same-named entry -- so rewriting one could silently replace
+            # configuration nobody here authored. Propagating a changed remote
+            # shape needs a record of which entries we wrote, and waits for it.
+            if s.name in mcp:
+                continue
             entry: dict = {"url": s.url}
             if s.headers:
                 entry["headers"] = s.headers
+            if s.name in _managed:
+                if s.scopes:
+                    entry["scopes"] = list(s.scopes)
+                if s.client_id:
+                    entry["clientId"] = s.client_id
         else:
             entry = {"command": s.command, "args": s.args or [], "type": "stdio"}
             if s.env:

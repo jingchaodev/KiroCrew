@@ -18,17 +18,32 @@ import json
 import logging
 import os
 import re
-import stat
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import quote, urlparse, urlunparse
 
 from aiohttp import web
 
-from kiro_crew import platform_compat
+from kiro_crew import github_runner, platform_compat
+
+# Validation policy, well-known install dirs, and the strict-mode toggle are
+# owned by the shared hardened runner (kiro_crew.github_runner) so every
+# gh/glab-spawning surface applies exactly the same trust policy and never
+# drifts. Re-exported under the historical private names because this module
+# is their long-standing import location (issue_radar's glab resolution and
+# the provider tests reach them here).
+from kiro_crew.github_runner import GH_ENV_PASSTHROUGH as _GH_ENV_PASSTHROUGH
+from kiro_crew.github_runner import (
+    PROVIDER_EXECUTABLE_CANDIDATES as _PROVIDER_EXECUTABLE_CANDIDATES,
+)
+from kiro_crew.github_runner import STRICT_PROVIDER_BIN_ENV as _STRICT_PROVIDER_BIN_ENV
+from kiro_crew.github_runner import (
+    provider_executable_candidates,
+)
+from kiro_crew.github_runner import strict_provider_bins as _strict_provider_bins
+from kiro_crew.github_runner import validate_provider_executable as _validate_provider_executable
 from kiro_crew.sandbox import create_subprocess_limited, sandboxed_spawn_argv
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
@@ -64,30 +79,8 @@ _CHECKS_FETCH_RESERVATION_BYTES = 8 * 1024 * 1024
 _ISSUE_CACHE_MAX_BYTES = 16 * 1024 * 1024
 _ISSUE_FETCH_RESERVATION_BYTES = 16 * 1024 * 1024
 _PROVIDER_EXECUTABLE_OVERRIDES = {
-    "gh": "KIROCREW_GH_BIN",
+    "gh": github_runner.GH_BIN_ENV,
     "glab": "KIROCREW_GLAB_BIN",
-}
-# Opt-in hardening for shared/multi-tenant hosts: restore the historical rule
-# that a provider CLI must be root-owned and unwritable by the gateway user.
-# Off by default — see _validate_provider_executable for the current policy.
-_STRICT_PROVIDER_BIN_ENV = "KIROCREW_PROVIDER_BIN_STRICT"
-_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
-# Well-known install dirs searched (in order) before the ambient PATH. Shared
-# with Issue Radar's gh resolver (issue_radar/backend/github_client.py) so both
-# panels accept exactly the same set of gh locations and never drift.
-_PROVIDER_EXECUTABLE_DIRS = (
-    "/usr/local/libexec/kirocrew",
-    "/usr/libexec/kirocrew",
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/home/linuxbrew/.linuxbrew/bin",
-)
-_PROVIDER_EXECUTABLE_CANDIDATES = {
-    executable: tuple(
-        f"{directory}/{executable}" for directory in _PROVIDER_EXECUTABLE_DIRS
-    )
-    for executable in ("gh", "glab")
 }
 # Provider commands are absolute. Keep PATH deterministic only for trusted
 # system helpers a provider may invoke; never inherit a workspace-controlled
@@ -125,7 +118,14 @@ _PROVIDER_BASE_ENV_KEYS = frozenset(
     }
 )
 _PROVIDER_AUTH_ENV_KEYS = {
-    "gh": frozenset({"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"}),
+    # The gh set derives from the canonical union owned by the shared runner
+    # (every key is gh-scoped auth/network/TLS config). GH_HOST passes through
+    # it, but _run_json pins GH_HOST=github.com afterward, so the final env
+    # cannot drift to a configured enterprise default — and for the same
+    # reason the enterprise tokens are withheld: a github.com-pinned child can
+    # never use them, so forwarding them is pure surplus credential surface.
+    "gh": frozenset(_GH_ENV_PASSTHROUGH)
+    - {"GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"},
     "glab": frozenset({"GLAB_CONFIG_DIR", "GITLAB_TOKEN"}),
 }
 # url -> (stored_at, serialized_size_bytes, normalized_payload)
@@ -187,171 +187,6 @@ def _audit_provider_cli(
         if critical:
             raise
         logger.debug("SEL provider CLI audit failed", exc_info=True)
-
-
-def _path_parents(path: Path) -> list[Path]:
-    """Return every parent through the filesystem root."""
-    parents: list[Path] = []
-    current = path.parent
-    while True:
-        parents.append(current)
-        if current.parent == current:
-            return parents
-        current = current.parent
-
-
-def _strict_provider_bins() -> bool:
-    """True when the operator opted into the root-owned-only provider policy."""
-    return os.environ.get(_STRICT_PROVIDER_BIN_ENV, "").strip().lower() in _TRUTHY_ENV_VALUES
-
-
-def _agent_writable_roots() -> tuple[Path, ...]:
-    """Trees the agent itself writes: the active project checkout and the LLM
-    workspace root (worktrees, venvs, scratch files, downloaded repos).
-
-    A provider CLI resolved inside one of these is refused — a repo-planted
-    ``gh`` shim is the substitution vector the model itself controls, and it is
-    the same check codex applies to its own sandbox helper (reject a binary
-    found inside the workspace, accept anything else).
-    """
-    raw_roots = [os.environ.get("KIROCREW_PROJECT_DIR")]
-    try:
-        from kiro_crew.config.loader import workspace_root
-
-        raw_roots.append(str(workspace_root()))
-    except Exception:  # pragma: no cover - config unavailable in isolation
-        logger.debug("workspace root unavailable for provider CLI validation", exc_info=True)
-    roots: list[Path] = []
-    for raw in raw_roots:
-        if not raw:
-            continue
-        try:
-            roots.append(Path(raw).resolve())
-        except OSError:
-            continue
-    return tuple(roots)
-
-
-def _check_provider_path_component(path: Path, *, label: str, uid: int, strict: bool) -> None:
-    """Apply the ownership/permission policy to one path component."""
-    try:
-        path_stat = path.stat()
-    except OSError as exc:
-        raise ValueError("executable hierarchy is not accessible") from exc
-    if strict:
-        if path_stat.st_uid != 0:
-            raise ValueError(f"{label} is not root-owned")
-        if path_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH) or os.access(path, os.W_OK):
-            raise ValueError(f"{label} is writable by the gateway user")
-        return
-    # Relaxed policy: the gateway user's own installs are fine; a binary owned
-    # by a third account or writable by the whole host is not.
-    if path_stat.st_uid not in (0, uid):
-        raise ValueError(f"{label} is owned by another user (uid {path_stat.st_uid})")
-    if path_stat.st_mode & stat.S_IWOTH:
-        # A world-writable DIRECTORY is tolerated when it is sticky (`/tmp`,
-        # 1777): only the owner may replace an entry, so the uid check above
-        # still decides. Without the sticky bit any local account can swap the
-        # entry out, and a world-writable FILE can be rewritten in place.
-        if not (stat.S_ISDIR(path_stat.st_mode) and path_stat.st_mode & stat.S_ISVTX):
-            raise ValueError(f"{label} is world-writable")
-
-
-def _validate_provider_executable(candidate: str) -> str:
-    """Return the canonical path of a provider CLI we will run, or raise.
-
-    Default policy — *if `gh` works in your terminal, it works here*. Any
-    executable the gateway user could run interactively is accepted, including
-    the ordinary user-owned Homebrew/Linuxbrew/asdf installs: requiring a
-    root-owned copy made every stock ``brew install gh`` fail and pushed users
-    into a ``sudo cp`` ritual for a CLI they had already installed and
-    authenticated. What stays refused is provenance the user did not choose:
-
-    * a binary (or parent dir) owned by another unprivileged account,
-    * anything world-writable, e.g. a ``/tmp`` shim (a world-writable *directory*
-      is tolerated only when sticky, where the owner check still decides),
-    * anything inside the agent's project checkout or workspace root, the one
-      substitution vector the model itself controls (``_agent_writable_roots``).
-
-    Provider children still receive only the minimal, provider-scoped env built
-    by ``_provider_env`` (no AWS/Slack/gateway secrets, no inherited PATH), and
-    every spawn is SEL-audited — containment and audit carry the trust boundary
-    instead of binary provenance.
-
-    A gateway running as **root** is refused outright, in both modes: every
-    process it spawns (including the agent's own shell) would be root too, which
-    makes the ownership and agent-tree checks vacuous.
-
-    Set ``KIROCREW_PROVIDER_BIN_STRICT=1`` on shared or multi-tenant hosts to
-    restore the previous rule: canonical, symlink-free, root-owned and
-    unwritable by the gateway user through every parent.
-    """
-    if not os.path.isabs(candidate):
-        raise ValueError("path must be absolute")
-    getuid = getattr(os, "getuid", None)
-    geteuid = getattr(os, "geteuid", getuid)
-    if getuid is None or geteuid is None:
-        raise ValueError("filesystem ownership checks are unavailable")
-    if geteuid() == 0:
-        raise ValueError("provider execution is disabled for a root gateway")
-    strict = _strict_provider_bins()
-
-    original = Path(candidate)
-    try:
-        resolved = original.resolve(strict=True)
-    except OSError as exc:
-        raise ValueError("path does not exist") from exc
-    if strict and original != resolved:
-        raise ValueError("path must be canonical and contain no symlinks")
-
-    try:
-        if not stat.S_ISREG(resolved.stat().st_mode):
-            raise ValueError("path is not a regular file")
-    except OSError as exc:
-        raise ValueError("executable hierarchy is not accessible") from exc
-    if not os.access(resolved, os.X_OK):
-        raise ValueError("file is not executable")
-
-    if not strict:
-        for root in _agent_writable_roots():
-            if resolved == root or root in resolved.parents:
-                raise ValueError(f"executable is inside the agent-writable tree {root}")
-
-    uid = geteuid()
-    _check_provider_path_component(resolved, label="executable", uid=uid, strict=strict)
-    # A symlink's own directory chain is part of the provenance too (relaxed
-    # mode allows symlinks, so /opt/homebrew/bin gets checked as well).
-    parents = list(_path_parents(resolved))
-    if not strict and original != resolved:
-        parents += [p for p in _path_parents(original) if p not in parents]
-    for parent in parents:
-        try:
-            if not stat.S_ISDIR(parent.stat().st_mode):
-                raise ValueError("executable parent is not a directory")
-        except OSError as exc:
-            raise ValueError("executable hierarchy is not accessible") from exc
-        _check_provider_path_component(parent, label="executable parent", uid=uid, strict=strict)
-    return str(resolved)
-
-
-def provider_executable_candidates(executable: str) -> tuple[str, ...]:
-    """Absolute paths to try for *executable*, in resolution order.
-
-    The well-known install dirs come first (a managed root-owned copy still
-    wins when one exists), then every ``PATH`` hit — so the install the user
-    already runs from their terminal is found even when it lives somewhere this
-    module has never heard of (asdf, mise, ``~/.local/bin``). ``PATH`` is not
-    consulted in strict mode, which by definition only trusts system dirs.
-    """
-    ordered: dict[str, None] = dict.fromkeys(_PROVIDER_EXECUTABLE_CANDIDATES.get(executable, ()))
-    if not _strict_provider_bins():
-        for entry in (os.environ.get("PATH") or "").split(os.pathsep):
-            if not entry:
-                continue
-            found = os.path.join(entry, executable)
-            if os.path.isfile(found) and os.access(found, os.X_OK):
-                ordered.setdefault(os.path.abspath(found), None)
-    return tuple(ordered)
 
 
 def _provider_setup_message(executable: str, override_name: str, last_error: str) -> str:
@@ -443,11 +278,16 @@ class SourceRef:
 
 
 _GITLAB_HOSTS_TTL_SECS = 30.0
-# Cached allowlist snapshot. Populated only by _load_gitlab_hosts() running in a
-# worker thread, so every reader on the event loop is a pure dict lookup.
+# Cached allowlist snapshots. Populated only by _load_provider_hosts() running
+# in a worker thread, so every reader on the event loop is a pure dict lookup.
+# GitLab and Jira allowlists come out of the SAME config read and share one
+# TTL, lock, and generation counter: they change together (one config file) and
+# consumers that memoize parse results (the per-slot sidebar source links) fold
+# a single generation into their cache key either way.
 _gitlab_hosts_snapshot: frozenset[str] = frozenset()
+_jira_hosts_snapshot: frozenset[str] = frozenset()
 _gitlab_hosts_loaded_at = 0.0
-# Bumped whenever the snapshot's CONTENT changes. Consumers that memoize a
+# Bumped whenever either snapshot's CONTENT changes. Consumers that memoize a
 # parse result (per-slot sidebar source links) fold this into their cache key so
 # a later allowlist load invalidates decisions made against the cold snapshot.
 _gitlab_hosts_generation = 0
@@ -466,17 +306,19 @@ def _gitlab_hosts_fresh() -> bool:
     )
 
 
-def _publish_gitlab_hosts(hosts: frozenset[str]) -> None:
-    """Install a freshly loaded snapshot, bumping the generation on real change."""
-    global _gitlab_hosts_snapshot, _gitlab_hosts_loaded_at, _gitlab_hosts_generation
-    if hosts != _gitlab_hosts_snapshot:
-        _gitlab_hosts_snapshot = hosts
+def _publish_provider_hosts(gitlab: frozenset[str], jira: frozenset[str]) -> None:
+    """Install freshly loaded snapshots, bumping the generation on real change."""
+    global _gitlab_hosts_snapshot, _jira_hosts_snapshot
+    global _gitlab_hosts_loaded_at, _gitlab_hosts_generation
+    if gitlab != _gitlab_hosts_snapshot or jira != _jira_hosts_snapshot:
+        _gitlab_hosts_snapshot = gitlab
+        _jira_hosts_snapshot = jira
         _gitlab_hosts_generation += 1
     _gitlab_hosts_loaded_at = time.monotonic()
 
 
-def _load_gitlab_hosts() -> frozenset[str]:
-    """Read the configured self-managed GitLab hosts. BLOCKING -- never on the loop.
+def _load_provider_hosts() -> tuple[frozenset[str], frozenset[str]]:
+    """Read the configured GitLab and Jira hosts. BLOCKING -- never on the loop.
 
     ``KiroCrewConfig.load()`` stats, reads, parses, and validates config files, so
     a slow or network-backed config directory would stall the sole event loop.
@@ -485,10 +327,11 @@ def _load_gitlab_hosts() -> frozenset[str]:
     try:
         from kiro_crew.config.loader import KiroCrewConfig
 
-        return frozenset(KiroCrewConfig.load().dashboard.gitlab_hosts)
+        dashboard = KiroCrewConfig.load().dashboard
+        return frozenset(dashboard.gitlab_hosts), frozenset(dashboard.jira_hosts)
     except Exception:
-        logger.debug("self-hosted GitLab allowlist unavailable", exc_info=True)
-        return frozenset()
+        logger.debug("self-hosted provider allowlists unavailable", exc_info=True)
+        return frozenset(), frozenset()
 
 
 async def ensure_gitlab_hosts_loaded() -> frozenset[str]:
@@ -511,9 +354,9 @@ async def ensure_gitlab_hosts_loaded() -> frozenset[str]:
         # Another waiter may have refreshed while this one queued.
         if _gitlab_hosts_fresh():
             return _gitlab_hosts_snapshot
-        hosts = await asyncio.to_thread(_load_gitlab_hosts)
-        _publish_gitlab_hosts(hosts)
-        return hosts
+        gitlab, jira = await asyncio.to_thread(_load_provider_hosts)
+        _publish_provider_hosts(gitlab, jira)
+        return gitlab
 
 
 def _allowed_gitlab_hosts() -> frozenset[str]:
@@ -527,6 +370,16 @@ def _allowed_gitlab_hosts() -> frozenset[str]:
     recognized yet).
     """
     return _gitlab_hosts_snapshot
+
+
+def _allowed_jira_hosts() -> frozenset[str]:
+    """Return the cached self-hosted Jira hosts. Same discipline as GitLab.
+
+    Loaded by the same :func:`ensure_gitlab_hosts_loaded` refresh (one config
+    read covers both allowlists), so every entry point that awaits it before
+    parsing has this snapshot warm too. Fails closed while cold.
+    """
+    return _jira_hosts_snapshot
 
 
 # Path markers that identify a GitLab object, paired with the SourceRef kind
@@ -581,6 +434,46 @@ def _gitlab_ref(host: str, path: str) -> SourceRef:
     owner = project.rsplit("/", 1)[0] if "/" in project else ""
     return SourceRef(
         "gitlab", normalized, host, owner, repo, number, project=project, kind=kind
+    )
+
+
+# A Jira issue key: PROJECT-NUMBER where the project part starts with a letter,
+# is uppercase alphanumeric, and Jira caps it at 10 characters. Mirrors the
+# frontend's JIRA_KEY_RE in pullRequestLinks.ts -- the two parsers must agree so
+# a chip the backend emits always re-parses on the frontend for the reveal.
+_JIRA_KEY_RE = re.compile(r"[A-Z][A-Z0-9]{0,9}-\d+")
+
+
+def _jira_ref(host: str, path: str) -> SourceRef:
+    """Build a Jira ``SourceRef`` for an already-authorized host.
+
+    Jira issues live at ``/browse/KEY-123``, possibly behind a context path
+    (``/jira/browse/KEY-123`` on some Cloud tenants and Data Center installs).
+    The prefix is preserved in the normalized URL so a self-hosted chip opens
+    the real endpoint. The project key maps onto ``repo`` and the numeric tail
+    onto ``number`` -- the same shape the frontend derives, so the sidebar chip
+    label (``PROJ-123``) and the Issues panel identity agree end to end.
+    """
+    marker = "/browse/"
+    browse_idx = path.find(marker)
+    if browse_idx < 0:
+        raise ValueError(
+            "Expected a Jira URL like https://org.atlassian.net/browse/PROJ-123."
+        )
+    # The key is the first segment after /browse/; deeper segments are Jira UI
+    # state, not identity. Uppercase before validating -- Jira treats keys
+    # case-insensitively and canonicalizing here keeps the dedup map in
+    # state.py from splitting one issue across case variants.
+    key = path[browse_idx + len(marker) :].split("/", 1)[0].upper()
+    if not _JIRA_KEY_RE.fullmatch(key):
+        raise ValueError(
+            "Expected a Jira URL like https://org.atlassian.net/browse/PROJ-123."
+        )
+    project_key, number_text = key.rsplit("-", 1)
+    prefix = path[:browse_idx]
+    normalized = urlunparse(("https", host, f"{prefix}{marker}{key}", "", "", ""))
+    return SourceRef(
+        "jira", normalized, host, "", project_key, int(number_text), kind="issue"
     )
 
 
@@ -645,10 +538,21 @@ def parse_source_url(raw_url: str) -> SourceRef:
     if host and candidate in _allowed_gitlab_hosts():
         return _gitlab_ref(candidate, path)
 
+    # Jira: Atlassian Cloud (``*.atlassian.net``) is recognized automatically --
+    # the suffix is Atlassian-operated, so it identifies the product the way
+    # ``github.com`` does. Self-hosted Jira / Data Center requires an exact
+    # entry in ``dashboard.jira_hosts``, the same allowlist discipline as
+    # self-managed GitLab and checked AFTER it so a host an operator listed as
+    # GitLab is never reinterpreted as Jira.
+    is_cloud_jira = host.endswith(".atlassian.net") and len(host) > len(".atlassian.net")
+    if host and (is_cloud_jira or candidate in _allowed_jira_hosts()):
+        return _jira_ref(candidate, path)
+
     raise ValueError(
         "Only github.com pull requests and issues, gitlab.com merge requests and "
-        "issues, and merge requests or issues on a GitLab host listed in "
-        "dashboard.gitlab_hosts are supported."
+        "issues, merge requests or issues on a GitLab host listed in "
+        "dashboard.gitlab_hosts, and Jira issues on *.atlassian.net or a host "
+        "listed in dashboard.jira_hosts are supported."
     )
 
 
@@ -800,7 +704,14 @@ async def _run_json(
         # in glab's own config (reachable via GLAB_CONFIG_DIR), which is scoped to
         # the host it was created for.
         allowed_env_keys = allowed_env_keys - {"GITLAB_TOKEN"}
-    base_env = {key: value for key, value in os.environ.items() if key in allowed_env_keys}
+    # Matching follows the shared convention (exact on POSIX, case-folded on
+    # Windows — see platform_compat.env_key_allowed) so the filter never
+    # depends on the allowlist's casing agreeing with what os.environ yields.
+    base_env = {
+        key: value
+        for key, value in os.environ.items()
+        if platform_compat.env_key_allowed(key, allowed_env_keys)
+    }
     base_env.update(
         {
             "GH_PAGER": "cat",
@@ -2445,6 +2356,11 @@ async def fetch_issue(raw_url: str, *, refresh: bool = False) -> dict[str, Any]:
     ref = parse_source_url(raw_url)
     if ref.kind != "issue":
         raise ValueError("This URL points at a pull request or merge request, not an issue.")
+    # Jira has no local CLI integration: the chip and the Issues panel entry are
+    # link-outs only (the panel offers "Open in Jira"). Refuse here so a direct
+    # API call can never hand a Jira URL to the GitLab fetch path below.
+    if ref.provider == "jira":
+        raise ValueError("Jira issues open in the browser; there is no local fetch for them.")
     now = time.monotonic()
     async with _ISSUE_CACHE_LOCK:
         cached = _ISSUE_CACHE.get(ref.url)

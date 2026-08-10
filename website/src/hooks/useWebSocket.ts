@@ -5,9 +5,12 @@ import { useAppDispatch } from '../store'
 import { store } from '../store'
 import { sseStatus, sseConnected, sseDisconnected, sseSlots, sseTodoUpdate, setChannelTrusted, sseSlotTitle, triggerRefresh, fetchSlots, markSlotUnread, setUpdateProgress, sseSubagentStatus, sseSubagentText, touchSlotActivity, patchSlotSourceLinks, type SubagentDetail } from '../store/dashboardSlice'
 import { addNotification, ackNotificationByTs, unackNotificationByTs, removeNotificationByTs, fetchNotifications } from '../store/notificationsSlice'
-import { MC_NOTIFICATION_EVENT, TURN_DONE_KIND, shouldChimeOnTurnDone, type McNotificationDetail } from './notificationEvent'
+import { MC_NOTIFICATION_EVENT, TURN_DONE_KIND, APPROVAL_KIND, shouldChimeOnTurnDone, type McNotificationDetail } from './notificationEvent'
 import { emitThemeSound } from './themeSound'
-import { fetchHistory, missedChunkMarker, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, warmSlotCache, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, clearSubagentsForSnapshot, sseSubagentPending, sseSubagentSpawn, sseSubagentQueued, sseSubagentChunk, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentSnapshot, sseSubagentBatchUpdate, sseSubagentBatchChunks, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, sseWorkflowEvent, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, appendSlotMessage, setQuestionCard, resolveQuestionCard, setFollowupCard, setFolderSuggestion, sseMcpAppRender, setGoalLoops, sseGoalLoop } from '../store/chatSlice'
+import {
+  fetchHistory, missedChunkMarker, sseChatMessage, sseChatMessageUpdate, sseChatMessagePatchByTs, sseThinkingChunk, refreshSlot, warmSlotCache, sseContextUsage, clearMessages, setVoicePlaying, setVoiceAudio, resolveByApprovalId, clearSubagentsForSnapshot, sseSubagentPending, sseSubagentSpawn, sseSubagentQueued, sseSubagentChunk, sseSubagentTool, sseSubagentStalled, sseSubagentRetrying, sseSubagentDone, sseSubagentSnapshot, sseSubagentBatchUpdate, sseSubagentBatchChunks, sseToolActivity, sseToolResult, sseActivityEvent, sseSideResult, sseWorkflowEvent, setSlotStatusDetail, removeQueuedMessage, appendQueuedMessage, cancelQueuedMessage, editQueuedMessage, reorderQueuedMessages, appendSlotMessage, setQuestionCard, resolveQuestionCard, setFollowupCard, setFolderSuggestion, sseMcpAppRender, setGoalLoops, sseGoalLoop, sseSideQueue
+} from '../store/chatSlice'
+import { TAB_ID } from '../api/tabId'
 import { api } from '../api/client'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import { applyStatusDelta, parseStatusDelta } from '../utils/pullRequestStatusDelta'
@@ -545,6 +548,16 @@ export function useWebSocket() {
             break
           case 'approval': {
             queryClient.invalidateQueries({ queryKey: ['global-approvals'] })
+            // Approval-blocked chime: the agent is stuck until the user acts.
+            // Suppressed during reconnect catch-up (same policy as turn-done).
+            if (!reconnectingRef.current) {
+              try {
+                const detail: McNotificationDetail = { kind: APPROVAL_KIND }
+                window.dispatchEvent(new CustomEvent(MC_NOTIFICATION_EVENT, { detail }))
+              } catch (err) {
+                console.warn('mc-notification listener error', err)
+              }
+            }
             // Browser notification when tab not focused (permission must be granted via UI interaction elsewhere)
             if (typeof Notification !== 'undefined' && document.hidden && Notification.permission === 'granted') {
               new Notification(i18nT('hooks.useWebSocket.approval_required'), { body: data.tool || i18nT('hooks.useWebSocket.a_task_needs_your_decision'), tag: 'kirocrew-approval' })
@@ -690,6 +703,9 @@ export function useWebSocket() {
           case 'queue_edit':
             dispatch(editQueuedMessage(data))
             break
+          case 'queue_reorder':
+            dispatch(reorderQueuedMessages(data))
+            break
           case 'chat_chunk': {
             // #1: buffer the chunk and flush once per frame (see flushChunks),
             // instead of dispatching — and recomputing the O(N) displayItems /
@@ -714,7 +730,7 @@ export function useWebSocket() {
             break
           }
           case 'tool_call':
-            dispatch(sseToolActivity({ ...data as { slot: string; tool: string; kind: string; purpose: string; input_preview: string }, auto: (data as Record<string, unknown>).auto === true, tool_call_id: (data as Record<string, unknown>).tool_call_id as string | undefined, is_update: (data as Record<string, unknown>).is_update === true }))
+            dispatch(sseToolActivity({ ...data as { slot: string; tool: string; kind: string; purpose: string; input_preview: string; is_shell?: boolean }, auto: (data as Record<string, unknown>).auto === true, tool_call_id: (data as Record<string, unknown>).tool_call_id as string | undefined, is_update: (data as Record<string, unknown>).is_update === true, is_shell: (data as Record<string, unknown>).is_shell === true }))
             if (data.slot) {
               dispatch(setSlotStatusDetail({ slot: data.slot, kind: 'tool', text: sanitizeLlmOutput((data as Record<string, unknown>).purpose as string || data.tool), toolName: sanitizeLlmOutput(data.tool), ts: Date.now() }))
             }
@@ -731,7 +747,11 @@ export function useWebSocket() {
             dispatch(sseMcpAppRender(data as Parameters<typeof sseMcpAppRender>[0]))
             break
           case 'question_card':
-            dispatch(setQuestionCard(data as Parameters<typeof setQuestionCard>[0]))
+            // `fresh` marks a LIVE ask delivery: even if its payload repeats
+            // the identical question, it must get its own delivery identity
+            // (cardId) — unlike the reconnect re-sync above, which re-dispatches
+            // a still-pending card and must keep the existing entry.
+            dispatch(setQuestionCard({ ...(data as Parameters<typeof setQuestionCard>[0]), fresh: true }))
             break
           case 'question_card_resolved': {
             const ask = data as { ask_id: string }
@@ -865,8 +885,24 @@ export function useWebSocket() {
             dispatch(sseWorkflowEvent(data as { run_id: string; seq?: number; ts?: number; type: string; data?: Record<string, unknown> }))
             break
           case 'chat.side_result':
-            dispatch(sseSideResult(data as { slot: string; run_id: string; role: 'user' | 'assistant'; content: string; ts?: number; final?: boolean; is_error?: boolean }))
+            dispatch(sseSideResult(data as { slot: string; run_id: string; role: 'user' | 'assistant'; content: string; ts?: number; final?: boolean; is_error?: boolean; steer?: boolean }))
             break
+          case 'chat.side_queue': {
+            // `raw` marks content the LOCAL client typed; broadcast payloads are scrubbed by
+            // definition. Stripped rather than merely left out of the cast, so a future
+            // server-side field of the same name could never vouch for redacted text.
+            const { raw: _wireRaw, ...sideQueueFrame } = data as Record<string, unknown>
+            // An echo of THIS tab's own cancel, or of another tab's. Only the tab that
+            // cancelled takes the question back; every tab still drops the card. An absent
+            // origin releases, which keeps a lone frame (HTTP response lost) from losing it.
+            const frameOrigin = sideQueueFrame.origin_client
+            const foreignCancel = typeof frameOrigin === 'string' && frameOrigin !== TAB_ID
+            dispatch(sseSideQueue({
+              ...(sideQueueFrame as unknown as { slot: string; action: 'push' | 'edit' | 'cancel' | 'drain'; queue_id: string; content?: string; ts?: number; front?: boolean; steer_id?: string }),
+              ...(foreignCancel ? { suppressRelease: true } : {}),
+            }))
+            break
+          }
           case 'heartbeat':
             // No-op: SessionStatus already ticks elapsed via setInterval.
             // Dispatching here would reset ts and break slow-warning detection.

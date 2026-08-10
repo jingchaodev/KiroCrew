@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog  # noqa: F401
     from kiro_crew.messaging.transport import MessagingTransport  # noqa: F401
     from kiro_crew.power import SleepInhibitor  # noqa: F401
+    from kiro_crew.slack.outbound import PostedOptions  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -533,9 +534,20 @@ STALE_RECOVERY_PREFIX = "[Stalled turn — automatic recovery]"
 # partial results and continue. Rendered as an "inject" message (not a user
 # bubble) and never mirrored to a linked Slack thread as user input.
 TOOL_STALL_RECOVERY_PREFIX = "[Tool stall — automatic recovery]"
+# Prefix on the continuation injected after a reset recovers an interrupted
+# connection. The body lives in chat_utils so queue provenance and turn routing
+# share one canonical instruction.
+CONN_RECOVERY_PREFIX = "[Connection lost — automatic recovery]"
+# Prefix on the continuation injected when a reset recovers a turn the backend
+# refused because the session was still busy. Separate from
+# CONN_RECOVERY_PREFIX even though both requeue the same continuation shape:
+# nothing was disconnected, and the marker is what the transcript renders, so
+# sharing the connection marker would report a dropped connection to a user
+# whose status card reads "Session busy". Body: _BUSY_RECOVER_MSG in chat_utils.
+BUSY_RECOVERY_PREFIX = "[Session busy — automatic recovery]"
 # Prefix on the runner-injected CONTINUE that resumes a turn cut short by a
 # transient backend 5xx after tokens/tools had already streamed. The body lives
-# in chat_utils as _POSTTOKEN_RECOVER_MSG; the prefix is here so all five
+# in chat_utils as _POSTTOKEN_RECOVER_MSG; the prefix is here so all eight
 # recovery markers share one home and the frontend has one list to mirror.
 POSTTOKEN_RECOVERY_PREFIX = "[Interrupted turn — automatic recovery]"
 # Prefix on the runner-injected nudge that breaks a repeated empty-generation
@@ -575,10 +587,11 @@ def build_refusal_recovery_prompt(refusals: list[tuple[str, str]]) -> str:
     """Build the body of an automatic continuation after a recoverable tool refusal.
 
     When a tool call is refused for a recoverable, system-side reason — a
-    host-gate policy deny or the read-only bash safety gate — kiro-cli ends the
-    turn early with an attribution-free "tool uses were interrupted" marker. The
-    refusal reason is otherwise surfaced only to the dashboard pill and the SEL
-    audit log, never to the model, so the agent stalls and waits for the user.
+    host-gate policy deny, the read-only bash safety gate, or a PreToolUse policy
+    hook block — kiro-cli ends the turn early with an attribution-free
+    "tool uses were interrupted" marker. The refusal reason is otherwise surfaced
+    only to the dashboard pill and the SEL audit log, never to the model, so the
+    agent stalls and waits for the user.
 
     ``refusals`` is a list of ``(tool_title, reason)`` tuples recorded during the
     turn (already redacted by the caller). The returned text hands those reasons
@@ -814,6 +827,10 @@ class _ChatSlot:
         "_trust_reads",
         "_trusted_patterns",
         "_titled",
+        "_title_origin",
+        "_title_epoch",
+        "_title_refresh_mark",
+        "_auto_tagged",
         "_title_in_flight",
         "_title_retry_pending",
         "_artifact",
@@ -821,10 +838,12 @@ class _ChatSlot:
         "_todo",
         "_on_message",
         "_has_reader",
-        "_stop_state",
+        "_stop_state_raw",
+        "_stop_generation",
         "_stop_event_id",
         "_stop_escalated_card_id",
         "_pending_reset_history_key",
+        "_eager_spawn_task",
         "_dirty_flag",
         "_dirty_gen",
         "_orch_tracker",
@@ -856,6 +875,8 @@ class _ChatSlot:
         "_tool_stall_retries",
         "_transient_5xx_retries",
         "_posttoken_retry_used",
+        "_prestream_exhausted_cycles",
+        "_poisoned_reset_used",
         "_empty_response_retries",
         "_batch_rejected",
         "_compaction_fail_streak",
@@ -887,6 +908,10 @@ class _ChatSlot:
         "_native_subagent_tracker",
         "_native_subagent_output",
         "_pending_steers",
+        "_wait_state",
+        "_end_wait_request",
+        "_wait_last_ping",
+        "_wait_contested",
     )
 
     def __init__(
@@ -926,6 +951,26 @@ class _ChatSlot:
         self._trust_reads: bool = False  # auto-approve read-only bash commands
         self._trusted_patterns: set[str] = set()  # session-scoped fnmatch globs
         self._titled: bool = False  # True once a title has been assigned
+        # Provenance of the current title: "auto" (LLM auto-titler or its
+        # fallback) or "user" (manual rename). Governs the background title
+        # REFRESH: only "auto" titles are ever refreshed, so a manual rename is
+        # final. Persisted as ``title_origin`` and rehydrated in
+        # chat_persistence; a legacy title with no stored origin rehydrates as
+        # "user" so a possibly-manual name is never rewritten. "" = untitled.
+        self._title_origin: str = ""
+        # Monotonic counter bumped on every EXPLICIT title assignment (manual
+        # rename or the manual generate-title endpoint). Background title tasks
+        # snapshot it before generating and re-check it after each await, so an
+        # explicit title landing mid-generation is never overwritten (see
+        # chat_title._maybe_auto_title / maybe_refresh_title).
+        self._title_epoch: int = 0
+        # User-message count at the last background title refresh ATTEMPT (0 =
+        # never refreshed). Each milestone in chat_title._TITLE_REFRESH_MILESTONES
+        # fires at most once, attempt-counted (a KEEP/SKIP/error consumes it), so
+        # the refresh token budget is hard-bounded. Persisted so a gateway
+        # restart cannot re-spend consumed milestones.
+        self._title_refresh_mark: int = 0
+        self._auto_tagged: bool = False  # True once auto-tag has been attempted
         # Guards against concurrent LLM auto-title attempts (on-send trigger vs
         # the end-of-turn chat_done trigger racing on the same slot).
         self._title_in_flight: bool = False
@@ -950,7 +995,15 @@ class _ChatSlot:
         # Callback for broadcasting messages via global SSE
         self._on_message: object | None = None  # Callable[[str, dict], None] | None
         self._has_reader: bool = False  # True when HTTP SSE stream is draining
-        self._stop_state: str = "idle"  # 'idle' | 'soft_pending' | 'killing'
+        self._stop_state_raw: str = "idle"  # 'idle' | 'soft_pending' | 'killing'
+        # Monotonic count of stop INITIATIONS (idle → active edges of
+        # _stop_state). Teardown resets _stop_state back to "idle" but never
+        # touches this, so long-running decision points (the poisoned-
+        # conversation canary probe) can capture it before a wait and detect
+        # a Stop that fired AND resolved during the wait — re-reading
+        # _stop_state alone would miss it (the exact race documented in
+        # chat_handlers._make_stop_resolver).
+        self._stop_generation: int = 0
         self._stop_event_id: str | None = None  # transcript message id for in-flight stop
         # Id of the stop card the user escalated to a hard kill, or None. Kept
         # separate from `_stop_state` because turn teardown resets that back to
@@ -966,6 +1019,10 @@ class _ChatSlot:
         # inline because the endpoint can be reached from inside the kiro-cli
         # process group via the set_project MCP tool.
         self._pending_reset_history_key: str | None = None
+        # Debounced speculative session-creation task (session.eager_spawn).
+        # At most one per slot: scheduling a new one cancels the previous, so
+        # rapid signals (create + project set) collapse into a single spawn.
+        self._eager_spawn_task: asyncio.Task[None] | None = None
         self._dirty_flag: bool = False  # True when messages changed since last flush
         # Bumped by the _dirty setter on every True. Lets the periodic flush tell
         # "the True I started this save under" from "a NEW True set during it".
@@ -1046,6 +1103,21 @@ class _ChatSlot:
         # ONCE on a transient 5xx (and only when no tool call fired). Reset on a
         # completed turn alongside _transient_5xx_retries.
         self._posttoken_retry_used: bool = False
+        # Poisoned-conversation escalation (cross-cycle). A cycle that EXHAUSTS
+        # the transient-5xx ladder with ZERO output counts one pre-stream
+        # exhaustion; consecutive exhausted cycles indicate the backend is
+        # deterministically rejecting this session's persisted conversation
+        # (not a momentary blip — a fresh session on the same gateway works).
+        # At the threshold, chat_runner discards the native conversation
+        # (clearing the poisoned resume sid, keeping the session-map entry)
+        # and re-queues once. Streak broken only by a LANDED turn or a
+        # non-matching terminal error.
+        self._prestream_exhausted_cycles: int = 0
+        # One-shot guard for that discard+retry: consumed when a discard is
+        # enqueued, re-armed only by a LANDED turn — so a genuine prolonged
+        # outage gets at most one fresh-conversation attempt, never a
+        # discard loop.
+        self._poisoned_reset_used: bool = False
         self._empty_response_retries: int = 0
         self._batch_rejected: bool = False
         # Per-turn compaction-status failure tracking (Mesh compaction-spam
@@ -1104,7 +1176,9 @@ class _ChatSlot:
         # no-blocking-call-on-event-loop rule forbids. Refreshed at the save
         # boundary, where the lock is already held and the foreign lines are
         # already parsed.
-        self._disk_tail_ts: str | None = None        # Cached frozen-prefix bytes for the append-safe save model.
+        self._disk_tail_ts: str | None = (
+            None  # Cached frozen-prefix bytes for the append-safe save model.
+        )
         # The session file is FROZEN-PREFIX (the first _disk_older_count on-disk
         # message lines, OLDER than the in-memory window) + a fresh re-serialize
         # of the whole window. The prefix is never rewritten, so a restart that
@@ -1164,6 +1238,28 @@ class _ChatSlot:
         # STOP, error). Without this, a steer swallowed by a dying turn
         # vanished with no trace (see the requeue site).
         self._pending_steers: list[str] = []
+        # In-flight `wait` tool sleep, as reported by the tool's own keepalive
+        # ping: {"wait_id": str, "seconds": int, "deadline_ts": float}. The
+        # deadline is on the dashboard's clock (see api_session_keepalive) so
+        # the browser can count down against it directly. None whenever no wait
+        # is sleeping.
+        self._wait_state: dict | None = None
+        # wait_id the user asked to end early, parked here until the sleeping
+        # tool collects it on its next poll. Consumed exactly once.
+        self._end_wait_request: str | None = None
+        # Wall clock of the tracked wait's last keepalive ping. Server-side only
+        # (deliberately NOT in to_dict): it is the heartbeat that distinguishes a
+        # sleep that ended from one that is still running, which is how
+        # _service_wait_ping tells a legitimate hand-over from two concurrent
+        # waits colliding on one session key.
+        self._wait_last_ping: float = 0.0
+        # True once two sleeps have been seen sharing this slot: neither may be
+        # tracked or ended, because there is no way to know which one the user is
+        # looking at. Latched for the rest of the turn and cleared by the same
+        # turn-end block that clears the two fields above -- an earlier revision
+        # expired it on a timer, which let whichever sleep pinged first after
+        # expiry re-publish its deadline onto the other's pill.
+        self._wait_contested: bool = False
 
     @property
     def _dirty(self) -> bool:
@@ -1202,6 +1298,20 @@ class _ChatSlot:
     @property
     def _plan_stage_count(self) -> int:
         return len(self._stage_titles)
+
+    @property
+    def _stop_state(self) -> str:
+        return self._stop_state_raw
+
+    @_stop_state.setter
+    def _stop_state(self, value: str) -> None:
+        # Count stop INITIATIONS (idle → active edge) in a monotonic
+        # generation that teardown never rewinds — see __init__ comment.
+        # Escalations (soft_pending → killing) and resets (→ idle) are not
+        # new initiations and do not bump it.
+        if value != "idle" and self._stop_state_raw == "idle":
+            self._stop_generation += 1
+        self._stop_state_raw = value
 
     @property
     def _stopping(self) -> bool:
@@ -1444,13 +1554,16 @@ class _ChatSlot:
         self._queue.append({"id": qid, "content": content, "kind": kind})
         return qid
 
-    def queue_insert(self, index: int, content: str, kind: str = "") -> str:
+    def queue_insert(self, index: int, content: str, kind: str = "", payload: str = "") -> str:
         """Insert a message at a specific queue position. Returns the queue ID.
 
-        See :meth:`queue_append` for the ``kind`` structural origin tag.
+        See :meth:`queue_append` for the ``kind`` structural origin tag. ``payload``
+        is the orthogonal question of whether the TEXT is runner-authored, read by
+        ``is_synthetic_payload_item``; a recovery entry that replays the user's own
+        message shares the recovery kind but is not machine speech.
         """
         qid = uuid.uuid4().hex[:12]
-        self._queue.insert(index, {"id": qid, "content": content, "kind": kind})
+        self._queue.insert(index, {"id": qid, "content": content, "kind": kind, "payload": payload})
         return qid
 
     def queue_pop(self, index: int = 0) -> dict[str, str]:
@@ -1551,6 +1664,18 @@ class _ChatSlot:
         Linear scan (no regex backtracking) validated by the source-provider
         URL parser and cached behind an explicit content revision.
 
+        Ordered MOST RECENTLY MENTIONED FIRST, which is what makes the sidebar's
+        chip budget useful. Only ``_SERIALIZED_SOURCE_LINKS_PER_SLOT`` chips per
+        kind are serialized and the rest collapse into a "+N" pill, so a
+        first-mention order handed those slots to the OLDEST pull requests in the
+        session and hid the one being worked on -- the longer the session ran, the
+        more certain it was to hide the interesting chip. Scanning backwards also
+        means the ``_MAX_SOURCE_LINKS_PER_SLOT`` ceiling keeps the newest links
+        rather than the first 64 ever mentioned.
+
+        Recency is LAST mention, not first: a pull request under active work gets
+        re-mentioned as it progresses, which is exactly the signal wanted here.
+
         Each entry carries a ``kind`` discriminator (``"change"`` for a pull or
         merge request, ``"issue"`` for an issue). Readers that only handle pull
         requests -- the chip-status cache and every path that reaches ``gh pr
@@ -1575,21 +1700,56 @@ class _ChatSlot:
 
         stop_chars = set(" \t\n<>()[]{}\"'")
         found: dict[str, dict] = {}
-        for msg in self.messages:
-            if len(found) >= _MAX_SOURCE_LINKS_PER_SLOT:
+        # Hard ceiling on parse attempts for the WHOLE call, not per message and not
+        # only on success. `len(found)` advances only for a new valid url, so a
+        # message repeating one rejected candidate (or one valid one) never advanced
+        # it and every occurrence reached the parser: a 58 MB accepted body froze the
+        # event loop for ~13.6s, and this runs synchronously inside `to_dict` on
+        # `push_slots_update`. A budget bounds every flood shape at once -- rejected,
+        # repeated and distinct -- which a dedup set could not, because remembering
+        # candidates in order to skip them is itself unbounded memory.
+        #
+        # Sized far above any real transcript: 64 serialized chips come from a
+        # handful of occurrences each, so 4096 attempts is ~64x headroom while
+        # capping worst-case work in the tens of milliseconds. The walk is
+        # newest-first, so a truncated flood keeps the most recent candidates.
+        parse_budget = _MAX_SOURCE_LINKS_PER_SLOT * 64
+        # Newest message first, and newest url first WITHIN a message, so the
+        # dedup below keeps each url's LAST mention and `found` comes out in
+        # descending recency. One message mentioning several urls is ordered by
+        # position in the text, its only available proxy for "later".
+        for msg in reversed(self.messages):
+            if len(found) >= _MAX_SOURCE_LINKS_PER_SLOT or parse_budget <= 0:
                 break
             if not isinstance(msg, dict) or msg.get("role") in _NON_DURABLE_SOURCE_LINK_ROLES:
                 continue
             content = msg.get("content")
             if not isinstance(content, str) or "https://" not in content:
                 continue
-            idx = 0
-            while len(found) < _MAX_SOURCE_LINKS_PER_SLOT:
-                idx = content.find("https://", idx)
+            # Walk this message's urls from the END with `rfind`, so the newest
+            # mention is admitted first and the cap below can stop the walk. An
+            # earlier draft collected the whole message's urls and reversed the
+            # list, which allocated in proportion to the message and parsed every
+            # occurrence before the cap was consulted -- a single message carrying
+            # thousands of urls would stall slot serialization on the event loop.
+            #
+            search_end = len(content)
+            while len(found) < _MAX_SOURCE_LINKS_PER_SLOT and parse_budget > 0:
+                idx = content.rfind("https://", 0, search_end)
                 if idx == -1:
                     break
+                # A candidate ends at the first stop char OR where the NEXT
+                # occurrence begins, whichever comes first. The bound is what keeps
+                # the whole walk linear: without it, content like "https://" repeated
+                # thousands of times has no stop char until the very end, so every
+                # occurrence would rescan the entire tail -- quadratic, on a path
+                # `to_dict` runs synchronously during push_slots_update, which is
+                # enough to trip the event-loop watchdog. Bounded this way each
+                # character is examined once across the whole message.
+                token_limit = search_end
+                search_end = idx
                 end = idx
-                while end < len(content) and content[end] not in stop_chars:
+                while end < token_limit and content[end] not in stop_chars:
                     end += 1
                 # Also strip markdown emphasis (**bold**, *italic*, `code`,
                 # _underscore_, ~~strike~~): agent messages routinely wrap PR
@@ -1597,17 +1757,22 @@ class _ChatSlot:
                 # check. Valid PR/MR URLs end in a number, so these chars can
                 # never belong to a legitimate link tail.
                 candidate = content[idx:end].rstrip(".,!?;:*_~`")
-                idx = end
                 if (
                     "/pull/" not in candidate
                     and "/merge_requests/" not in candidate
                     and "/issues/" not in candidate
+                    and "/browse/" not in candidate
                 ):
                     continue
+                # Every attempt is charged, whether it parses or not -- that is
+                # what makes the bound hold on a rejected-candidate flood.
+                parse_budget -= 1
                 try:
                     ref = parse_source_url(candidate)
                 except ValueError:
                     continue
+                # First writer wins, and because the walk is backwards the first
+                # writer IS the most recent mention.
                 if ref.url not in found:
                     found[ref.url] = {
                         "provider": ref.provider,
@@ -1617,6 +1782,12 @@ class _ChatSlot:
                         # "change" for older payloads, so the frontend defaults
                         # rather than requires it.
                         "kind": ref.kind,
+                        # Jira chips label as PROJECT-NUMBER, so the project key
+                        # (carried in ``repo``) is identity, not decoration.
+                        # Sent only for Jira: GitHub/GitLab chips label by
+                        # number alone and their repo would be payload for
+                        # nothing on every slots push.
+                        **({"repo": ref.repo} if ref.provider == "jira" else {}),
                     }
         links = list(found.values())
         self._source_links_cache = (cache_key, links)
@@ -1752,6 +1923,12 @@ class _ChatSlot:
             "last_activity_ts": last_activity_ts,
             "waiting_for_input": waiting_for_input,
             "stop_state": self._stop_state,
+            # In-flight `wait` sleep, or None. Carries the absolute deadline the
+            # transcript counts down against and the wait_id the "End wait"
+            # button must quote. Rides the slots payload rather than a bespoke
+            # WS event so a page reload mid-wait re-seeds it from
+            # GET /api/chat/slots for free.
+            "wait_state": self._wait_state,
             "created": self.created_at,
             "last_ts": last_ts,
             "last_message": last_msg,
@@ -1814,6 +1991,13 @@ class DashboardState:
     _slots_push_suspend: int = 0
     _slots_push_pending: bool = False
     restoring_open_slots: bool = False
+    # Keys the last open-tab restore could not read (not keys it proved absent).
+    # _persist_open_slots folds these back into the snapshot so a transient read
+    # failure cannot erase the reopen seed. The class-level baseline is an
+    # IMMUTABLE frozenset on purpose: a bare set() here would be one object
+    # shared by every __new__-built instance. __init__ and the restore each
+    # assign a fresh set(), so mutation only ever touches an instance attribute.
+    unrestored_slot_keys: "frozenset[str] | set[str]" = frozenset()
 
     def __init__(
         self,
@@ -1941,6 +2125,8 @@ class DashboardState:
         # being restored from with a half-populated slot set — see
         # _persist_open_slots.
         self.restoring_open_slots = False
+        # Per-instance (see the class-level frozenset baseline for why).
+        self.unrestored_slot_keys: set[str] = set()
         self._notification_log: list[dict[str, Any]] = _load_notifications()
         self._unread_count: int = 0
         # Notification bus (schema v2) — notify() adapts legacy calls onto it;
@@ -1959,6 +2145,20 @@ class DashboardState:
         self.notification_channel_settings = ChannelSettings()
         self._slots: dict[str, _ChatSlot] = {}
         self._slack_to_slot: dict[str, str] = {}  # Slack session_key → slot name
+        # Live OPTIONS controls, keyed by the SESSION KEY that owns them.
+        #
+        # Deliberately here and not on ``_ChatSlot``: a plain Slack thread often
+        # has no dashboard slot at all, and a slot-held record was simply dropped
+        # for those sessions — so the whole expiry lifecycle never engaged and the
+        # stale click it exists to prevent stayed possible (#1694). Keying by
+        # session key makes the slotless case ordinary rather than special.
+        #
+        # One store, not a slot field plus a fallback: a slot can come into
+        # existence at any moment (the channel surface reconciler creates one), so
+        # a fallback map would go invisible the instant one appeared. It also
+        # removes the two-store divergence that let a record be filed under one
+        # index and cleared under another.
+        self._slack_options_by_key: dict[str, tuple[PostedOptions, ...]] = {}
         self._slot_counter = 0
         # slot key → last context-meter reading, for seeding the bar when a
         # session is reopened after its ACP session is gone. Readings this
@@ -1984,8 +2184,18 @@ class DashboardState:
         self._context_snapshots_flush_lock = threading.Lock()
         self._folders: list[dict[str, Any]] = []  # project folder definitions
         self._cron_folders: list[dict[str, Any]] = []  # cron job folder groupings
+        self._chat_pins: list[dict[str, Any]] = []  # pinned chat messages
+        # Serializes pin mutation + persistence so concurrent requests cannot
+        # interleave snapshots and replace chat_pins.json out of order.
+        self._chat_pins_lock = asyncio.Lock()
         # Tag vocabulary: list of {id, name, color, order}. User-managed.
         self._tags: list[dict[str, Any]] = []
+        # True once load_tags() parsed tags.json successfully (or seeded a
+        # fresh install). False means the vocabulary state is UNKNOWN (parse
+        # or I/O failure) — restore-time pruning must fail open then, because
+        # a legitimately-empty vocabulary (user deleted every tag) must still
+        # prune dangling ids while an unreadable one must not wipe anything.
+        self._tags_authoritative: bool = False
         # Sidebar columns — flat list of {id, name, tag_ids, mode, order, include_untagged}
         self._tag_boards: list[dict[str, Any]] = []
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
@@ -2662,6 +2872,23 @@ class DashboardState:
                 for name, slot in list(self._slots.items())
                 if getattr(slot, "memory_mode", "persistent") == "persistent"
             ]
+            # Re-add keys the last restore could not READ. Without this, a tab
+            # dropped by a transient metadata failure is erased from the seed by
+            # the very next flush (this snapshot is taken from live _slots), so
+            # "recoverable on a later restore pass" stops being true and the tab
+            # is gone for good. Only keys that came out of open_slots.json land
+            # here, so the persistent-only filter above still holds for them.
+            #
+            # Iterating this set is safe ONLY because the restoring_open_slots
+            # early-return above covers the one writer: the restore mutates it
+            # between tabs, and this method runs from two threads (the 5s
+            # executor flush and the shutdown thread). That guard is therefore
+            # load-bearing for thread safety here, not just for partial
+            # snapshots — do not narrow it without giving this set its own lock.
+            seen = set(keys)
+            keys.extend(
+                k for k in getattr(self, "unrestored_slot_keys", frozenset()) if k not in seen
+            )
             payload = json.dumps({"keys": keys, "ts": time.time()})
             # Use the canonical atomic_write helper, not a deterministic
             # ".json.tmp" name — _persist_open_slots can run concurrently from
@@ -2840,6 +3067,32 @@ class DashboardState:
     def get_slot(self, name: str) -> _ChatSlot | None:
         """Look up a slot by name without creating it. Returns None if absent."""
         return self._slots.get(name)
+
+    def running_session_keys(self) -> frozenset[str]:
+        """Session keys with a turn in flight right now.
+
+        This is the only signal for "something is using this session at this
+        instant", as distinct from "this session could be resumed" — which is what
+        a ``session_map`` entry means. Storage reclamation needs the first
+        question: moving a session's files is dangerous while a turn is running,
+        and merely being resumable is not.
+
+        Exposed as a method rather than leaving callers to read ``_slots`` so a
+        test double cannot invent the interface: a fake that grants an attribute
+        this class does not have would assert against a fiction while the feature
+        is dead at runtime.
+        """
+        # Local import: chat_utils imports from this module, so a top-level import
+        # would close a cycle. Same shape as the other call sites in this file.
+        from kiro_crew.dashboard.chat_utils import effective_session_key
+
+        # Snapshot the values first. This is called from a worker thread (the
+        # storage scan runs off the event loop), so the loop can create or drop a
+        # slot mid-iteration — which raises RuntimeError and turns an inventory
+        # read into a 500. A list() copy is atomic enough for that.
+        return frozenset(
+            effective_session_key(slot) for slot in list(self._slots.values()) if slot.running
+        )
 
     def spend_slot_by_session(self) -> dict[str, str]:
         """Map each live slot's SESSION key to the SLOT key its spend is filed under.
@@ -3020,9 +3273,7 @@ class DashboardState:
                 # The previous owner's slot may already be gone; fall back to
                 # deriving its key from the name in that case.
                 old_key = (
-                    effective_session_key(old_slot)
-                    if old_slot
-                    else _history_key_for(old_owner)
+                    effective_session_key(old_slot) if old_slot else _history_key_for(old_owner)
                 )
                 self.sessions.set_slack_link(old_key, "", "")
         slot._slack_linked = True
@@ -3033,9 +3284,7 @@ class DashboardState:
         if self.sessions:
             from kiro_crew.dashboard.chat_utils import effective_session_key
 
-            self.sessions.set_slack_link(
-                effective_session_key(slot), thread_ts, channel_id
-            )
+            self.sessions.set_slack_link(effective_session_key(slot), thread_ts, channel_id)
         self.push_slots_update()
 
     def get_or_create_slot(
@@ -3185,6 +3434,24 @@ class DashboardState:
         except Exception:
             pass
         self._slots[name] = slot
+        # Publish the updated key set to SessionManager and the surface
+        # registry NOW, not just on the HTTP slot endpoints. Slots born here
+        # programmatically (auto-research campaign workers, cron/workflow
+        # inject, task runner, spec builder) never pass through those
+        # endpoints, so ``_active_dashboard_slots`` stayed stale and the idle
+        # sweep's orphan branch reaped their live sessions as "slot gone" —
+        # killing the companion subagent runtime (and any subagent mid-prompt
+        # on it) along the way. Guarded: tests build this state without a
+        # SessionManager, and a sync failure must never break slot creation.
+        if self.sessions:
+            try:
+                from kiro_crew.dashboard.chat_utils import _sync_dashboard_slots
+
+                _sync_dashboard_slots(self)
+            except Exception:
+                logger.warning(
+                    "get_or_create_slot: active-slot sync failed for %s", name, exc_info=True
+                )
         self.push_slots_update()
         return slot
 
@@ -3443,6 +3710,85 @@ class DashboardState:
                     )
         return True
 
+    # ── Chat message pin persistence ──
+
+    _CHAT_PINS_FILE = "chat_pins.json"
+
+    def load_chat_pins(self) -> None:
+        """Load pinned chat messages from disk, dropping malformed records.
+
+        Legacy pins (pre-mid era) may lack the ``mid`` field — they are preserved
+        for backward compatibility; new pins always carry ``mid``.
+
+        Error classification:
+        - Missing file: normal (first run) → empty list.
+        - Malformed JSON / invalid shape: tolerated for compatibility → empty list.
+        - Transient I/O errors (PermissionError, OSError): MUST NOT replace
+          valid in-memory state — re-raise so callers know load failed.
+        """
+        path = config_dir() / self._CHAT_PINS_FILE
+        try:
+            if not path.exists():
+                self._chat_pins = []
+                return
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            # Malformed content — treat as empty (data corruption).
+            logger.warning("chat_pins.json has malformed content: %s", exc)
+            self._chat_pins = []
+            return
+        except OSError:
+            # Transient I/O error — do NOT clobber valid in-memory state.
+            logger.warning("Transient I/O error reading chat_pins.json", exc_info=True)
+            raise
+
+        if not isinstance(raw, list):
+            logger.warning("chat_pins.json is not a list (%s); ignoring", type(raw).__name__)
+            self._chat_pins = []
+            return
+
+        valid = [
+            pin
+            for pin in raw
+            if isinstance(pin, dict)
+            and all(isinstance(pin.get(key), str) and pin.get(key) for key in ("id", "slot_key"))
+            # Require at least one identity field: mid or message_ts
+            and (
+                (isinstance(pin.get("mid"), str) and pin.get("mid"))
+                or (isinstance(pin.get("message_ts"), str) and pin.get("message_ts"))
+            )
+            and isinstance(pin.get("preview"), str)
+            and isinstance(pin.get("pinned_at"), str)
+            and pin.get("pinned_at")
+        ]
+        if len(valid) != len(raw):
+            logger.warning("Dropped %d malformed chat pin record(s) on load", len(raw) - len(valid))
+        self._chat_pins = valid
+
+    def save_chat_pins(self) -> None:
+        """Persist pinned chat messages with an atomic, owner-only file replacement."""
+        path = config_dir() / self._CHAT_PINS_FILE
+        atomic_write(path, json.dumps(self._chat_pins), fsync=True, mode=0o600)
+
+    async def remove_chat_pins_for_slots(self, slot_keys: set[str]) -> int:
+        """Remove pins when their persisted history sessions are permanently deleted."""
+        keys = {key for key in slot_keys if key}
+        if not keys:
+            return 0
+        async with self._chat_pins_lock:
+            previous = self._chat_pins
+            remaining = [pin for pin in previous if pin.get("slot_key") not in keys]
+            removed = len(previous) - len(remaining)
+            if not removed:
+                return 0
+            self._chat_pins = remaining
+            try:
+                await asyncio.to_thread(self.save_chat_pins)
+            except Exception:
+                self._chat_pins = previous
+                raise
+            return removed
+
     def folder_breadcrumb(self, folder_id: str, sep: str = " › ") -> str:
         """Render a folder's ancestry root→leaf as a breadcrumb string.
 
@@ -3480,14 +3826,27 @@ class DashboardState:
         tags_path = config_dir() / self._TAGS_FILE
         file_existed = tags_path.exists()
         try:
+            vocab_ok = True
             if file_existed:
                 raw = json.loads(tags_path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
                     self._tags = [t for t in raw if isinstance(t, dict) and t.get("id")]
+                else:
+                    # Valid JSON but not a list (e.g. {}): the vocabulary
+                    # state is UNKNOWN, same as a parse failure — do not let
+                    # restore-time pruning wipe assignments against it.
+                    vocab_ok = False
+                    logger.warning("tags.json is not a list; treating vocabulary as unknown")
+            # Authoritative only when the file is missing (fresh install,
+            # seeded below) or parsed as a list — INCLUDING a legitimately-
+            # empty [] — so restore-time pruning of dangling ids is safe.
+            self._tags_authoritative = vocab_ok
         except Exception:
             logger.warning("Failed to load tags", exc_info=True)
             # Treat a parse error like a present file: do not re-seed.
             file_existed = True
+            # Vocabulary state unknown — restore-time pruning must fail open.
+            self._tags_authoritative = False
         # Back-fill the status flag for legacy tags saved before the field existed.
         # The 5 seed ids are canonical status tags; everything else defaults to False.
         seed_ids = {t["id"] for t in self._DEFAULT_TAGS}
@@ -3518,9 +3877,37 @@ class DashboardState:
         """Persist tag vocabulary to disk (atomic write)."""
         self._atomic_write_json(config_dir() / self._TAGS_FILE, self._tags)
 
+    def save_tags_snapshot(self, snapshot: list[dict]) -> None:
+        """Persist a pre-captured tag snapshot to disk (strict -- raises on failure).
+
+        Used by the serialized tag-write path in chat_tags.py: the snapshot is
+        captured on the event loop under the tags write lock, then this write
+        runs in a worker thread. Lives here (not in chat_tags.py) so the file
+        location resolves through this module's ``config_dir`` exactly like
+        ``save_tags`` -- keeping tests that patch it working unchanged.
+
+        Raises on I/O failure so callers can roll back in-memory state and
+        surface HTTP 5xx rather than silently losing data.
+        """
+        self._atomic_write_json_strict(config_dir() / self._TAGS_FILE, snapshot)
+
     def save_tag_boards(self) -> None:
         """Persist sidebar column layout to disk (atomic write)."""
         self._atomic_write_json(config_dir() / self._TAG_BOARDS_FILE, self._tag_boards)
+
+    def save_tag_boards_snapshot(self, snapshot: list[dict]) -> None:
+        """Persist a pre-captured boards snapshot to disk (strict -- raises on failure).
+
+        Used by the tag-delete path in chat_tags.py: the snapshot is captured
+        on the event loop under the tags write lock, then this write runs in a
+        worker thread. Lives here (not in chat_tags.py) so the file location
+        resolves through this module's ``config_dir`` exactly like
+        ``save_tag_boards`` -- keeping tests that patch it working unchanged.
+
+        Raises on I/O failure so callers can roll back in-memory state and
+        surface HTTP 5xx rather than silently losing data.
+        """
+        self._atomic_write_json_strict(config_dir() / self._TAG_BOARDS_FILE, snapshot)
 
     @staticmethod
     def _atomic_write_json_strict(path: Path, data: Any) -> None:

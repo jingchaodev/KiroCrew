@@ -227,6 +227,10 @@
         "cycles_2": "циклов",
         "definition_of_done_optional": "Критерий готовности (необязательно)",
         "delete": "Удалить",
+        "delete_campaign": "Удалить кампанию?",
+        "deleting": "Удаление…",
+        "delete_campaign_button": "Удалить кампанию",
+        "delete_failed": "Не удалось удалить. Повторите попытку.",
         "delete_this_campaign_and_its_report_this_cannot": "Удалить эту кампанию и её отчёт? Это действие нельзя отменить.",
         "done_when": "Готово, когда:",
         "dynamic_workflow": "Динамический рабочий процесс",
@@ -445,12 +449,18 @@
           "this_review_failed": "Это ревью завершилось ошибкой"
         },
         "findingCard": {
+          "consequence": "Последствие",
+          "evidence": "Подтверждение",
+          "observation": "Наблюдение",
           "post_finding": "Опубликовать эту находку в pull request",
           "post_finding_on": "Опубликовать эту находку в {{target}}",
           "post_this_comment": "Опубликовать этот комментарий",
           "posted_to_the_pull_request": "Опубликовано в pull request",
           "posting": "Публикую…",
+          "select_to_draft_together": "Выбрать для пакетного черновика",
           "select_to_post": "Выбрать {{label}} для публикации",
+          "severity_must_fix": "Обязательно",
+          "severity_should_fix": "Желательно",
           "suggestion": "Предложение",
           "this_finding": "эту находку"
         },
@@ -2264,6 +2274,11 @@
       },
       "list": {
         "adHocTitle": "Внеплановая встреча",
+        "deleteConfirm": "Удалить «{{title}}» вместе со всеми заметками, схемами и задачами? Это действие нельзя отменить.",
+        "deleteFailed": "Не удалось удалить эту встречу.",
+        "deleteMeeting": "Удалить «{{title}}»",
+        "deleteUnavailable": "Завершите встречу перед удалением",
+        "deleted": "Встреча «{{title}}» удалена",
         "empty": "Встреч нет",
         "emptyHintNoCalendar": "Подключите календарь в настройках или начните внеплановую встречу.",
         "emptyHintSynced": "В календаре ничего нет, и ни одна встреча ещё не обработана.",
@@ -2616,13 +2631,16 @@
         "blurb": "Mochi — один питомец, и у каждого Kiro Crew свой. Выберите, кому он составит компанию — показаны только подключённые сейчас экземпляры.",
         "connecting": "подключение…",
         "current": "текущий",
+        "desktop_only": "Выбор экземпляра, который показывает питомец, требует настольного приложения.",
         "errored": "проблема с подключением",
         "feature_off": "Режим нескольких экземпляров отключён. Включите его в настройках Kiro Crew, чтобы выбрать удалённый экземпляр.",
+        "host_disable_note": "Отключение Mochi на другом экземпляре останавливает только фоновую работу этого экземпляра — питомец остаётся на экземпляре, который вы выбрали здесь.",
         "list_failed": "Не удалось прочитать список экземпляров.",
         "loading": "Поиск экземпляров…",
         "mochi_off": "Mochi там отключён",
         "needs_restart": "Режим нескольких экземпляров только что включён — перезапустите gateway, чтобы активировать его.",
         "not_connected": "не подключён",
+        "switch_failed": "Сейчас не удалось сменить экземпляр — ваш выбор сохранён и применится, как только этот экземпляр ответит.",
         "switch_note": "Переключение также меняет внешний вид и историю чата — у каждого экземпляра свои. Сохранённый экземпляр, который исчезает, возвращается к этому компьютеру.",
         "this_computer": "Этот компьютер"
       },
@@ -2847,6 +2865,7 @@
         "shortcut_one_key": "Допустима только одна не-модификаторная клавиша",
         "shortcut_taken": "Другое приложение уже занимает эту клавишу: {{actions}}. Выберите другое сочетание.",
         "shortcuts": "Сочетания клавиш",
+        "shortcuts_desktop_only": "Изменение глобальных сочетаний клавиш требует настольного приложения.",
         "silent_subagents": "Тихие фоновые агенты",
         "silent_subagents_desc": "Подавляет уведомления по завершении фоновых задач (план, проверки наблюдения). Результаты всё равно появляются в чате.",
         "tier_active": "Активный",
@@ -4523,6 +4542,8 @@
       "search_everywhere": "Искать везде",
       "search_for_anything": "Ищи что угодно",
       "search_scope": "Искать {{scope}}...",
+      "retry": "Повторить",
+      "search_failed": "Поиск не удался",
       "searching": "Поиск…",
       "tab": "tab"
     },
@@ -4757,10 +4778,13 @@
       "this_document_is_tracked_as_a_session_artifact_n": "Этот документ отслеживается как артефакт сессии, а не как изменение исходного файла"
     },
     "filePickerMenu": {
+      "folder": "Папка",
+      "folder_kind": "папка",
       "no_matches": "Совпадений нет",
       "open_in_viewer": "Открыть в просмотрщике",
+      "remove_folder": "Удалить папку",
       "searching": "Поиск…",
-      "type_2_chars_to_search_files": "Введите 2+ символа для поиска файлов…"
+      "type_2_chars_to_search_files": "Введите 2+ символа для поиска файлов и папок…"
     },
     "fileRenderers": {
       "empty_file": "Пустой файл",
@@ -4947,7 +4971,9 @@
       "this_issue_is_locked": "Этот issue заблокирован",
       "unknown_author": "Автор неизвестен",
       "untitled": "Без названия",
-      "updated_time": "обновлена {{time}}"
+      "updated_time": "обновлена {{time}}",
+      "jira_open_in_browser": "Jira issue — open in browser to view details.",
+      "open_in_jira": "Open in Jira"
     },
     "jobForm": {
       "a_short_label_for_this_job": "Короткое название для этого задания",
@@ -5155,6 +5181,8 @@
       "open_artifact": "Открыть артефакт {{name}}",
       "open_as_artifact": "Открыть как артефакт",
       "open_folder": "Открыть папку {{path}}",
+      "open_with_default_app": "Открыть в приложении по умолчанию",
+      "path_copied_to_clipboard_no_desktop_available": "Путь скопирован в буфер обмена (рабочий стол недоступен)",
       "preview": "Просмотр",
       "previous_match": "Предыдущее совпадение",
       "previous_shift_enter": "Назад (Shift+Enter)",
@@ -5167,6 +5195,7 @@
       "save_this_file_as_an_artifact_versioned_persiste": "Сохранить этот файл как артефакт (с версиями, постоянный, с комментариями)",
       "saving": "Сохранение…",
       "select_any_text_to_add_inline_comments_then_subm": "Выделите любой текст, чтобы добавить встроенные комментарии, затем отправьте их все в чат.",
+      "show_in_file_manager": "Показать в файловом менеджере",
       "snapshot_version": "Снимок версии",
       "snapshotting": "Создание снимка…",
       "switch_to_split_view": "Переключить на разделённый вид",
@@ -5562,6 +5591,8 @@
       "edit_queued_message": "Изменить сообщение в очереди",
       "interrupt_current_turn_and_send_this_now": "Прервать текущий ход и отправить сейчас",
       "queued": "в очереди",
+      "run_later": "Выполнить позже",
+      "run_sooner": "Выполнить раньше",
       "ready_processing_after_the_current_turn": "готово — обработка после текущего хода",
       "save": "Сохранить",
       "save_edit": "Сохранить правку",
@@ -5718,6 +5749,13 @@
       "undo_remove": "Отменить удаление",
       "will_be_removed_on_save": "Будет удалено при сохранении."
     },
+    "sendToInstanceSubmenu": {
+      "failed": "Ошибка",
+      "not_connected": "нет подключения",
+      "send_a_copy_to": "Отправить копию на",
+      "sent": "Отправлено",
+      "unknown_error": "Неизвестная ошибка"
+    },
     "sessionActionsMenu": {
       "bring_back_to_main": "Вернуть в главное окно",
       "close_session": "Закрыть сеанс",
@@ -5752,6 +5790,11 @@
       "split_right": "Разделить вправо",
       "split_right_d": "Разделить вправо (⌘D)",
       "terminal_pane_coming_in_phase_2": "Панель терминала — появится на этапе 2"
+    },
+    "sessionRefStrip": {
+      "n_messages": "{{n}} сообщ.",
+      "remove_reference": "Удалить ссылку",
+      "remove_reference_to": "Удалить ссылку на {{name}}"
     },
     "settings": {
       "click_to_reset": "Нажми, чтобы сбросить",
@@ -6158,7 +6201,7 @@
       "suggestion_pipeline_status": "Проверить статус моего пайплайна",
       "suggestion_review_cr": "Проверить мой последний CR",
       "suggestion_search_code": "Искать в коде примеры использования",
-      "suggestion_summarize_slack": "Подвести итоги активности в Slack за эту неделю",
+      "suggestion_summarize_chat": "Подвести итоги активности в чате за эту неделю",
       "suggestion_triage_tickets": "Разобрать мои дежурные тикеты",
       "suggestion_write_design_doc": "Помочь мне написать проектный документ",
       "switch_back_to_default_mode": "Вернуться в обычный режим",
@@ -6196,6 +6239,18 @@
       "select": "Выбрать",
       "workspace_name": "Название рабочей области",
       "workspace_name_2": "workspace-name"
+    },
+    "settingRef": {
+      "envVarAriaLabel": "Переменная окружения {{key}}",
+      "envVarDescription": "Установите эту переменную окружения перед запуском Kiro Crew.",
+      "envVarUnsetDescription": "Удалите эту переменную окружения перед запуском Kiro Crew.",
+      "fileOnlyDescription": "Задайте это значение с помощью приведённой ниже команды CLI.",
+      "copied": "Скопировано!",
+      "copyFailed": "Ошибка копирования",
+      "copyCommand": "Скопировать команду",
+      "orEditConfigJson": "Либо отредактируйте ~/.kiro/crew/config.json напрямую.",
+      "openSettingsAriaLabel": "Открыть {{key}} в разделе Настройки → {{tab}}",
+      "fileSettingAriaLabel": "Настройка только через файл {{key}}"
     }
   },
   "hooks": {
@@ -6335,9 +6390,7 @@
   },
   "pages": {
     "agentsPage": {
-      "active_sessions_and_subagent_tasks": "Активные сессии и задачи субагентов",
       "agent_templates": "Шаблоны агентов",
-      "agent_templates_grouped_by_package_update_and_un": "Шаблоны агентов, сгруппированные по пакетам. Обновление и удаление — на уровне пакета. Отдельных агентов можно удалить (файл конфигурации будет удалён).",
       "auto_approved": "Разрешено автоматически",
       "awaiting_first_prompt": "ожидание первого запроса",
       "clear_completed": "Очистить завершённые",
@@ -6347,8 +6400,6 @@
       "could_not_load_this_agent_s_configuration_skills": "Не удалось загрузить конфигурацию этого агента — навыки скрыты, чтобы\n                        не перезаписать их. Выберите агента заново, чтобы повторить попытку.",
       "critical": "Критический",
       "default": "По умолчанию",
-      "default_for_new_sessions": "По умолчанию для новых сессий",
-      "delete_agent": "Удалить {{name}}",
       "delete_subagent": "Удалить субагента {{id}}",
       "denied_commands": "Запрещённые команды",
       "done": "Готово",
@@ -6365,20 +6416,15 @@
       "no_active_sessions": "Нет активных сессий",
       "no_subagents": "Нет субагентов",
       "overage_credits": "Кредиты сверх лимита:",
-      "patterns_blocked": "шаблонов заблокировано",
       "plan_credits": "Кредиты тарифа",
       "prompt_few": "{{count}} промпта",
       "prompt_many": "{{count}} промптов",
       "prompt_one": "{{count}} промпт",
       "prompt_other": "{{count}} промпта",
-      "remove_default_agent": "Убрать агента по умолчанию",
       "req": "/req",
       "resets": "сброс",
       "running": "Выполняется",
       "select_an_agent_to_view_details": "Выберите агента, чтобы посмотреть подробности",
-      "sessions": "Сессии",
-      "set_as_default": "Сделать по умолчанию",
-      "set_as_default_agent": "Сделать агентом по умолчанию",
       "skills": "Навыки",
       "spawn_tasks_from_chat_or_cli": "Запускайте задачи из чата или CLI",
       "subagents": "Субагенты",
@@ -6386,7 +6432,41 @@
       "tools": "Инструменты",
       "tools_2": "инструментов",
       "type_to_filter": "Введите текст для фильтра…",
-      "usage": "Использование"
+      "usage": "Использование",
+      "at_a_glance": "Кратко",
+      "cancel": "Отмена",
+      "cli_chat_chat_channel_threads_and_warm_pool_sessio": "Чат в CLI, ветки в чат-каналах и сессии из тёплого пула берут этот шаблон — crew указывают свой",
+      "comes_with_the_template_read_only_here": "Идёт вместе с шаблоном — здесь только для чтения",
+      "config_file": "Файл настроек",
+      "delete_template": "Удалить шаблон",
+      "delete_the_template_named_confirm": "Удалить шаблон {{name}}? Его файл настроек будет удалён, отменить это нельзя.",
+      "editing_this_template_changes_how_they_behave_in_": "Изменение шаблона поменяет их поведение в следующей сессии",
+      "filter_templates": "Фильтр шаблонов",
+      "from_package": "Из пакета",
+      "guardrails": "Правила безопасности",
+      "id": "ID",
+      "model": "Модель",
+      "no_agent_templates_yet": "Пока нет шаблонов агентов",
+      "no_crews_use_this_template_yet": "Пока ни одна crew не использует этот шаблон",
+      "no_default_template": "Без шаблона по умолчанию",
+      "no_model_pinned_here_a_crew_set_to_inherit_falls_": "Здесь модель не закреплена: crew с наследованием возьмёт глобальное значение по умолчанию",
+      "no_templates_match_your_filter": "Нет шаблонов по этому фильтру",
+      "not_set_for_this_template": "Для этого шаблона не задано",
+      "overview": "Обзор",
+      "package": "Пакет",
+      "pinned_here_a_crew_set_to_inherit_uses_this_model": "Закреплено здесь: crew с наследованием использует эту модель",
+      "source": "Источник",
+      "status": "Статус",
+      "task": "Задача",
+      "templates_come_with_kirocrew_or_with_an_app_you_i": "Шаблоны идут вместе с Kiro Crew или с приложением, которое вы установили",
+      "this_is_the_fallback_template_point_the_picker_a": "Резервный шаблон нельзя удалить — сначала выберите в списке выше другой",
+      "tools_and_mcp": "Инструменты и MCP",
+      "used_by": "Используется",
+      "used_by_crews_repoint_them_on_the_crews_tab_firs": "Используется: {{crews}} — перед удалением переключите их на другой шаблон на вкладке Crews",
+      "what_a_crew_starts_from_its_model_skills_tools_mc": "С чего начинает crew: модель, навыки, инструменты, MCP-серверы и правила безопасности",
+      "when_nothing_names_a_template_use": "Когда шаблон не указан, использовать",
+      "where_it_comes_from": "Откуда он взялся",
+      "yes_delete_it": "Да, удалить"
     },
     "aidlc": {
       "dagView": {
@@ -6907,6 +6987,7 @@
       "folder_actions": "Действия с папкой",
       "folder_breadcrumb": "Путь по папкам",
       "folder_color": "Цвет папки",
+      "from_your_chats": "Из ваших чатов",
       "gallery": "Галерея",
       "import_from_a_file": "Импортировать из файла…",
       "kind": "Тип",
@@ -6943,9 +7024,11 @@
       "slug": "Slug",
       "source": "Источник",
       "star_artifact": "Отметить артефакт",
+      "show_all_count": "Показать все ({{count}})",
+      "show_less": "Показать меньше",
+      "star_a_document_in_from_your_chats_to_save_it_he": "Сохранённых артефактов пока нет — добавьте документ из раздела \"Из ваших чатов\" в избранное, чтобы сохранить его здесь.",
       "star_creates_a_starred_artifact_from_this_docume": "В избранное (создаёт избранный артефакт из этого документа)",
       "star_document": "Добавить документ в избранное",
-      "star_save_to_library": "Отметить (сохранить в библиотеку)",
       "starred": "Избранные",
       "starred_click_to_unstar": "Отмечено — нажми, чтобы снять отметку",
       "start_a_new_blank_document_in_the_library": "Создать новый пустой документ в библиотеке",
@@ -6975,7 +7058,7 @@
       "skills_label": "Навыки",
       "steering_description": "Всегда активные markdown-соглашения из ~/.kiro/steering и .kiro/steering вашего проекта",
       "steering_label": "Направляющие правила",
-      "templates_description": "Установленные конфигурации и пакеты агентов",
+      "templates_description": "С чего начинает crew: модель, навыки, инструменты, MCP-серверы и правила безопасности",
       "templates_label": "Шаблоны агентов"
     },
     "channelPage": {
@@ -7152,7 +7235,9 @@
         "turn_took_cost": "Ход занял {{elapsed}} (стоимость API: {{cost}})",
         "turn_took_credits": "Ход занял {{elapsed}} и израсходовал {{credits}} кредитов",
         "turn_took_credits_cost": "Ход занял {{elapsed}} и израсходовал {{credits}} кредитов (стоимость API: {{cost}})",
-        "use_as_plan_count": "Использовать как план (шагов: {{count}})"
+        "use_as_plan_count": "Использовать как план (шагов: {{count}})",
+        "pin_message": "Закрепить сообщение",
+        "unpin_message": "Открепить сообщение"
       },
       "chatFooter": {
         "compacting": "Сжатие контекста…",
@@ -7256,6 +7341,7 @@
         "recovered_continuing": "восстановлено · продолжение",
         "resuming_the_interrupted_turn": "продолжаем прерванный ход",
         "safety_policy_continuing": "политика безопасности · продолжение автоматически",
+        "session_busy_continuing": "сеанс занят · продолжение автоматически",
         "tool_call_blocked": "Вызов инструмента заблокирован",
         "tool_stopped_responding": "Инструмент перестал отвечать",
         "turn_interrupted": "Ход прерван",
@@ -7281,8 +7367,14 @@
         "context_from": "Контекст из",
         "copied": "Скопировано!",
         "copy": "Копировать",
+        "queue_cancel_failed": "Не удалось отменить этот вопрос из очереди",
+        "queue_edit_failed": "Не удалось обновить этот вопрос из очереди",
         "refresh_context": "Обновить контекст",
+        "refresh_blocked_queued": "Finish or cancel the queued questions first — refreshing would discard them",
+        "refresh_blocked_busy": "Wait for the current answer to finish — refreshing now would discard the pending question",
         "send": "Отправить",
+        "steer_demoted_to_queue": "Ход завершился — вместо этого добавлено в очередь",
+        "steered": "Направлено",
         "thinking": "Размышление…",
         "turn_few": "{{count}} хода",
         "turn_many": "{{count}} ходов",
@@ -7393,9 +7485,13 @@
         "aria_awaiting_approval": "Ожидание одобрения инструмента: {{label}}",
         "aria_hide_details": "Скрыть подробности инструмента: {{label}}",
         "aria_show_details": "Показать подробности инструмента: {{label}}",
-        "blocked_by_security_policy": "Заблокировано политикой безопасности",
         "open_in_side_panel": "Открыть {{path}} в боковой панели",
-        "opened_in_the_side_panel": "Открыто в боковой панели"
+        "opened_in_the_side_panel": "Открыто в боковой панели",
+        "wait_end_now": "Завершить ожидание",
+        "wait_ending": "Завершение…",
+        "wait_remaining": "осталось {{time}}",
+        "wait_status": "Ожидание",
+        "blocked_by_security_policy": "Заблокировано политикой безопасности"
       },
       "toolDetails": {
         "auto": "Авто",
@@ -7416,7 +7512,9 @@
         "edit_resend": "Изменить и отправить",
         "send": "Отправить",
         "send_enter": "Отправить (Enter)",
-        "steered_into_the_running_turn": "Направлено в выполняющийся ход"
+        "steered_into_the_running_turn": "Направлено в выполняющийся ход",
+        "pin_message": "Закрепить сообщение",
+        "unpin_message": "Открепить сообщение"
       },
       "workflowCompletionCard": {
         "hide_result": "Скрыть результат",
@@ -7434,6 +7532,26 @@
       "workflowSidebarRow": {
         "could_not_load_snapshot": "Не удалось загрузить снимок:",
         "events": "событий"
+      },
+      "pins": {
+        "pinned_messages": "Закреплённые сообщения",
+        "close_panel": "Закрыть панель закреплённых сообщений",
+        "loading": "Загрузка…",
+        "no_pinned_messages": "Закреплённых сообщений пока нет. Закрепляйте важные сообщения, чтобы быстро их находить.",
+        "message_unavailable": "Это закреплённое сообщение больше недоступно в загруженной истории.",
+        "pin_failed": "Не удалось закрепить сообщение. Повторите попытку.",
+        "unpin_failed": "Не удалось открепить сообщение. Повторите попытку.",
+        "you": "Вы",
+        "assistant": "Ассистент",
+        "just_now": "Только что",
+        "minutes_ago": "{{count}} мин назад",
+        "hours_ago": "{{count}} ч назад",
+        "days_ago": "{{count}} дн назад",
+        "copy_preview": "Копировать текст",
+        "copy_link": "Копировать ссылку на сообщение",
+        "unpin": "Открепить",
+        "open_pinned_messages": "Открыть закреплённые сообщения",
+        "jump_to_message": "Перейти к сообщению"
       }
     },
     "chatPage": {
@@ -7477,6 +7595,7 @@
       "no_tools": "Нет инструментов",
       "open_activity_panel": "Открыть панель активности",
       "open_file": "Открыть файл {{path}}",
+      "open_folder": "Открыть папку {{path}}",
       "plan_from_here_failed_error": "Не удалось построить план отсюда: {{error}}",
       "pop_out_session_to_its_own_window": "Открыть сессию в отдельном окне",
       "pop_out_to_window": "Открыть в отдельном окне",
@@ -7574,6 +7693,7 @@
       "double_click_to_rename": "Двойной щелчок — переименовать",
       "drag_to_reorder": "Перетащите, чтобы изменить порядок",
       "drop_here_to_remove_from_folder": "Перетащите сюда, чтобы убрать из папки",
+      "drop_to_reference_session": "Перетащите сюда, чтобы добавить ссылку на эту сессию",
       "duplicate": "Дублировать",
       "expand_folder_name": "Развернуть папку «{{name}}»",
       "expand_group_results": "Развернуть результаты «{{group}}»",
@@ -7610,7 +7730,6 @@
       "incognito_no_memory_writes": "Инкогнито — без записи в память",
       "last_30_days": "Последние 30 дней",
       "last_7_days": "Последние 7 дней",
-      "linked_to_slack": "Связано с Slack",
       "load_more": "Загрузить ещё…",
       "loop": "Цикл {{count}}/{{total}}",
       "loop_2": "Цикл · {{count}}",
@@ -7648,11 +7767,13 @@
       "older": "Ранее",
       "older_sessions": "Более старые сессии",
       "older_sessions_2": "Более старые сессии",
+      "open_source_link_in_side_panel": "Открыть {{url}} в боковой панели ({{modifier}} — открыть в браузере)",
       "open_split_view": "Открыть разделённый вид",
       "pick_a_model_for_every_session_switching_a_sessi": "Выберите модель для всех сессий. Переключение сессии",
       "pinned": "Закреплено",
       "pinned_sessions_are_kept": "Закреплённые сессии сохраняются.",
       "popped_out_to_a_separate_window": "Открыто в отдельном окне",
+      "private_session_cannot_be_referenced": "На приватные сессии нельзя ссылаться",
       "rename": "Переименовать",
       "rename_flag_as_status_or_delete_tags_changes_app": "Переименуйте тег, отметьте его как статус или удалите. Изменения применяются везде, где показаны теги.",
       "resets_its_conversation": "сбрасывает её диалог",
@@ -7994,6 +8115,15 @@
       "worktrees_count": "Worktree ({{count}})",
       "worktrees_created_under_a_previous_repository_na": "Worktree, созданные под предыдущим именем репозитория. По умолчанию скрыты; по-прежнему учитываются кнопкой «Очистить объединённые»."
     },
+    "developer": {
+      "previewSurfacesCard": {
+        "inbound_webhook_tokens_registered_contexts_and_r": "Токены входящих вебхуков, зарегистрированные контексты и история запусков. API работает, но страница не доделана.",
+        "open_webhooks": "Открыть вебхуки",
+        "preview_surfaces": "Страницы в предпросмотре",
+        "unreleased_pages_hidden_from_the_sidebar_and_fro": "Невыпущенные страницы: они не показываются в боковой панели и в поиске «Искать везде», пока вы не включите их здесь. Настройка действует только на этом устройстве, а сами страницы намеренно не доработаны.",
+        "webhooks": "Вебхуки"
+      }
+    },
     "developerPage": {
       "developer": "Разработчик",
       "tabs": {
@@ -8002,7 +8132,7 @@
           "label": "Архив"
         },
         "config": {
-          "description": "Просмотр конфигурации Kiro Crew и агентов (только чтение)",
+          "description": "Включение страниц в предпросмотре, а также просмотр конфигурации Kiro Crew и агента (только чтение)",
           "label": "Конфигурация"
         },
         "logs": {
@@ -8526,7 +8656,8 @@
         "reembedding": "Перевычисление эмбеддингов…",
         "subtitle": "Работает локально. При смене сохранённые воспоминания перевычисляются в фоне.",
         "title": "Модель эмбеддингов",
-        "will_revert": "Пусто — вернётся встроенная модель."
+        "will_revert": "Пусто — вернётся встроенная модель.",
+        "err_env_override_with_ref": "<settingRef/> установлена и переопределяет этот параметр. Удалите её, чтобы изменить модель здесь."
       },
       "kiroCrewCfgTab": {
         "agent_for_pool_processes_empty_uses_default_agen": "Агент для процессов пула. Пусто — используется агент по умолчанию. Требуется перезапуск.",
@@ -8821,7 +8952,9 @@
         "this_skill_changed_after_this_update_was_written": "Этот skill изменился после того, как было написано это обновление, поэтому применить его сейчас значило бы откатить те более новые изменения. Одобрение заблокировано — отклони этого кандидата, и будет предложено свежее обновление к текущей версии.",
         "update": "Обновить",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "рабочая область"
+        "workspace": "рабочая область",
+        "auto_create_hint": "Kiro Crew также может автоматически создавать черновики навыков из завершённых сессий — по умолчанию отключено, управляется <settingRef/>.",
+        "approval_required_hint": "Кандидаты ждут здесь, пока вы их не одобрите — требуется <settingRef/>."
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "Постоянные соглашения в Markdown, добавляемые в каждую сессию. Глобальные файлы лежат в ~/.kiro/steering и действуют везде; файлы рабочей области лежат в <project>/.kiro/steering и действуют только для этого проекта.",
@@ -9026,6 +9159,9 @@
       "resource_nav": "Ресурсы",
       "resource_network": "Сеть",
       "sandbox_procs": "Sandbox",
+      "session_storage": "Хранилище сессий",
+      "session_storage_detail": "{{sessions}} сессий · {{reclaimable}} можно освободить",
+      "session_storage_measuring": "Измерение…",
       "threads": "Потоки",
       "total": "Всего",
       "upload": "Передача",
@@ -9342,11 +9478,49 @@
     "sessionArchive": {
       "fuzzy_filter_substring_match": "Нечёткий фильтр (поиск подстроки)",
       "loading": "Загрузка…",
-      "no_archives_archives_are_created_when_session_fi": "Архивов нет. Архивы создаются при ротации файлов сессий (>2MB) или их сжатии.",
       "no_matches_for_query": "Нет совпадений для «{{query}}».",
       "reload": "Перезагрузить",
       "select_an_archive_to_view_its_contents": "Выберите архив, чтобы посмотреть его содержимое.",
-      "truncated_showing_first_200kb": "... обрезано (показаны первые 200KB) ..."
+      "truncated_showing_first_200kb": "... обрезано (показаны первые 200KB) ...",
+      "no_archives_with_compaction_hint": "Архивов нет. Архивы создаются при ротации файлов сессий (>2MB) или их сжатии. Автоматическое сжатие управляется через <settingRef/>."
+    },
+    "sessionStorage": {
+      "back_to_disk": "Система · Производительность › Диск",
+      "background_group": "Фоновые агенты ({{count}})",
+      "bulk_selected": "Выбрано: {{count}}",
+      "cancel": "Отмена",
+      "cannot_delete_resumable": "Эту сессию ещё можно продолжить, поэтому она сохраняется. Освобождение пока не предлагается.",
+      "cannot_delete_running": "В этой сессии сейчас выполняется шаг, поэтому её нельзя переместить в корзину.",
+      "clear_selection": "Очистить",
+      "confirm_delete_forever": "Удалить навсегда",
+      "delete_forever": "Удалить навсегда",
+      "detail_images": "Изображения",
+      "detail_last_used": "Последнее использование",
+      "detail_size": "Размер",
+      "detail_turns": "Ходы",
+      "heading": "Хранилище сессий",
+      "in_use": "используется",
+      "move_to_trash_bulk": "Переместить в корзину",
+      "move_to_trash_single": "Переместить в корзину",
+      "refused_heading": "Не удалось переместить {{count}} сессий",
+      "refused_in_use": "сессия используется",
+      "refused_resumable": "ещё можно продолжить",
+      "refused_too_fresh": "сессия слишком свежая",
+      "refused_unknown": "сессия не найдена",
+      "restore": "Восстановить",
+      "resumable": "Можно продолжить",
+      "search_placeholder": "Поиск сессий",
+      "sort_largest": "Сначала крупные",
+      "sort_name": "Имя",
+      "sort_oldest": "Сначала старые",
+      "subheading": "{{sessions}} сессий · {{total}} на диске · {{reclaimable}} можно освободить",
+      "trash": "Корзина",
+      "trash_batch_label": "{{sessions}} сессий · {{size}}",
+      "trash_batch_reason": "Перемещено: {{reason}}",
+      "trash_empty": "пусто",
+      "trash_note": "Всё ещё занимает место на диске до очистки. Ничего здесь не удаляется автоматически.",
+      "trash_summary": "{{sessions}} сессий · {{size}}",
+      "unknown_session": "сессия вне списка"
     },
     "sessionsTab": {
       "agent": "Агент",
@@ -9420,20 +9594,17 @@
         "copy_command": "Копировать команду",
         "couldn_t_check_for_updates": "Не удалось проверить обновления",
         "couldn_t_check_for_updates_2": "Не удалось проверить обновления.",
-        "couldn_t_load_the_changelog": "Не удалось загрузить список изменений.",
         "download_failed": "Не удалось скачать",
         "download_install": "Скачать и установить",
         "download_the_latest_version": "скачать последнюю версию",
         "downloaded_and_verified_the_app_restarts_to_fini": "Загружено и проверено. Для завершения установки приложение перезапустится; можно также выйти позже — установка произойдёт при выходе.",
         "downloading": "Загрузка...",
-        "hide_full_changelog": "▾ Скрыть полный журнал изменений",
         "insider": "Insider",
         "install_failed": "Не удалось установить обновление",
         "installing_quiet_note": "Установка — Kiro Crew на минуту-две перестанет отвечать, а затем перезапустится сам.",
         "is_available": "доступна.",
         "loading_changelog": "Загрузка списка изменений…",
         "manual_install_fallback": "Если обновление не сработает, вы можете {{link}} и переустановить поверх этой копии. Настройки, чаты и файлы сохранятся.",
-        "no_changelog_available": "Список изменений недоступен.",
         "not_checked_yet": "Ещё не проверялось",
         "notify_when_an_update_is_available": "Уведомлять о доступном обновлении",
         "open_source_under_the_apache_2_0_license": "Открытый код под лицензией Apache 2.0",
@@ -9474,7 +9645,7 @@
         "updating_gateway_restarting": "Обновление — шлюз перезапускается…",
         "updating_restarts_the_gateway_active_sessions_wi": "Обновление перезапускает шлюз — активные сессии на короткое время отключатся.",
         "v": "v",
-        "view_full_changelog": "▸ Показать полный журнал изменений",
+        "view_all_releases": "Посмотреть все выпуски",
         "view_this_commit_on_github": "Посмотреть этот коммит на GitHub",
         "what_s_new": "Что нового",
         "you_are_on_the_latest_version": "У вас установлена последняя версия.",
@@ -9633,7 +9804,7 @@
         "how_long_models_think_before_answering_by_defaul": "Сколько модели думают перед ответом по умолчанию. Выше — медленнее и дороже. Доступно только для моделей с поддержкой рассуждений (Opus, Sonnet, Fable, GPT-5.x).",
         "how_long_to_wait_for_the_agent_to_honor_a_stop_p": "Сколько ждать, пока агент отреагирует на нажатие «Стоп», прежде чем принудительно завершить сессию. Больший запас чаще сохраняет состояние сессии, но остановка кажется медленной, когда агент застрял в длинном вызове инструмента.",
         "how_much_an_automatically_registered_source_may_i": "Сколько автоматически зарегистрированный источник может принять за один проход. Каждый фрагмент документа стоит один вызов извлечения, поэтому именно это ограничивает расходы; сначала попадают самые новые документы, остальные — в последующих проходах. 0 снимает ограничение. По умолчанию {{count}}.",
-        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "Насколько сжато пишет агент. «Предельно кратко» — для читателя с СДВГ: ответ укладывается во вступление из не более трёх предложений, а дальше детали идут легко сканируемыми пунктами, а не сплошным текстом. Код, команды и текст ошибок сохраняются дословно; предупреждения безопасности и пошаговые инструкции остаются полными на любом уровне.",
+        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "Насколько сжато пишет агент. «Предельно кратко» делает коротким весь ответ: сначала результат, пункты вместо абзацев, без вводных слов. Код, команды и текст ошибок сохраняются дословно на любом уровне, а предупреждения безопасности и пошаговые инструкции остаются полными.",
         "i_write_code": "Пишу код",
         "immediate": "Сразу",
         "immediate_mode_shows_raw_chunks_as_they_arrive_s": "Мгновенный режим показывает фрагменты сразу по получении. Плавный режим буферизует текст и проявляет его с равномерной скоростью.",
@@ -9711,7 +9882,7 @@
         "technical_comfort": "Уровень технической подготовки",
         "text_streaming_style": "Стиль потоковой печати текста",
         "time_window_for_session_restoration": "Временное окно для восстановления сессий",
-        "ultra_concise_3_sentences": "Предельно кратко — ответ в 3 предложениях, затем детали списком",
+        "ultra_concise_3_sentences": "Предельно кратко — сначала ответ, минимум текста",
         "ux_designer": "UX-дизайнер",
         "when_enabled_inline_tool_pills_show_simplified_t": "Когда включено, встроенные метки инструментов показывают упрощённую цель использования вместо точной выполняемой команды",
         "which_model_new_sessions_start_with_pick_a_model": "С какой моделью начинаются новые сессии, если их агент не закрепил свою. Задай модель для каждого агента в «Возможности агента → Crews» или выбери модель внутри сессии, чтобы переопределить её там.",
@@ -9866,7 +10037,6 @@
         "enabled": "включено",
         "enabled_but_not_active_yet_restart_the_gateway": "Включено, но пока не активно. Перезапустите шлюз (",
         "enabling": "Включение...",
-        "equivalent_cli": "Эквивалент в CLI:",
         "failed_to_add_remote_crew": "Не удалось добавить удалённую команду",
         "failed_to_load_remote_crews": "Не удалось загрузить удалённые команды",
         "home_you_local_bin_kirocrew_leave_blank_for_stan": "/home/you/.local/bin/kirocrew  —  оставьте пустым для стандартной установки",
@@ -9875,8 +10045,6 @@
         "is_already_used_by_another_instance_choose_a_dif": "уже используется другой удалённой командой — выберите другой\n              (и настройте этот порт на удалённом хосте).",
         "is_installed_somewhere_non_standard_on_the_remot": "установлен в нестандартном\n            месте на удалённом хосте. Оставьте пустым для обычной установки через pip в PATH. Чтобы найти\n            его, выполните на удалённом хосте:",
         "kirocrew": "kirocrew",
-        "kirocrew_config_set_instances_enabled_true": "kirocrew config set instances.enabled true",
-        "kirocrew_config_set_instances_warm_set_cap_n": "kirocrew config set instances.warm_set_cap N",
         "kirocrew_restart": "kirocrew restart",
         "loading": "Загрузка…",
         "local_bin_kirocrew": "~/.local/bin/kirocrew",
@@ -9904,7 +10072,6 @@
         "ssm_target_instance_id": "Цель SSM (id инстанса)",
         "the_gateway_opens_an_ssh_tunnel_and_mints_a_shor": "При подключении шлюз открывает туннель (SSH или AWS SSM) и выдаёт короткоживущий токен.\n        Локальный порт переадресации повторяет удалённый, поэтому каждая подключённая удалённая команда\n        должна использовать свой удалённый порт.",
         "the_user_the_remote_gateway_runs_as_sudo_u_for_s": "Пользователь, от имени которого работает удалённый шлюз — команды SSM выполняются через sudo -u. На AMI Ubuntu укажите ubuntu.",
-        "then": "затем",
         "to_fully_tear_down_any_tunnels_still_running_fro": "чтобы полностью закрыть туннели, оставшиеся с прошлого раза.",
         "to_start_the_ssh_tunnel_manager_and_activate_ins": "чтобы запустить менеджер туннелей и включить переключение между удалёнными командами.",
         "token_left": "· токен: осталось {{time}}",
@@ -9914,19 +10081,24 @@
         "unknown_error": "неизвестная ошибка",
         "up_to": "Не более",
         "update_setting_failed": "Не удалось обновить настройку: {{error}}",
-        "use_an_absolute_path_no": ").\n            Используйте абсолютный путь (без"
+        "use_an_absolute_path_no": ").\n            Используйте абсолютный путь (без",
+        "enable_via_setting": "Или задайте <settingRef/>, затем выполните <restartCmd/>."
       },
       "mcpPoolableServers": {
         "blocked": "заблокировано",
         "could_not_load_mcp_servers": "Не удалось загрузить MCP-серверы.",
+        "could_not_update_all_try_again": "Не удалось обновить серверы. Изменения не внесены. Попробуй снова.",
         "could_not_update_try_again": "Не удалось обновить {{name}}. Попробуй снова.",
         "loading_mcp_servers": "Загрузка MCP-серверов…",
+        "n_of_m_pooled": "{{on}} из {{total}} серверов с поддержкой пула в пуле",
+        "n_of_m_pooled_plus_agent": "{{on}} из {{total}} серверов с поддержкой пула в пуле, +{{extra}} из конфигурации agent",
         "no_mcp_servers_configured": "MCP-серверы не настроены.",
         "pool": "Пул для {{name}}",
         "poolable_mcp_servers": "MCP-серверы с поддержкой пула",
         "poolable_true": "poolable:true",
         "pooling_takes_effect_when_the_shared_mcp_gateway": "Пул начинает работать, когда включён общий MCP-шлюз. Здесь всё равно можно заранее указать, какие\n            серверы могут использовать пул.",
         "shared": "· общий",
+        "toggle_all": "Переключить все",
         "used_by": "используется"
       },
       "notificationsPanel": {
@@ -9968,7 +10140,8 @@
         "sources": "Источники",
         "test": "Проверить",
         "use_default": "Использовать по умолчанию",
-        "volume": "Громкость"
+        "volume": "Громкость",
+        "preset_pulse": "Пульс"
       },
       "postureDisclosure": {
         "filter": "Фильтр: {{label}}",
@@ -9977,6 +10150,22 @@
         "no_matches_for_query": "Нет совпадений для «{{query}}».",
         "show": "Показать",
         "unavailable": "недоступно"
+      },
+      "releases": {
+        "badge_unreleased": "Не выпущено",
+        "detail_no_date": "Дата неизвестна",
+        "detail_on_prerelease": "У вас установлен предварительный выпуск {{version}}",
+        "detail_unreleased": "Ещё не выпущено",
+        "empty_in_progress": "Заметки о выпуске для этой версии ещё не написаны.",
+        "empty_released": "Эта версия вышла без заметок о выпуске.",
+        "list_label": "Версии",
+        "load_failed": "Не удалось загрузить заметки о выпуске.",
+        "loading": "Загрузка выпусков…",
+        "row_current_no_notes": "Ваша версия · заметки не написаны",
+        "row_no_notes": "Заметки не написаны",
+        "stale_note": "Этот список взят из вашей сборки ({{version}}) и может не содержать более новых записей.",
+        "unavailable": "В этой сборке заметки о выпуске недоступны.",
+        "view_commits": "Посмотреть коммиты на GitHub"
       },
       "reportProblemCard": {
         "blurb": "Что-то не работает? Отправьте нам диагностический отчёт — секреты удаляются из логов заранее.",
@@ -9998,6 +10187,7 @@
         "click_any_control_to_see_exactly_what_it_covers": "Нажмите на любой элемент управления, чтобы увидеть, что именно он охватывает.",
         "collapse_all": "Свернуть все",
         "collapse_category_rules": "Свернуть правила «{{category}}»",
+        "custom_deny_note": "Примечание к пользовательскому запрету",
         "custom_deny_pattern": "Свой шаблон запрета",
         "custom_patterns_counted_separately": "Ваши собственные шаблоны учитываются отдельно в разделе «Запрещённые команды».",
         "custom_patterns_hidden_by_filter": "Текущий фильтр скрывает ваши собственные шаблоны.",
@@ -10091,7 +10281,9 @@
         "not_restricted": "Без ограничений",
         "nothing_allowed": "Ничего не разрешено",
         "off": "выключено",
+        "optional_why_shown_to_the_agent_when_this_rule_fir": "Необязательно: причина. Показывается агенту при срабатывании правила",
         "other_surfaces_have_their_own_profiles": "Поверхность со своим профилем может разрешать то, что не может хост: {{surfaces}}.",
+        "enforced_by_floor": "Обеспечивается постоянно действующей встроенной защитой Kiro Crew",
         "pinned_by_policy": "Задано политикой безопасности твоей организации",
         "pinned_for_the_host_surface": "Задано профилем host-поверхности. Это предел только для внутрипроцессных действий хоста — у других поверхностей свои профили, и они могут это разрешать.",
         "policy": "политика",
@@ -10204,6 +10396,18 @@
         "enabling_shared_mcp_gateway": "Включение общего шлюза MCP",
         "gateway_stuck_retry": "Шлюз не перешёл в ожидаемое состояние. Попробуй снова.",
         "gateway_stuck_roll_back": "Шлюз не перешёл в ожидаемое состояние. Вернись к безопасному (отключённому) состоянию или попробуй снова.",
+        "mcp_apps": "Приложения MCP",
+        "mcp_apps_applies_to_new": "Сохранено. Применяется к новым подключениям MCP; уже запущенные примут изменение при пересоздании.",
+        "mcp_apps_gateway_started": "Общий шлюз MCP запущен. Активные сеансы перезапущены с включёнными приложениями MCP.",
+        "mcp_apps_no_poolable_servers": "Пока нет ни одного пулируемого сервера MCP, поэтому ничего не отобразится. Включите хотя бы один в разделе «Пулируемые серверы MCP» ниже.",
+        "mcp_apps_saved_unsupported": "Сохранено. Приложениям MCP нужен общий шлюз MCP, который недоступен на этой платформе.",
+        "mcp_apps_retry_gateway": "Повторить запуск шлюза",
+        "mcp_apps_capability": "Отображать интерактивный интерфейс серверов MCP в чате.",
+        "mcp_apps_failed": "Не удалось применить. Настройка не изменена.",
+        "mcp_apps_needs_gateway": "Применяется после включения общего шлюза MCP выше.",
+        "mcp_apps_will_start_gateway": "Включение этого параметра также запустит общий шлюз MCP, что перезапустит активные сеансы.",
+        "mcp_apps_starting_gateway": "Запуск общего шлюза MCP — активные сеансы будут перезапущены…",
+        "mcp_apps_gateway_follow_failed": "Приложения MCP сохранены, но общий шлюз MCP не запустился. Выключите и снова включите общий шлюз MCP выше, чтобы повторить попытку.",
         "not_available_on_windows": "Недоступно в Windows — общему шлюзу требуются Unix-сокеты. Поддерживается в macOS и Linux.",
         "roll_back_disable": "Откатить (отключить)",
         "shared_mcp_gateway": "Общий MCP-шлюз",
@@ -10589,7 +10793,6 @@
       "daily_trend_point": "{{date}} · холодный {{cold}} · тёплый {{warm}} · запусков: {{count}}",
       "days": "дней.",
       "distribution_col": "Распределение",
-      "enable_with": "Включите через",
       "fault_rate": "Частота ошибок",
       "group_by": "Группировка",
       "growth_col": "Рост",
@@ -10601,7 +10804,6 @@
       "mean_col": "Среднее",
       "mean_credits_by_occupancy": "Средние кредиты за ход по группам использованного контекста",
       "measured_from_token_records": "Измерено локально по перечисленным здесь сессиям за последние {{days}} дн. — сохраняется независимо от переключателя телеметрии",
-      "metrics_stay_local": ". Метрики остаются локальными (",
       "min_col": "мин",
       "min_max": "мин {{min}} · макс {{max}}",
       "model_col": "Модель",
@@ -10611,7 +10813,6 @@
       "no_startups_recorded": "Запусков за этот период нет",
       "no_telemetry_recorded_yet_in_the_last": "Телеметрия ещё не записана за последние",
       "no_turns_yet": "Ходов пока нет",
-      "nothing_leaves_this_machine": ") — ничего не покидает эту машину.",
       "occupancy_p50": "Заполнение (p50)",
       "occupancy_p90": "Заполнение (p90)",
       "otel_has_no_per_conversation_split": "OTEL-гистограммы не несут id сессии, поэтому показаны данные по всему процессу — задержку хода нельзя отнести к отдельному диалогу из этого источника.",
@@ -10647,7 +10848,6 @@
       "tab_latency": "Задержка",
       "tab_spend": "Расходы",
       "tab_startup": "Запуск",
-      "telemetry_enabled_true": "telemetry.enabled = true",
       "telemetry_is_off": "Телеметрия отключена",
       "throughput": "Пропускная способность",
       "to_compaction_col": "До 90%",
@@ -10670,7 +10870,8 @@
       "warm_start_p50": "Тёплый старт (p50)",
       "was_value": "было {{value}}",
       "window_last": "Разделы OTEL · окно: последние",
-      "window_tokens_col": "Окно (токены)"
+      "window_tokens_col": "Окно (токены)",
+      "off_body": "Включить через <settingRef/>. Метрики остаются локальными (<metricsDir/>) — ничего не покидает эту машину."
     },
     "terminalPopoutFrame": {
       "return": "Вернуть в док",
@@ -10935,7 +11136,8 @@
     "worldsPopout": {
       "hide_controls": "Скрыть управление",
       "show_controls": "Показать управление"
-    }
+    },
+    "sessionMemoryCard": {}
   },
   "privacyDisclosure": {
     "anonymousHeartbeatBody": "Не более одного в день. Он обозначает установленную копию, а не человека.",
@@ -10944,7 +11146,6 @@
     "controlsTitle": "Управление телеметрией",
     "dataNeverSentBody": "Запросы, ответы, файлы, учётные данные, имена хостов, имена пользователей и твою операционную систему. Твой IP не сохраняется.",
     "dataNeverSentTitle": "Никогда не отправляется",
-    "envOverrideNote": "Сигнал отключён, поскольку в этой среде задана переменная {{envVar}}. Удалите её, чтобы управлять телеметрией здесь.",
     "governanceOverrideNote": "Политика безопасности твоего администратора отключает это. Здесь изменить нельзя.",
     "installReceiptBody": "После успешной установки или обновления из официального каталога Kiro Crew отправляется анонимная квитанция. Внешние реестры, локальные и самостоятельно зарегистрированные приложения никогда не передаются.",
     "installReceiptFields": "slug официального приложения · анонимный токен для каждого приложения (не связывается между приложениями) · новая установка/обновление · версия Kiro Crew",
@@ -10967,7 +11168,8 @@
     "shellWindowsCmdLabel": "Командная строка Windows",
     "toggleDescription": "Сохранено для последующих запусков.",
     "toggleLabel": "Отправлять анонимный сигнал об использовании",
-    "toggleSaveFailed": "Не удалось сохранить ваш выбор телеметрии. Попробуйте снова."
+    "toggleSaveFailed": "Не удалось сохранить ваш выбор телеметрии. Попробуйте снова.",
+    "envOverrideWithSettingRef": "Heartbeat отключён, потому что <settingRef/> установлена в этой среде. Удалите её, чтобы управлять телеметрией здесь."
   },
   "settings": {
     "display": {
@@ -11026,6 +11228,10 @@
       "overview": {
         "description": "Состояние системы, активность, расход и память — всё сразу",
         "label": "Обзор"
+      },
+      "releases": {
+        "description": "Заметки о выпуске для каждой версии",
+        "label": "Выпуски"
       },
       "security": {
         "description": "Состояние безопасности, уровни защиты, сертификации и классификация данных",

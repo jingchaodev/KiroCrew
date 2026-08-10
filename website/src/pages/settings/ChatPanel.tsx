@@ -519,6 +519,7 @@ export function ChatPanel() {
             checked={preventSleep}
             onChange={v => preventSleepMut.mutate(v)}
             disabled={!mcQ.isSuccess}
+            configKey="dashboard.prevent_sleep"
           />
         </SettingsCard>
       </SettingsSection>
@@ -612,6 +613,7 @@ export function ChatPanel() {
                 .catch(() => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_auto_compact_threshold')))
             }
             disabled={!mcQ.isSuccess}
+            configKey="session.autocompact_pct"
           />
         </SettingsCard>
       </SettingsSection>
@@ -621,14 +623,14 @@ export function ChatPanel() {
           <SettingsToggle
             label={i18nT('pages.settings.chatPanel.auto_add_documents')}
             description={i18nT('pages.settings.chatPanel.let_the_agent_add_documents_it_reads_while_workin')}
-            checked={mcCfg?.knowledge?.auto_add_documents ?? true}
+            checked={mcCfg?.knowledge?.auto_add_documents ?? false}
             onChange={v => knowledgeMut.mutate({ path: 'knowledge.auto_add_documents', value: v })}
             disabled={knowledgeDisabled}
           />
           <SettingsToggle
             label={i18nT('pages.settings.chatPanel.auto_register_project_documents')}
             description={i18nT('pages.settings.chatPanel.register_the_documents_of_each_project_you_work_i')}
-            checked={mcCfg?.knowledge?.auto_register_project_docs ?? true}
+            checked={mcCfg?.knowledge?.auto_register_project_docs ?? false}
             onChange={v =>
               knowledgeMut.mutate({ path: 'knowledge.auto_register_project_docs', value: v })
             }
@@ -637,7 +639,7 @@ export function ChatPanel() {
           <SettingsToggle
             label={i18nT('pages.settings.chatPanel.auto_add_saved_artifacts')}
             description={i18nT('pages.settings.chatPanel.mirror_documents_you_save_as_artifacts_into_the_l')}
-            checked={mcCfg?.knowledge?.auto_ingest_artifacts ?? true}
+            checked={mcCfg?.knowledge?.auto_ingest_artifacts ?? false}
             onChange={v =>
               knowledgeMut.mutate({ path: 'knowledge.auto_ingest_artifacts', value: v })
             }

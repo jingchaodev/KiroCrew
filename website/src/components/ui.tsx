@@ -26,8 +26,8 @@ export const Btn = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttribute
         primary
           ? 'bg-accent text-accent-fg border-accent hover:bg-accent-hover hover:shadow-[0_0_12px_var(--accent-glow)]'
           : danger
-            ? 'border-border bg-transparent text-muted hover:text-danger hover:border-danger'
-            : 'border-border bg-transparent text-muted hover:text-text hover:border-border-strong hover:bg-bg-hover'
+            ? 'border-border bg-transparent text-text hover:text-danger hover:border-danger'
+            : 'border-border bg-transparent text-text hover:border-border-strong hover:bg-bg-hover'
       }`, className)}
       {...rest}
     >
@@ -348,7 +348,7 @@ export function PageHeader({ title, subtitle, actions }: { title: React.ReactNod
   )
 }
 
-export function Toggle({ checked, onChange, disabled, label, tone = 'accent' }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string; tone?: 'accent' | 'muted' }) {
+export function Toggle({ checked, onChange, disabled, label, describedBy, tone = 'accent' }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string; describedBy?: string; tone?: 'accent' | 'muted' }) {
   return (
     <div
       role="switch"
@@ -358,6 +358,10 @@ export function Toggle({ checked, onChange, disabled, label, tone = 'accent' }: 
       // class, neither of which reaches the accessibility tree.
       aria-disabled={disabled || undefined}
       aria-label={label}
+      // Ties a consequence the caller renders NEXT to the switch (rather than as
+      // its description) into the switch's own accessible description, so an AT
+      // user hears it before acting rather than discovering it by exploring.
+      aria-describedby={describedBy}
       tabIndex={disabled ? -1 : 0}
       onClick={() => !disabled && onChange(!checked)}
       onKeyDown={e => { if (!disabled && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); onChange(!checked) } }}

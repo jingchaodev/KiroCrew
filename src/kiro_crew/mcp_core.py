@@ -56,6 +56,7 @@ from kiro_crew.knowledge.dedup import dedup_sweep
 from kiro_crew.knowledge.embedder import create_embedder_from_config
 from kiro_crew.knowledge.retrieval import HybridRetriever
 from kiro_crew.knowledge.store import KnowledgeStore
+from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.mcp_caller import current_caller
 from kiro_crew.mcp_shared import (
     ToolCancelled,
@@ -110,6 +111,7 @@ from kiro_crew.validation import (
     MCP_CORE_SCHEMAS,
     MONITOR_START_SCHEMA,
     MONITOR_UPDATE_SCHEMA,
+    OPS_MISSION_CONTROL_ALLOWED_CALLS,
     REGISTER_HOOK_SCHEMA,
     SEARCH_CHAT_HISTORY_SCHEMA,
     SELECT_CREW_SCHEMA,
@@ -129,6 +131,7 @@ from kiro_crew.validation import (
     WORKFLOW_RERUN_SCHEMA,
     WORKFLOW_RUN_ID_SCHEMA,
     WORKFLOW_RUN_SCHEMA,
+    sanitize_json_values,
     validate_ask_user_question,
     validate_tool_args,
 )
@@ -142,6 +145,22 @@ def _resolve_api_base() -> str:
 
 
 _API = _resolve_api_base()
+
+# How often a sleeping `wait` polls /api/session-keepalive.
+#
+# Two jobs in one round-trip: keeping the session's activity clock warm (the
+# staleness watchdog alone would be satisfied by 60s) and collecting an
+# early-end request from the dashboard. The second job sets the value -- it is
+# the upper bound on how long the "End wait" button appears to do nothing, so
+# it is deliberately tightened to the loop's own sleep granularity. The handler
+# it calls only touches two timestamps, so a 30-minute wait costs ~360 loopback
+# POSTs and no meaningful work.
+WAIT_PING_SECS = 5.0
+
+# Ping cadence for a sleep that cannot publish (identity not authoritative, so no
+# countdown and no button). Only the staleness watchdog cares at that point, and
+# 60s satisfies it -- the same interval spawn_sub_agents' blocking poll uses.
+WAIT_STALENESS_PING_SECS = 60.0
 
 # Context cap for one `skill_fetch` body. The gateway's preview endpoint
 # already caps at 64 KiB for the dashboard's detail panel; a tool result is
@@ -245,6 +264,39 @@ def _list_tools() -> list[dict[str, Any]]:
         if _max_sub > 0
         else ""
     )
+    # Context-scope switches, shared by spawn_run and spawn_sub_agents so the
+    # rule cannot drift between them. The model reads these descriptions at
+    # call time, which is why the rule lives here and not only in the prompt.
+    _context_group_props = {
+        "include_memory": {
+            "type": "boolean",
+            "description": (
+                "Default true. Set false when the task is FULLY specified by the text "
+                "you wrote — read these files, run this command, validate this finding, "
+                "summarize this log. This is the normal case for parallel fan-out. If "
+                "the sub-agent needs one fact from your memory, put that fact in the "
+                "task text instead of turning this back on. Keep true when the task is "
+                "open-ended about the user's own work or history."
+            ),
+        },
+        "include_lessons": {
+            "type": "boolean",
+            "description": (
+                "Default true. Set false ONLY when the sub-agent purely reads and "
+                "reports (search, summarize, analyze, review). Keep true whenever it "
+                "writes code, edits files, runs git, or pushes — the user's learned "
+                "corrections live here and a sub-agent without them repeats mistakes "
+                "the user already corrected."
+            ),
+        },
+        "include_project": {
+            "type": "boolean",
+            "description": (
+                "Default true. Set false when the work is outside the active project "
+                "tree: web research, a different repo, pure reasoning."
+            ),
+        },
+    }
     return [
         {
             "name": "spawn_run",
@@ -315,6 +367,7 @@ def _list_tools() -> list[dict[str, Any]]:
                             "a long-lived delegation workstream."
                         ),
                     },
+                    **_context_group_props,
                 },
             },
         },
@@ -331,7 +384,8 @@ def _list_tools() -> list[dict[str, Any]]:
                 "failures: conversation_busy (run in flight — use spawn_steer), "
                 "conversation_gone (files expired — re-spawn with a summary), "
                 "resume_failed (session could not be restored; never executes "
-                "context-free)."
+                "context-free). Context scope is inherited from the run being "
+                "continued, so the include_* flags are not accepted here."
             ),
             "inputSchema": {
                 "type": "object",
@@ -364,7 +418,12 @@ def _list_tools() -> list[dict[str, Any]]:
                 "session_starting error if it still isn't up — retry then); "
                 "runs still WAITING in the spawn queue return not_found until "
                 "they start. Only works while the run is executing; for a "
-                "finished continuable run use spawn_continue instead."
+                "finished continuable run use spawn_continue instead. "
+                "mode='follow_up' queues the message instead of interrupting: "
+                "it is delivered as a continuation on the run's conversation "
+                "AFTER its current turn completes — use it when the correction "
+                "can wait and interrupting critical work mid-execution would "
+                "do more harm than good."
             ),
             "inputSchema": {
                 "type": "object",
@@ -376,6 +435,18 @@ def _list_tools() -> list[dict[str, Any]]:
                     "message": {
                         "type": "string",
                         "description": "Instruction to inject into the running turn",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["interrupt", "follow_up"],
+                        "description": (
+                            "interrupt (default): inject into the running turn "
+                            "now. follow_up: wait for the current turn to "
+                            "complete, then deliver as a continuation on the "
+                            "run's conversation (its result arrives as a "
+                            "separate completion event; multiple queued "
+                            "follow-ups drain as one continuation)"
+                        ),
                     },
                 },
                 "required": ["agent_id", "message"],
@@ -590,6 +661,7 @@ def _list_tools() -> list[dict[str, Any]]:
                             "Must be under a configured subagent_cwd_allowed_roots entry."
                         ),
                     },
+                    **_context_group_props,
                 },
                 "required": ["agents"],
             },
@@ -1635,6 +1707,22 @@ def _list_tools() -> list[dict[str, Any]]:
                             "condition is never recognised runs forever"
                         ),
                     },
+                    "max_runtime_secs": {
+                        "type": "integer",
+                        "description": (
+                            "Wall-clock budget in seconds, measured from when "
+                            "the loop is armed (0 = unlimited, the default; "
+                            "max 604800 = 7 days). Unlike max_cycles this "
+                            "bounds elapsed TIME, so a loop with slow turns or "
+                            "a long idle gap still stops on schedule. The "
+                            "budget gates when turns START and re-checks the "
+                            "moment a turn ends — an already-running turn is "
+                            "never cancelled, so the loop can overshoot by at "
+                            "most one turn (itself bounded by the per-turn "
+                            "transport timeout). When the budget is spent the "
+                            "loop deactivates and the user is notified"
+                        ),
+                    },
                 },
                 "required": ["message"],
             },
@@ -1675,6 +1763,14 @@ def _list_tools() -> list[dict[str, Any]]:
                             "New cap on delivered cycles; raise it when a loop "
                             "is close to its cap but the work is still live. "
                             "Omit to leave unchanged"
+                        ),
+                    },
+                    "max_runtime_secs": {
+                        "type": "integer",
+                        "description": (
+                            "New wall-clock budget in seconds, measured from "
+                            "when the loop was first armed (0 = unlimited, max "
+                            "604800 = 7 days). Omit to leave unchanged"
                         ),
                     },
                 },
@@ -2258,6 +2354,62 @@ def _list_tools() -> list[dict[str, Any]]:
                 "required": ["owner", "repo", "number"],
             },
         },
+        {
+            "name": "ops_mission_control_api",
+            "description": (
+                "Call the Ops Mission Control app's HTTP API with the gateway's "
+                "own credential. This is the ONLY way an agent session reaches "
+                "that API: raw HTTP has no credential and is refused with 403, "
+                "and no CLI or environment variable provides one. Use it for "
+                "every call an ops-mission-control SOP asks for — reading "
+                "state/signals/incidents/rotation/ledger, claiming and "
+                "transitioning incidents, arming the rotation, posting ledger "
+                "entries. Paths are rooted at the app base (pass '/state', not "
+                "the full URL) and only the SOP surface is reachable: "
+                "provider configuration, settings, webhook ingest and the "
+                "human proposal-decision routes are deliberately not callable "
+                "from here."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST"],
+                        "description": "HTTP method",
+                    },
+                    "path": {
+                        "type": "string",
+                        # Derived from the frozen allowlist so the advertised
+                        # schema cannot drift from what the handler admits.
+                        "enum": sorted({p for _, p in OPS_MISSION_CONTROL_ALLOWED_CALLS}),
+                        "description": (
+                            "API path relative to /api/apps/ops-mission-control. "
+                            "GET: /state /signals /incidents /handover /rotation "
+                            "/ledger /ledger/contradictions. POST: /dispatch "
+                            "/incident/transition /incident/claim /incident/action "
+                            "/rotation/arm /ledger /ledger/hygiene."
+                        ),
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Optional query string without the leading '?', GET only "
+                            "— e.g. 'status=investigating' or 'id=INV-42' on /incidents"
+                        ),
+                    },
+                    "body_json": {
+                        "type": "string",
+                        "description": (
+                            "JSON object for POST bodies, serialized as a string — "
+                            "e.g. '{\"id\": \"INV-42\", \"status\": \"resolved\"}' for "
+                            "/incident/transition"
+                        ),
+                    },
+                },
+                "required": ["method", "path"],
+            },
+        },
     ]
 
 
@@ -2817,7 +2969,7 @@ def _post(path: str, body: dict | None = None, *, timeout: float = 30) -> dict:
     )
     try:
         # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is the loopback gateway (_API from dashboard.url config) + a fixed internal path; never user-controlled  # noqa: E501
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with loopback_urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         # urlopen raises HTTPError on 4xx/5xx; str(e) is only "HTTP Error 400:
@@ -2892,7 +3044,7 @@ def _get(path: str) -> dict:
         headers=headers,
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with loopback_urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return _http_error_body(e)
@@ -2918,7 +3070,7 @@ def _patch(path: str, body: dict | None = None) -> dict:
     try:
         # _API is the hardcoded loopback dashboard base and `path` is a code
         # literal — never attacker-controlled, so no file:// scheme risk.
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep  # noqa: E501
+        with loopback_urlopen(req, timeout=30) as resp:  # nosemgrep  # noqa: E501
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return _http_error_body(e)
@@ -2950,7 +3102,7 @@ def _put(path: str, body: dict | None = None) -> dict:
     try:
         # _API is the hardcoded loopback dashboard base and `path` is a code
         # literal — never attacker-controlled, so no file:// scheme risk.
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep  # noqa: E501
+        with loopback_urlopen(req, timeout=30) as resp:  # nosemgrep  # noqa: E501
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return _http_error_body(e)
@@ -2976,7 +3128,7 @@ def _delete(path: str, body: dict | None = None) -> dict:
         method="DELETE",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with loopback_urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return _http_error_body(e)
@@ -3438,6 +3590,23 @@ def _do_select_crew(crew: str) -> str:
     )
 
 
+def _redact_json_strings(value: Any) -> Any:
+    """Recursively credential-redact every string (keys included) in decoded JSON.
+
+    ``sanitize_json_values`` strips hidden characters; this pass scrubs
+    credential material itself. Bodies forwarded to persisting routes (ledger
+    entries sync to a configured remote) need redaction on the way IN — the
+    response-path ``redact`` cannot un-persist what ``_post`` already wrote.
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {_redact_json_strings(k): _redact_json_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_json_strings(item) for item in value]
+    return value
+
+
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
     if name == "spawn_run":
         # Re-validate to make schema enforcement visible at the extraction point.
@@ -3467,6 +3636,11 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         cwd = args.get("cwd") or ""
         model = args.get("model") or ""
         keep = bool(args.get("keep"))
+        # Context scope: absent ⇒ true, so a parent that passes nothing gets the
+        # same context a normal session would.
+        inc_memory = args.get("include_memory", True) is not False
+        inc_lessons = args.get("include_lessons", True) is not False
+        inc_project = args.get("include_project", True) is not False
         if agents_list and len(agents_list) != len(task_list):
             return f"Error: agents length ({len(agents_list)}) must match tasks length ({len(task_list)})"
 
@@ -3504,6 +3678,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 body["model"] = model
             if keep:
                 body["keep"] = True
+            if not inc_memory:
+                body["include_memory"] = False
+            if not inc_lessons:
+                body["include_lessons"] = False
+            if not inc_project:
+                body["include_project"] = False
             if approval_mode:
                 body["approval_mode"] = approval_mode
             d = _post("/api/spawn", body)
@@ -3658,11 +3838,19 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         args = validate_tool_args(args, SPAWN_STEER_SCHEMA)
         agent_id = (args.get("agent_id") or "").strip()
         message = (args.get("message") or "").strip()
+        mode = (args.get("mode") or "interrupt").strip()
         if not agent_id or not message:
             return "Error: agent_id and message are required"
-        d = _post(f"/api/spawn/{agent_id}/steer", {"message": message})
+        d = _post(f"/api/spawn/{agent_id}/steer", {"message": message, "mode": mode})
         if d.get("error"):
             return f"Error: {d['error']}"
+        if mode == "follow_up":
+            return (
+                f"Queued follow-up for run {agent_id}: it will be delivered as "
+                "a continuation on the run's conversation after its current "
+                "turn completes. The continuation's result arrives as a "
+                "separate [Subagent completion event] — after this run's own."
+            )
         return (
             f"Steered run {agent_id}: the message was injected into its "
             "running turn. Its completion event will reflect the correction."
@@ -3684,6 +3872,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if not agents_input or not isinstance(agents_input, list):
             return "Error: 'agents' array is required"
         cwd = args.get("cwd") or ""
+        # Context scope: batch-wide, absent ⇒ true (same rule as spawn_run).
+        sa_groups = {
+            k: False
+            for k in ("include_memory", "include_lessons", "include_project")
+            if args.get(k, True) is False
+        }
         parent_session = _resolve_session_key()
 
         def _redact_sa(text: str) -> str:
@@ -3717,6 +3911,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 "task": prompt,
                 "agent": sa_agent,
                 "parent_session": parent_session,
+                **sa_groups,
             }
             if cwd:
                 sa_body["cwd"] = cwd
@@ -3885,7 +4080,11 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                     if tool:
                         parts.append(tool)
                     progress = f" ({', '.join(parts)})"
-                lines.append(f"{a['id']}  [{status}]{err}{progress}  {_redact(a['task'])[:60]}")
+                _withheld = a.get("context_withheld") or []
+                scope = f"  ctx-withheld: {','.join(_withheld)}" if _withheld else ""
+                lines.append(
+                    f"{a['id']}  [{status}]{err}{progress}{scope}  {_redact(a['task'])[:60]}"
+                )
         # Always append available agents (fresh read from disk)
         try:
             names = [
@@ -4324,9 +4523,51 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         reason_safe, _ = redact_exfiltration_urls(reason)
         reason_safe, _ = redact_credentials(reason_safe)
         deadline = time.monotonic() + seconds
-        # Ping session-keepalive every 60s so the gateway's is_responsive()
-        # doesn't flag this session as stale and SIGTERM the ACP subprocess.
+        # Identity for THIS sleep. The dashboard's "end wait now" button echoes
+        # it back through the keepalive response, so a request left over from an
+        # earlier sleep can never terminate the next one in the same session.
+        wait_id = uuid.uuid4().hex
+        # Ping session-keepalive every WAIT_PING_SECS so the gateway's
+        # is_responsive() doesn't flag this session as stale and SIGTERM the ACP
+        # subprocess -- and so the reply can carry an early-end request back.
+        #
+        # This POST is the ONLY inbound channel a sleeping wait has: the MCP
+        # subprocess runs no listener, and the one path that can interrupt it
+        # (notifications/cancelled on stdin) is a session-teardown signal that
+        # suppresses the tool's response entirely, and does not exist at all on
+        # Windows. So the ping interval IS the button's worst-case latency,
+        # which is why it matches the sleep granularity rather than the 60s the
+        # staleness watchdog alone would need.
         _next_ping = time.monotonic()
+        ended_early = False
+        # Publish wait metadata ONLY under an authoritative identity, and refuse
+        # to honour `end_wait` without one.
+        #
+        # `_resolve_session_key()` -- what `_post` puts in the X-Session-Key
+        # header -- ends its ladder with a /proc ancestor walk, which answers per
+        # RUNTIME rather than per ACP session: a subagent's MCP-core child walks
+        # up into its parent slot's process tree and resolves to the PARENT. So on
+        # a default install (gateway off, so no per-call caller context and no
+        # KIROCREW_SESSION_KEY) a subagent's sleep would publish its deadline onto
+        # the parent's slot, and the parent's End-wait button would return the
+        # SUBAGENT's wait. No frontend guard can catch that: with only one wait_id
+        # pinging there is no collision to detect.
+        #
+        # `_resolve_session_key_strict()` is the existing primitive for exactly
+        # this class of session-mutating tool (monitor_start, autonudge_stop,
+        # set_project) -- it drops the walk and accepts only gateway-injected
+        # caller context, KIROCREW_SESSION_KEY, or a HMAC-verified pid sidecar.
+        # When it comes back empty the identity is a guess, so the ping degrades
+        # to the original `{}` touch: the session still cannot be reaped
+        # mid-sleep, and the countdown simply never appears. Tracked in #2347,
+        # which is the work that lets this gate go away.
+        _identified = bool(_resolve_session_key_strict())
+        # The 5s cadence exists ONLY to bound how long the button appears to do
+        # nothing. An unidentified sleep publishes nothing and honours no
+        # end_wait, so it has no button and would be paying a 12x request
+        # multiplier for a latency nobody can observe; it reverts to the 60s the
+        # staleness watchdog actually needs.
+        _ping_secs = WAIT_PING_SECS if _identified else WAIT_STALENESS_PING_SECS
         while True:
             now = time.monotonic()
             remaining = deadline - now
@@ -4337,17 +4578,68 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 raise ToolCancelled(f"wait cancelled after {seconds - remaining:.0f}s")
             if now >= _next_ping:
                 try:
-                    _post("/api/session-keepalive", {})
+                    reply = _post(
+                        "/api/session-keepalive",
+                        {
+                            "wait_id": wait_id,
+                            "seconds": seconds,
+                            "remaining": max(0, int(remaining)),
+                            # Lets the dashboard derive a liveness window for
+                            # this sleep without importing this module's
+                            # constant -- see _service_wait_ping's collision
+                            # guard, which needs to know how stale a ping has to
+                            # be before the sleep behind it is presumed gone.
+                            "interval": _ping_secs,
+                        }
+                        if _identified
+                        else {},
+                    )
                 except Exception:
-                    pass  # keepalive is best-effort
-                _next_ping = now + 60.0
-            time.sleep(min(5, remaining))
+                    reply = {}  # keepalive is best-effort
+                # Only a request naming this wait ends it. `_post` returns
+                # {"error": ...} on a failed round-trip rather than raising, so
+                # the equality check doubles as the error guard. Gated on
+                # `_identified` too: an unidentified sleep sends no wait_id, so a
+                # matching reply could only mean the backend is answering about
+                # somebody else's wait.
+                if (
+                    _identified
+                    and isinstance(reply, dict)
+                    and reply.get("end_wait") == wait_id
+                ):
+                    ended_early = True
+                    break
+                _next_ping = now + _ping_secs
+            time.sleep(min(_ping_secs, remaining))
+        waited = max(0, int(seconds - max(0.0, deadline - time.monotonic())))
         sel().log_tool_invocation(
             session_key=_resolve_session_key(),
             source="mcp",
             tool_name="wait",
             outcome="success",
         )
+        # Retire the countdown card. The tool result travels back through
+        # kiro-cli, which the dashboard cannot correlate to this wait_id, so the
+        # sleep has to announce its own end. Best-effort: a slot whose wait
+        # state is stale also clears at turn end (chat_runner) and renders
+        # nothing once the turn stops running. Skipped entirely when the identity
+        # was never authoritative -- nothing was ever published, so there is
+        # nothing to retire, and sending a wait_id under a guessed key could
+        # blank a countdown belonging to a different session.
+        if _identified:
+            try:
+                _post("/api/session-keepalive", {"wait_id": wait_id, "wait_done": True})
+            except Exception:
+                pass
+        # Deliberately a normal return, NOT ToolCancelled: _run_tool suppresses
+        # the response of a cancelled call, so raising here would leave kiro-cli
+        # waiting on a tool result that never arrives until the 600s stall
+        # watchdog kills the session. Ending a wait early continues the turn.
+        if ended_early:
+            return (
+                f"Wait ended early by the user after {waited}s of {seconds}s. "
+                f"Resuming: {reason_safe}"
+            )
         return f"Waited {seconds}s. Resuming: {reason_safe}"
 
     if name == "select_crew":
@@ -4958,8 +5250,9 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         # it from the X-Internal-Secret header presence (MCP=agent,
         # dashboard=user). This is more secure than trusting a body field
         # and saves the agent from having to remember to set it.
-        # _post helper sends POST; we need PATCH. Use urllib.request directly
-        # (already imported at module top).
+        # _post helper sends POST; we need PATCH. Build the request directly
+        # and send it through loopback_urlopen, which drops any HTTP_PROXY so
+        # X-Internal-Secret cannot leave the host.
         data = json.dumps(update_body).encode()
         headers = {
             "Content-Type": "application/json",
@@ -4972,7 +5265,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             f"{_API}/api/artifacts/{slug}", data=data, headers=headers, method="PATCH"
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as http_resp:
+            with loopback_urlopen(req, timeout=30) as http_resp:
                 d = json.loads(http_resp.read())
         except urllib.error.HTTPError as exc:
             try:
@@ -5034,7 +5327,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             f"{_API}/api/artifacts/{slug}", data=data, headers=headers, method="PATCH"
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as http_resp:
+            with loopback_urlopen(req, timeout=30) as http_resp:
                 d = json.loads(http_resp.read())
         except urllib.error.HTTPError as exc:
             try:
@@ -5486,9 +5779,18 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         # (explicit unlimited) is still honoured for callers that mean it.
         raw_max = args.get("max_cycles")
         max_cycles = _MONITOR_DEFAULT_MAX_CYCLES if raw_max is None else int(raw_max)
+        # Wall-clock budget: opt-in (0 = unlimited). The cycle-cap default is
+        # the runaway backstop; the runtime budget is for callers that need a
+        # hard TIME bound (e.g. "babysit this for at most 2 hours").
+        max_runtime_secs = int(args.get("max_runtime_secs") or 0)
         return session_directive.encode(
             "monitor_start",
-            {"message": message, "idle_secs": interval_secs, "max_cycles": max_cycles},
+            {
+                "message": message,
+                "idle_secs": interval_secs,
+                "max_cycles": max_cycles,
+                "max_runtime_secs": max_runtime_secs,
+            },
             (
                 "Monitor loop requested on this session: the message will "
                 f"re-inject {interval_secs}s after each turn ENDS (idle gap)"
@@ -5496,6 +5798,11 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                     f", stopping after {max_cycles} cycles"
                     if max_cycles
                     else ", with NO cycle cap"
+                )
+                + (
+                    f", wall-clock budget {max_runtime_secs}s"
+                    if max_runtime_secs
+                    else ""
                 )
                 + ". End your turn now; once the loop is armed it wakes you on "
                 "that idle gap — but arming happens when this turn's result is "
@@ -5530,13 +5837,15 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             patch["idle_secs"] = int(args["interval_secs"])
         if args.get("max_cycles") is not None:
             patch["max_cycles"] = int(args["max_cycles"])
+        if args.get("max_runtime_secs") is not None:
+            patch["max_runtime_secs"] = int(args["max_runtime_secs"])
         if not patch:
             sel().log_tool_invocation(
                 session_key=sk, source="mcp", tool_name="monitor_update", outcome="noop"
             )
             return (
                 "monitor_update: nothing to change — pass at least one of "
-                "message, interval_secs, max_cycles."
+                "message, interval_secs, max_cycles, max_runtime_secs."
             )
         return session_directive.encode(
             "monitor_update",
@@ -6093,6 +6402,61 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             f"Recorded investigation for {_ir_ref}: status `{_ir_body['status']}`, "
             f"verdict `{_ir_verdict}`. It now shows on the item's Issue Radar card."
         )
+
+    if name == "ops_mission_control_api":
+        # Args are validated, enum-checked and pair-checked (custom validator)
+        # by _validate_args via MCP_CORE_SCHEMAS. The pair is re-checked here
+        # against the same frozen allowlist anyway: this allowlist is the whole
+        # authorization story for the tool — the gateway admits these paths for
+        # internal-secret callers, and this handler is the only internal-secret
+        # caller reachable from an agent session — so the check must not depend
+        # on a schema lookup wired somewhere else staying wired.
+        _omc_method = args["method"]
+        _omc_path = args["path"]
+        if (_omc_method, _omc_path) not in OPS_MISSION_CONTROL_ALLOWED_CALLS:
+            return (
+                f"Error: {_omc_method} {_omc_path} is not part of the "
+                "ops-mission-control agent surface."
+            )
+        _omc_body: dict[str, Any] = {}
+        _omc_body_raw = args.get("body_json") or ""
+        if _omc_body_raw:
+            try:
+                _omc_parsed = json.loads(_omc_body_raw)
+            except (json.JSONDecodeError, ValueError):
+                return "Error: body_json is not valid JSON."
+            if not isinstance(_omc_parsed, dict):
+                return "Error: body_json must encode a JSON object."
+            # Schema sanitization saw body_json as one opaque string, where a
+            # ``\u200b`` escape is plain ASCII — the hidden character only
+            # materializes on decode. Walk the decoded structure so smuggled
+            # invisibles cannot split a credential past downstream redaction.
+            # Then redact on the way IN as well: ledger entries persist and
+            # sync to a configured remote, so a credential quoted into a body
+            # field must be scrubbed BEFORE ``_post``, not only on the
+            # response path.
+            _omc_body = _redact_json_strings(sanitize_json_values(_omc_parsed))
+        _omc_query = args.get("query") or ""
+        _omc_url = "/api/apps/ops-mission-control" + _omc_path
+        if _omc_query:
+            _omc_url += "?" + _omc_query
+        _omc_resp = _get(_omc_url) if _omc_method == "GET" else _post(_omc_url, _omc_body)
+        # Serialize compactly and redact on the way OUT: signals, incident
+        # titles and ledger entries carry text from external monitoring
+        # systems and prior LLM turns, so a credential or exfil URL quoted
+        # into one would otherwise flow straight into this agent's context.
+        # Redact BEFORE truncating: slicing first could cut a credential in
+        # half at the cap so the redaction pattern no longer matches, leaking
+        # the surviving fragment.
+        _omc_text = redact(json.dumps(_omc_resp, ensure_ascii=False, default=str))
+        _omc_cap = 60_000
+        if len(_omc_text) > _omc_cap:
+            _omc_text = (
+                _omc_text[:_omc_cap]
+                + f"\n… truncated ({len(_omc_text)} chars total). Narrow the "
+                "call (e.g. query filters) to see the rest."
+            )
+        return _omc_text
 
     if name == "set_project":
         args = validate_tool_args(args, SET_PROJECT_SCHEMA)

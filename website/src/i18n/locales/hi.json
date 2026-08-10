@@ -227,6 +227,10 @@
         "cycles_2": "चक्र",
         "definition_of_done_optional": "पूर्णता की परिभाषा (वैकल्पिक)",
         "delete": "हटाएँ",
+        "delete_campaign": "अभियान हटाएँ?",
+        "deleting": "हटाया जा रहा है…",
+        "delete_campaign_button": "कैंपेन हटाएं",
+        "delete_failed": "हटाना विफल रहा। कृपया पुनः प्रयास करें।",
         "delete_this_campaign_and_its_report_this_cannot": "इस अभियान और इसकी रिपोर्ट को हटाएँ? इसे पूर्ववत नहीं किया जा सकता।",
         "done_when": "पूर्ण मानें जब:",
         "dynamic_workflow": "डायनामिक वर्कफ़्लो",
@@ -439,12 +443,18 @@
           "this_review_failed": "यह समीक्षा विफल रही"
         },
         "findingCard": {
+          "consequence": "परिणाम",
+          "evidence": "प्रमाण",
+          "observation": "अवलोकन",
           "post_finding": "यह निष्कर्ष pull request पर डालो",
           "post_finding_on": "यह निष्कर्ष {{target}} पर डालो",
           "post_this_comment": "यह टिप्पणी डालो",
           "posted_to_the_pull_request": "pull request पर डाल दिया",
           "posting": "डाल रहा हूँ…",
+          "select_to_draft_together": "बल्क ड्राफ़्ट के लिए चुनें",
           "select_to_post": "डालने के लिए {{label}} चुनो",
+          "severity_must_fix": "अनिवार्य",
+          "severity_should_fix": "सुझाव",
           "suggestion": "सुझाव",
           "this_finding": "यह निष्कर्ष"
         },
@@ -2184,6 +2194,11 @@
       },
       "list": {
         "adHocTitle": "तत्काल मीटिंग",
+        "deleteConfirm": "“{{title}}” और उसके सभी नोट्स, आरेख व कार्य-बिंदु मिटाएँ? इसे वापस नहीं किया जा सकता।",
+        "deleteFailed": "इस मीटिंग को मिटाया नहीं जा सका।",
+        "deleteMeeting": "{{title}} मिटाएँ",
+        "deleteUnavailable": "मिटाने से पहले इस मीटिंग को समाप्त करें",
+        "deleted": "“{{title}}” मिटा दी गई",
         "empty": "कोई मीटिंग नहीं",
         "emptyHintNoCalendar": "सेटिंग्स में कैलेंडर जोड़ें, या एक तत्काल मीटिंग शुरू करें।",
         "emptyHintSynced": "कैलेंडर में कुछ नहीं है, और अभी तक किसी मीटिंग पर काम नहीं हुआ।",
@@ -2528,13 +2543,16 @@
         "blurb": "Mochi एक ही पालतू है, और हर Kiro Crew अपना चलाता है। चुनें कि यह किसका साथ दे — केवल अभी कनेक्टेड इंस्टेंस ही सूचीबद्ध हैं।",
         "connecting": "कनेक्ट हो रहा है…",
         "current": "वर्तमान",
+        "desktop_only": "पेट कौन सा इंस्टेंस दिखाए, यह चुनने के लिए डेस्कटॉप ऐप ज़रूरी है।",
         "errored": "कनेक्शन समस्या",
         "feature_off": "मल्टी-इंस्टेंस बंद है। दूरस्थ इंस्टेंस चुनने के लिए इसे Kiro Crew सेटिंग्स में चालू करें।",
+        "host_disable_note": "किसी दूसरे इंस्टेंस पर Mochi बंद करने से केवल उस इंस्टेंस का अपना बैकग्राउंड काम रुकता है — तुम्हारा पेट यहाँ चुने गए इंस्टेंस पर ही रहता है।",
         "list_failed": "इंस्टेंस सूची पढ़ी नहीं जा सकी।",
         "loading": "इंस्टेंस खोजे जा रहे हैं…",
         "mochi_off": "वहाँ Mochi बंद है",
         "needs_restart": "मल्टी-इंस्टेंस अभी-अभी चालू हुआ — इसे सक्रिय करने के लिए gateway पुनः आरंभ करें।",
         "not_connected": "कनेक्ट नहीं",
+        "switch_failed": "अभी इंस्टेंस बदला नहीं जा सका — तुम्हारा चुनाव सहेज लिया गया है और उस इंस्टेंस के जवाब देने पर लागू हो जाएगा।",
         "switch_note": "बदलने पर रूप और चैट इतिहास भी बदल जाते हैं — हर इंस्टेंस अपने रखता है। कोई सहेजा गया इंस्टेंस गायब हो जाए तो इस कंप्यूटर पर लौट आता है।",
         "this_computer": "यह कंप्यूटर"
       },
@@ -2759,6 +2777,7 @@
         "shortcut_one_key": "सिर्फ़ एक ग़ैर-मॉडिफ़ायर कुंजी चल सकती है",
         "shortcut_taken": "कोई अन्य ऐप पहले से इस कुंजी का उपयोग करता है: {{actions}}। कोई भिन्न संयोजन चुनें।",
         "shortcuts": "शॉर्टकट",
+        "shortcuts_desktop_only": "ग्लोबल शॉर्टकट बदलने के लिए डेस्कटॉप ऐप ज़रूरी है।",
         "silent_subagents": "मौन पृष्ठभूमि एजेंट",
         "silent_subagents_desc": "पृष्ठभूमि कार्य पूरे होने पर सूचनाएँ दबाता है (योजना, निगरानी जाँच)। परिणाम अब भी चैट में दिखते हैं।",
         "tier_active": "सक्रिय",
@@ -4381,6 +4400,8 @@
       "search_everywhere": "हर जगह खोजें",
       "search_for_anything": "कुछ भी खोजें",
       "search_scope": "{{scope}} खोजो…",
+      "retry": "पुनः प्रयास करें",
+      "search_failed": "खोज विफल",
       "searching": "खोजा जा रहा है…",
       "tab": "tab"
     },
@@ -4605,10 +4626,13 @@
       "this_document_is_tracked_as_a_session_artifact_n": "यह दस्तावेज़ सत्र आर्टिफ़ैक्ट के रूप में ट्रैक किया जाता है, सोर्स-फ़ाइल बदलाव के रूप में नहीं"
     },
     "filePickerMenu": {
+      "folder": "फ़ोल्डर",
+      "folder_kind": "फ़ोल्डर",
       "no_matches": "कोई मिलान नहीं",
       "open_in_viewer": "व्यूअर में खोलें",
+      "remove_folder": "फ़ोल्डर हटाएँ",
       "searching": "खोज रहे हैं…",
-      "type_2_chars_to_search_files": "फ़ाइलें खोजने के लिए 2+ अक्षर टाइप करें…"
+      "type_2_chars_to_search_files": "फ़ाइलें और फ़ोल्डर खोजने के लिए 2+ अक्षर टाइप करें…"
     },
     "fileRenderers": {
       "empty_file": "खाली फ़ाइल",
@@ -4789,7 +4813,9 @@
       "this_issue_is_locked": "यह issue बंद है",
       "unknown_author": "अज्ञात लेखक",
       "untitled": "बिना शीर्षक",
-      "updated_time": "{{time}} अपडेट किया गया"
+      "updated_time": "{{time}} अपडेट किया गया",
+      "jira_open_in_browser": "Jira issue — open in browser to view details.",
+      "open_in_jira": "Open in Jira"
     },
     "jobForm": {
       "a_short_label_for_this_job": "इस जॉब के लिए एक छोटा लेबल",
@@ -4997,6 +5023,8 @@
       "open_artifact": "आर्टिफ़ैक्ट {{name}} खोलो",
       "open_as_artifact": "आर्टिफ़ैक्ट के रूप में खोलें",
       "open_folder": "फ़ोल्डर खोलें {{path}}",
+      "open_with_default_app": "डिफ़ॉल्ट ऐप में खोलो",
+      "path_copied_to_clipboard_no_desktop_available": "पाथ क्लिपबोर्ड में कॉपी किया गया (कोई डेस्कटॉप उपलब्ध नहीं)",
       "preview": "प्रीव्यू",
       "previous_match": "पिछला मैच",
       "previous_shift_enter": "पिछला (Shift+Enter)",
@@ -5009,6 +5037,7 @@
       "save_this_file_as_an_artifact_versioned_persiste": "इस फ़ाइल को आर्टिफ़ैक्ट के रूप में सहेजें (संस्करणबद्ध, स्थायी, टिप्पणी-योग्य)",
       "saving": "सहेजा जा रहा है…",
       "select_any_text_to_add_inline_comments_then_subm": "इनलाइन टिप्पणियाँ जोड़ने के लिए कोई भी टेक्स्ट चुनें, फिर उन सभी को चैट में भेजें।",
+      "show_in_file_manager": "फ़ाइल मैनेजर में दिखाओ",
       "snapshot_version": "स्नैपशॉट संस्करण बनाएँ",
       "snapshotting": "स्नैपशॉट बन रहा है…",
       "switch_to_split_view": "स्प्लिट व्यू पर जाएँ",
@@ -5396,6 +5425,8 @@
       "edit_queued_message": "कतारबद्ध संदेश संपादित करें",
       "interrupt_current_turn_and_send_this_now": "वर्तमान टर्न रोककर इसे अभी भेजें",
       "queued": "कतार में",
+      "run_later": "बाद में चलाएँ",
+      "run_sooner": "पहले चलाएँ",
       "ready_processing_after_the_current_turn": "तैयार — वर्तमान टर्न के बाद प्रोसेस होगा",
       "save": "सहेजें",
       "save_edit": "संपादन सहेजें",
@@ -5550,6 +5581,13 @@
       "undo_remove": "हटाना पूर्ववत करें",
       "will_be_removed_on_save": "सहेजने पर हटा दिया जाएगा।"
     },
+    "sendToInstanceSubmenu": {
+      "failed": "विफल",
+      "not_connected": "कनेक्ट नहीं है",
+      "send_a_copy_to": "एक प्रतिलिपि भेजें",
+      "sent": "भेजा गया",
+      "unknown_error": "अज्ञात त्रुटि"
+    },
     "sessionActionsMenu": {
       "bring_back_to_main": "मुख्य विंडो में वापस लाएँ",
       "close_session": "सेशन बंद करें",
@@ -5584,6 +5622,11 @@
       "split_right": "दाईं ओर विभाजित करें",
       "split_right_d": "दाईं ओर विभाजित करें (⌘D)",
       "terminal_pane_coming_in_phase_2": "टर्मिनल पैन — चरण 2 में आ रहा है"
+    },
+    "sessionRefStrip": {
+      "n_messages": "{{n}} संदेश",
+      "remove_reference": "संदर्भ हटाएँ",
+      "remove_reference_to": "{{name}} का संदर्भ हटाएँ"
     },
     "settings": {
       "click_to_reset": "रीसेट करने के लिए क्लिक करें",
@@ -5988,7 +6031,7 @@
       "suggestion_pipeline_status": "मेरी पाइपलाइन स्थिति जांचें",
       "suggestion_review_cr": "मेरे नवीनतम CR की समीक्षा करें",
       "suggestion_search_code": "उपयोग उदाहरणों के लिए कोड खोजें",
-      "suggestion_summarize_slack": "इस सप्ताह की Slack गतिविधि का सारांश दें",
+      "suggestion_summarize_chat": "इस सप्ताह की चैट गतिविधि का सारांश दें",
       "suggestion_triage_tickets": "मेरे ऑन-कॉल टिकट का ट्राइएज करें",
       "suggestion_write_design_doc": "डिज़ाइन दस्तावेज़ लिखने में मेरी मदद करें",
       "switch_back_to_default_mode": "डिफ़ॉल्ट मोड पर वापस जाएँ",
@@ -6026,6 +6069,18 @@
       "select": "चुनें",
       "workspace_name": "वर्कस्पेस का नाम",
       "workspace_name_2": "workspace-name"
+    },
+    "settingRef": {
+      "envVarAriaLabel": "पर्यावरण चर {{key}}",
+      "envVarDescription": "Kiro Crew शुरू करने से पहले यह वातावरण चर सेट करें।",
+      "envVarUnsetDescription": "Kiro Crew शुरू करने से पहले यह वातावरण चर हटाएं।",
+      "fileOnlyDescription": "नीचे दिए गए CLI कमांड से यह मान सेट करें।",
+      "copied": "कॉपी हो गया!",
+      "copyFailed": "कॉपी विफल",
+      "copyCommand": "कमांड कॉपी करें",
+      "orEditConfigJson": "वैकल्पिक रूप से, सीधे ~/.kiro/crew/config.json को संपादित करें।",
+      "openSettingsAriaLabel": "सेटिंग्स → {{tab}} में {{key}} खोलें",
+      "fileSettingAriaLabel": "केवल फ़ाइल सेटिंग {{key}}"
     }
   },
   "hooks": {
@@ -6165,9 +6220,7 @@
   },
   "pages": {
     "agentsPage": {
-      "active_sessions_and_subagent_tasks": "सक्रिय सत्र और सबएजेंट कार्य",
       "agent_templates": "एजेंट टेम्पलेट",
-      "agent_templates_grouped_by_package_update_and_un": "पैकेज के अनुसार समूहबद्ध एजेंट टेम्पलेट। अपडेट और अनइंस्टॉल पैकेज स्तर पर करें। अलग-अलग एजेंट मिटाए जा सकते हैं (कॉन्फ़िग फ़ाइल हट जाती है)।",
       "auto_approved": "स्वतः-स्वीकृत",
       "awaiting_first_prompt": "पहले प्रॉम्प्ट की प्रतीक्षा",
       "clear_completed": "पूर्ण हुए साफ़ करें",
@@ -6177,8 +6230,6 @@
       "could_not_load_this_agent_s_configuration_skills": "इस एजेंट का कॉन्फ़िगरेशन लोड नहीं हो सका — उन्हें ओवरराइट होने से बचाने के लिए\n                        कौशल छिपाए गए हैं। दोबारा कोशिश करने के लिए एजेंट को फिर से चुनें।",
       "critical": "गंभीर",
       "default": "डिफ़ॉल्ट",
-      "default_for_new_sessions": "नए सत्रों के लिए डिफ़ॉल्ट",
-      "delete_agent": "{{name}} हटाएँ",
       "delete_subagent": "सबएजेंट {{id}} हटाएँ",
       "denied_commands": "अस्वीकृत कमांड",
       "done": "पूर्ण",
@@ -6195,18 +6246,13 @@
       "no_active_sessions": "कोई सक्रिय सत्र नहीं",
       "no_subagents": "कोई सब-एजेंट नहीं",
       "overage_credits": "अतिरिक्त क्रेडिट:",
-      "patterns_blocked": "पैटर्न ब्लॉक किए गए",
       "plan_credits": "प्लान क्रेडिट",
       "prompt_one": "{{count}} prompt",
       "prompt_other": "{{count}} prompts",
-      "remove_default_agent": "डिफ़ॉल्ट एजेंट हटाएँ",
       "req": "/req",
       "resets": "रीसेट होगा",
       "running": "चल रहा है",
       "select_an_agent_to_view_details": "विवरण देखने के लिए एजेंट चुनें",
-      "sessions": "सत्र",
-      "set_as_default": "डिफ़ॉल्ट बनाएँ",
-      "set_as_default_agent": "डिफ़ॉल्ट एजेंट बनाएँ",
       "skills": "स्किल",
       "spawn_tasks_from_chat_or_cli": "चैट या CLI से कार्य स्पॉन करें",
       "subagents": "सब-एजेंट",
@@ -6214,7 +6260,41 @@
       "tools": "टूल",
       "tools_2": "टूल",
       "type_to_filter": "फ़िल्टर करने के लिए टाइप करें…",
-      "usage": "उपयोग"
+      "usage": "उपयोग",
+      "at_a_glance": "एक नज़र में",
+      "cancel": "रद्द करें",
+      "cli_chat_chat_channel_threads_and_warm_pool_sessio": "CLI चैट, चैट चैनल के थ्रेड और वॉर्म-पूल सेशन इस पर आते हैं — Crew अपना खुद चुनते हैं",
+      "comes_with_the_template_read_only_here": "टेम्पलेट के साथ आता है — यहाँ सिर्फ़ पढ़ा जा सकता है",
+      "config_file": "कॉन्फ़िग फ़ाइल",
+      "delete_template": "टेम्पलेट हटाएं",
+      "delete_the_template_named_confirm": "टेम्पलेट {{name}} हटाना है? इसकी कॉन्फ़िग फ़ाइल हट जाएगी और इसे वापस नहीं लाया जा सकता।",
+      "editing_this_template_changes_how_they_behave_in_": "इस टेम्पलेट को बदलने से अगले सत्र में उनका व्यवहार बदल जाएगा",
+      "filter_templates": "टेम्पलेट फ़िल्टर करें",
+      "from_package": "पैकेज से",
+      "guardrails": "सुरक्षा नियम",
+      "id": "ID",
+      "model": "मॉडल",
+      "no_agent_templates_yet": "अभी कोई एजेंट टेम्पलेट नहीं",
+      "no_crews_use_this_template_yet": "अभी कोई Crew इस टेम्पलेट को इस्तेमाल नहीं करता",
+      "no_default_template": "कोई डिफ़ॉल्ट टेम्पलेट नहीं",
+      "no_model_pinned_here_a_crew_set_to_inherit_falls_": "यहाँ कोई मॉडल पिन नहीं है — जो Crew विरासत पर सेट है वह ग्लोबल डिफ़ॉल्ट पर चला जाएगा",
+      "no_templates_match_your_filter": "इस फ़िल्टर से कोई टेम्पलेट मेल नहीं खाता",
+      "not_set_for_this_template": "इस टेम्पलेट के लिए सेट नहीं है",
+      "overview": "अवलोकन",
+      "package": "पैकेज",
+      "pinned_here_a_crew_set_to_inherit_uses_this_model": "यहाँ पिन किया गया — जो Crew विरासत पर सेट है वह यही मॉडल इस्तेमाल करेगा",
+      "source": "स्रोत",
+      "status": "स्थिति",
+      "task": "कार्य",
+      "templates_come_with_kirocrew_or_with_an_app_you_i": "टेम्पलेट Kiro Crew के साथ आते हैं, या किसी इंस्टॉल किए गए ऐप के साथ",
+      "this_is_the_fallback_template_point_the_picker_a": "फ़ॉलबैक टेम्पलेट हटाया नहीं जा सकता — पहले ऊपर वाले सेलेक्टर को किसी दूसरे टेम्पलेट पर लगाओ",
+      "tools_and_mcp": "टूल और MCP",
+      "used_by": "द्वारा उपयोग",
+      "used_by_crews_repoint_them_on_the_crews_tab_firs": "{{crews}} इसे इस्तेमाल करते हैं — हटाने से पहले Crews टैब में उन्हें दूसरे टेम्पलेट पर लगाओ",
+      "what_a_crew_starts_from_its_model_skills_tools_mc": "जिससे Crew शुरू होता है — उसका मॉडल, स्किल, टूल, MCP सर्वर और सुरक्षा नियम",
+      "when_nothing_names_a_template_use": "जब कोई टेम्पलेट तय न हो, तब इस्तेमाल करो",
+      "where_it_comes_from": "यह कहाँ से आया",
+      "yes_delete_it": "हाँ, हटा दो"
     },
     "aidlc": {
       "dagView": {
@@ -6717,6 +6797,7 @@
       "folder_actions": "फ़ोल्डर क्रियाएँ",
       "folder_breadcrumb": "फ़ोल्डर ब्रेडक्रंब",
       "folder_color": "फ़ोल्डर रंग",
+      "from_your_chats": "तुम्हारी चैट से",
       "gallery": "गैलरी",
       "import_from_a_file": "फ़ाइल से आयात करें…",
       "kind": "प्रकार",
@@ -6753,9 +6834,11 @@
       "slug": "स्लग",
       "source": "स्रोत",
       "star_artifact": "आर्टिफ़ैक्ट को स्टार करें",
+      "show_all_count": "सब दिखाएँ ({{count}})",
+      "show_less": "कम दिखाएँ",
+      "star_a_document_in_from_your_chats_to_save_it_he": "अभी कोई सहेजा गया आर्टिफ़ैक्ट नहीं है — \"तुम्हारी चैट से\" में किसी दस्तावेज़ को स्टार करो ताकि वह यहाँ सहेजा जाए।",
       "star_creates_a_starred_artifact_from_this_docume": "स्टार करें (इस दस्तावेज़ से एक स्टार किया गया आर्टिफ़ैक्ट बनाता है)",
       "star_document": "दस्तावेज़ स्टार करें",
-      "star_save_to_library": "स्टार (लाइब्रेरी में सहेजें)",
       "starred": "स्टार किए गए",
       "starred_click_to_unstar": "स्टार किया गया — हटाने के लिए क्लिक करें",
       "start_a_new_blank_document_in_the_library": "लाइब्रेरी में एक नया खाली दस्तावेज़ शुरू करें",
@@ -6785,7 +6868,7 @@
       "skills_label": "स्किल्स",
       "steering_description": "~/.kiro/steering और तुम्हारे प्रोजेक्ट के .kiro/steering से हमेशा-चालू markdown परंपराएँ",
       "steering_label": "स्टीयरिंग",
-      "templates_description": "इंस्टॉल किए गए एजेंट कॉन्फ़िगरेशन और पैकेज",
+      "templates_description": "जिससे Crew शुरू होता है — उसका मॉडल, स्किल, टूल, MCP सर्वर और सुरक्षा नियम",
       "templates_label": "एजेंट टेम्प्लेट"
     },
     "channelPage": {
@@ -6958,7 +7041,9 @@
         "turn_took_cost": "टर्न में {{elapsed}} लगे ({{cost}} API लागत)",
         "turn_took_credits": "टर्न में {{elapsed}} लगे और {{credits}} क्रेडिट खर्च हुए",
         "turn_took_credits_cost": "टर्न में {{elapsed}} लगे और {{credits}} क्रेडिट खर्च हुए ({{cost}} API लागत)",
-        "use_as_plan_count": "योजना के रूप में उपयोग करें ({{count}} चरण)"
+        "use_as_plan_count": "योजना के रूप में उपयोग करें ({{count}} चरण)",
+        "pin_message": "संदेश पिन करें",
+        "unpin_message": "संदेश अनपिन करें"
       },
       "chatFooter": {
         "compacting": "संक्षिप्त किया जा रहा है…",
@@ -7060,6 +7145,7 @@
         "recovered_continuing": "पुनर्प्राप्त · जारी",
         "resuming_the_interrupted_turn": "बाधित बारी फिर से शुरू हो रही है",
         "safety_policy_continuing": "सुरक्षा नीति · स्वतः जारी",
+        "session_busy_continuing": "सत्र व्यस्त · स्वचालित रूप से जारी",
         "tool_call_blocked": "टूल कॉल अवरुद्ध",
         "tool_stopped_responding": "टूल ने प्रतिक्रिया देना बंद कर दिया",
         "turn_interrupted": "टर्न बाधित हुआ",
@@ -7085,8 +7171,14 @@
         "context_from": "संदर्भ:",
         "copied": "कॉपी किया गया!",
         "copy": "कॉपी करें",
+        "queue_cancel_failed": "कतार में लगे उस प्रश्न को रद्द नहीं किया जा सका",
+        "queue_edit_failed": "कतार में लगे उस प्रश्न को अपडेट नहीं किया जा सका",
         "refresh_context": "संदर्भ ताज़ा करें",
+        "refresh_blocked_queued": "Finish or cancel the queued questions first — refreshing would discard them",
+        "refresh_blocked_busy": "Wait for the current answer to finish — refreshing now would discard the pending question",
         "send": "भेजें",
+        "steer_demoted_to_queue": "टर्न समाप्त हो गया — इसके बजाय कतार में डाला गया",
+        "steered": "स्टीयर किया गया",
         "thinking": "सोच रहा है…",
         "turn_one": "{{count}} टर्न",
         "turn_other": "{{count}} टर्न"
@@ -7195,9 +7287,13 @@
         "aria_awaiting_approval": "टूल के लिए स्वीकृति की प्रतीक्षा: {{label}}",
         "aria_hide_details": "टूल के लिए विवरण छिपाएँ: {{label}}",
         "aria_show_details": "टूल के लिए विवरण दिखाएँ: {{label}}",
-        "blocked_by_security_policy": "सुरक्षा नीति द्वारा अवरुद्ध",
         "open_in_side_panel": "{{path}} को साइड पैनल में खोलें",
-        "opened_in_the_side_panel": "साइड पैनल में खोला गया"
+        "opened_in_the_side_panel": "साइड पैनल में खोला गया",
+        "wait_end_now": "प्रतीक्षा खत्म करो",
+        "wait_ending": "खत्म किया जा रहा है…",
+        "wait_remaining": "{{time}} शेष",
+        "wait_status": "प्रतीक्षा में",
+        "blocked_by_security_policy": "सुरक्षा नीति द्वारा अवरुद्ध"
       },
       "toolDetails": {
         "auto": "स्वतः",
@@ -7218,7 +7314,9 @@
         "edit_resend": "संपादित करें और फिर भेजें",
         "send": "भेजें",
         "send_enter": "भेजें (Enter)",
-        "steered_into_the_running_turn": "चल रहे टर्न में निर्देशित किया गया"
+        "steered_into_the_running_turn": "चल रहे टर्न में निर्देशित किया गया",
+        "pin_message": "संदेश पिन करें",
+        "unpin_message": "संदेश अनपिन करें"
       },
       "workflowCompletionCard": {
         "hide_result": "परिणाम छिपाएँ",
@@ -7236,6 +7334,26 @@
       "workflowSidebarRow": {
         "could_not_load_snapshot": "स्नैपशॉट लोड नहीं हो सका:",
         "events": "इवेंट"
+      },
+      "pins": {
+        "pinned_messages": "पिन किए गए संदेश",
+        "close_panel": "पिन किए गए संदेश पैनल बंद करें",
+        "loading": "लोड हो रहा है…",
+        "no_pinned_messages": "अभी तक कोई पिन किया गया संदेश नहीं। महत्वपूर्ण संदेशों को जल्दी खोजने के लिए पिन करें।",
+        "message_unavailable": "यह पिन किया गया संदेश लोड किए गए इतिहास में अब उपलब्ध नहीं है।",
+        "pin_failed": "संदेश पिन नहीं किया जा सका। फिर से कोशिश करें।",
+        "unpin_failed": "संदेश से पिन नहीं हटाया जा सका। फिर से कोशिश करें।",
+        "you": "तुम",
+        "assistant": "सहायक",
+        "just_now": "अभी",
+        "minutes_ago": "{{count}} मिनट पहले",
+        "hours_ago": "{{count}} घंटे पहले",
+        "days_ago": "{{count}} दिन पहले",
+        "copy_preview": "टेक्स्ट कॉपी करें",
+        "copy_link": "संदेश का लिंक कॉपी करें",
+        "unpin": "अनपिन",
+        "open_pinned_messages": "पिन किए गए संदेश खोलें",
+        "jump_to_message": "संदेश पर जाएं"
       }
     },
     "chatPage": {
@@ -7277,6 +7395,7 @@
       "no_tools": "कोई टूल नहीं",
       "open_activity_panel": "गतिविधि पैनल खोलो",
       "open_file": "फ़ाइल {{path}} खोलें",
+      "open_folder": "फ़ोल्डर {{path}} खोलें",
       "plan_from_here_failed_error": "यहाँ से योजना बनाना विफल: {{error}}",
       "pop_out_session_to_its_own_window": "सत्र को अपनी अलग विंडो में पॉप आउट करें",
       "pop_out_to_window": "विंडो में पॉप आउट करें",
@@ -7372,6 +7491,7 @@
       "double_click_to_rename": "नाम बदलने के लिए डबल-क्लिक करें",
       "drag_to_reorder": "क्रम बदलने के लिए खींचें",
       "drop_here_to_remove_from_folder": "फ़ोल्डर से निकालने के लिए यहाँ छोड़ें",
+      "drop_to_reference_session": "इस सेशन का संदर्भ जोड़ने के लिए यहाँ छोड़ें",
       "duplicate": "प्रतिलिपि बनाएँ",
       "expand_folder_name": "फ़ोल्डर {{name}} विस्तृत करें",
       "expand_group_results": "{{group}} के नतीजे विस्तृत करें",
@@ -7408,7 +7528,6 @@
       "incognito_no_memory_writes": "गुप्त — कोई मेमोरी लेखन नहीं",
       "last_30_days": "पिछले 30 दिन",
       "last_7_days": "पिछले 7 दिन",
-      "linked_to_slack": "Slack से जुड़ा",
       "load_more": "और लोड करें…",
       "loop": "लूप {{count}}/{{total}}",
       "loop_2": "लूप · {{count}}",
@@ -7442,11 +7561,13 @@
       "older": "इससे पुराने",
       "older_sessions": "पुराने सत्र",
       "older_sessions_2": "पुराने सत्र",
+      "open_source_link_in_side_panel": "{{url}} को साइड पैनल में खोलें (इसे ब्राउज़र में खोलने के लिए {{modifier}})",
       "open_split_view": "स्प्लिट व्यू खोलें",
       "pick_a_model_for_every_session_switching_a_sessi": "हर सत्र के लिए मॉडल चुनें। किसी सत्र को स्विच करने पर",
       "pinned": "पिन किए गए",
       "pinned_sessions_are_kept": "पिन किए गए सत्र रखे जाते हैं।",
       "popped_out_to_a_separate_window": "अलग विंडो में पॉप आउट किया गया",
+      "private_session_cannot_be_referenced": "निजी सेशन का संदर्भ नहीं दिया जा सकता",
       "rename": "नाम बदलें",
       "rename_flag_as_status_or_delete_tags_changes_app": "टैग का नाम बदलें, उन्हें स्थिति के रूप में चिह्नित करें, या हटाएं। बदलाव हर उस जगह लागू होते हैं जहाँ टैग दिखते हैं।",
       "resets_its_conversation": "इसकी बातचीत रीसेट कर देता है",
@@ -7782,6 +7903,15 @@
       "worktrees_count": "वर्कट्री ({{count}})",
       "worktrees_created_under_a_previous_repository_na": "पिछले रिपॉज़िटरी नाम के तहत बनी वर्कट्री। डिफ़ॉल्ट रूप से छिपी हुई; फिर भी मर्ज हो चुकी वर्कट्री प्रून करने में शामिल।"
     },
+    "developer": {
+      "previewSurfacesCard": {
+        "inbound_webhook_tokens_registered_contexts_and_r": "इनबाउंड वेबहुक टोकन, पंजीकृत संदर्भ और रन इतिहास. API काम करता है, पेज अभी पूरा नहीं हुआ है.",
+        "open_webhooks": "वेबहुक खोलें",
+        "preview_surfaces": "प्रीव्यू पेज",
+        "unreleased_pages_hidden_from_the_sidebar_and_fro": "अप्रकाशित पेज. जब तक आप इन्हें यहाँ चालू नहीं करते, ये साइडबार और हर जगह खोजें में नहीं दिखते. यह सेटिंग इसी डिवाइस पर लागू होती है, और ये पेज जान-बूझकर अपूर्ण हैं.",
+        "webhooks": "वेबहुक"
+      }
+    },
     "developerPage": {
       "developer": "डेवलपर",
       "tabs": {
@@ -7790,7 +7920,7 @@
           "label": "संग्रह"
         },
         "config": {
-          "description": "Kiro Crew और एजेंट कॉन्फ़िगरेशन व्यूअर (केवल पढ़ने के लिए)",
+          "description": "प्रीव्यू पेज के विकल्प, साथ ही Kiro Crew और एजेंट कॉन्फ़िगरेशन व्यूअर (केवल पढ़ने के लिए)",
           "label": "कॉन्फ़िग"
         },
         "logs": {
@@ -8312,7 +8442,8 @@
         "reembedding": "स्मृतियाँ फिर से एम्बेड हो रही हैं…",
         "subtitle": "स्थानीय रूप से चलता है। इसे बदलने पर संग्रहीत स्मृतियाँ पृष्ठभूमि में फिर से एम्बेड होती हैं।",
         "title": "एम्बेडिंग मॉडल",
-        "will_revert": "खाली — यह अंतर्निहित मॉडल पर वापस लौटेगा।"
+        "will_revert": "खाली — यह अंतर्निहित मॉडल पर वापस लौटेगा।",
+        "err_env_override_with_ref": "<settingRef/> सेट है और इस सेटिंग को ओवरराइड करता है। यहां मॉडल बदलने के लिए इसे हटाएं।"
       },
       "kiroCrewCfgTab": {
         "agent_for_pool_processes_empty_uses_default_agen": "पूल प्रोसेस के लिए एजेंट। खाली छोड़ने पर डिफ़ॉल्ट एजेंट उपयोग होता है। पुनः आरंभ आवश्यक।",
@@ -8601,7 +8732,9 @@
         "this_skill_changed_after_this_update_was_written": "यह skill इस अपडेट के लिखे जाने के बाद बदल गया, तो अब इसे लागू करना उन नए बदलावों को पलट देगा। मंज़ूरी रुकी हुई है — इस उम्मीदवार को हटाओ, और मौजूदा संस्करण के लिए नया अपडेट प्रस्तावित होगा।",
         "update": "अपडेट करो",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "वर्कस्पेस"
+        "workspace": "वर्कस्पेस",
+        "auto_create_hint": "Kiro Crew पूर्ण सत्रों से स्वचालित रूप से कौशल का मसौदा भी तैयार कर सकता है — डिफ़ॉल्ट रूप से बंद, <settingRef/> द्वारा नियंत्रित।",
+        "approval_required_hint": "उम्मीदवार आपकी स्वीकृति तक यहाँ प्रतीक्षा करते हैं — <settingRef/> द्वारा आवश्यक।"
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "हमेशा चालू रहने वाली markdown कन्वेंशन, जो हर सेशन में डाली जाती हैं। ग्लोबल फ़ाइलें ~/.kiro/steering में रहती हैं और हर जगह लागू होती हैं; वर्कस्पेस फ़ाइलें <project>/.kiro/steering में रहती हैं और सिर्फ़ उसी प्रोजेक्ट पर लागू होती हैं।",
@@ -8806,6 +8939,9 @@
       "resource_nav": "संसाधन",
       "resource_network": "नेटवर्क",
       "sandbox_procs": "सैंडबॉक्स",
+      "session_storage": "सत्र संग्रहण",
+      "session_storage_detail": "{{sessions}} सत्र · {{reclaimable}} पुनः प्राप्त करने योग्य",
+      "session_storage_measuring": "माप रहे हैं…",
       "threads": "थ्रेड",
       "total": "कुल",
       "upload": "अपलोड",
@@ -9114,11 +9250,49 @@
     "sessionArchive": {
       "fuzzy_filter_substring_match": "फ़ज़ी फ़िल्टर (सबस्ट्रिंग मैच)",
       "loading": "लोड हो रहा है…",
-      "no_archives_archives_are_created_when_session_fi": "कोई आर्काइव नहीं। सत्र फ़ाइलें रोटेट (>2MB) या कॉम्पैक्ट होने पर आर्काइव बनाए जाते हैं।",
       "no_matches_for_query": "इसके लिए कोई मेल नहीं मिला: \"{{query}}\"।",
       "reload": "पुनः लोड करें",
       "select_an_archive_to_view_its_contents": "सामग्री देखने के लिए कोई आर्काइव चुनें।",
-      "truncated_showing_first_200kb": "… छोटा किया गया (पहले 200KB दिखाए जा रहे हैं) …"
+      "truncated_showing_first_200kb": "… छोटा किया गया (पहले 200KB दिखाए जा रहे हैं) …",
+      "no_archives_with_compaction_hint": "कोई आर्काइव नहीं। सत्र फ़ाइलें रोटेट (>2MB) या कॉम्पैक्ट होने पर आर्काइव बनाए जाते हैं। स्वतः-संघनन <settingRef/> द्वारा नियंत्रित होता है।"
+    },
+    "sessionStorage": {
+      "back_to_disk": "सिस्टम · प्रदर्शन › डिस्क",
+      "background_group": "बैकग्राउंड एजेंट ({{count}})",
+      "bulk_selected": "{{count}} चुने गए",
+      "cancel": "रद्द करें",
+      "cannot_delete_resumable": "यह सेशन अभी भी फिर शुरू किया जा सकता है, इसलिए इसे रखा गया है। इसे खाली करने का विकल्प अभी नहीं है।",
+      "cannot_delete_running": "इस सेशन में अभी एक टर्न चल रहा है, इसलिए इसे ट्रैश में नहीं भेजा जा सकता।",
+      "clear_selection": "साफ़ करें",
+      "confirm_delete_forever": "हमेशा के लिए हटाएं",
+      "delete_forever": "हमेशा के लिए हटाएं",
+      "detail_images": "चित्र",
+      "detail_last_used": "अंतिम उपयोग",
+      "detail_size": "आकार",
+      "detail_turns": "चरण",
+      "heading": "सत्र भंडारण",
+      "in_use": "उपयोग में",
+      "move_to_trash_bulk": "ट्रैश में ले जाएं",
+      "move_to_trash_single": "ट्रैश में ले जाएं",
+      "refused_heading": "{{count}} सत्र नहीं ले जाए जा सके",
+      "refused_in_use": "सत्र उपयोग में है",
+      "refused_resumable": "अभी भी फिर शुरू करने योग्य",
+      "refused_too_fresh": "सत्र बहुत नया है",
+      "refused_unknown": "सत्र नहीं मिला",
+      "restore": "पुनर्स्थापित करें",
+      "resumable": "फिर शुरू करने योग्य",
+      "search_placeholder": "सत्र खोजें",
+      "sort_largest": "सबसे बड़ा पहले",
+      "sort_name": "नाम",
+      "sort_oldest": "सबसे पुराना पहले",
+      "subheading": "{{sessions}} सत्र · डिस्क पर {{total}} · {{reclaimable}} पुनः प्राप्य",
+      "trash": "ट्रैश",
+      "trash_batch_label": "{{sessions}} सत्र · {{size}}",
+      "trash_batch_reason": "{{reason}} द्वारा स्थानांतरित",
+      "trash_empty": "खाली",
+      "trash_note": "खाली करने तक डिस्क स्थान घेरता रहेगा। यहां कुछ भी स्वतः नहीं हटता।",
+      "trash_summary": "{{sessions}} सत्र · {{size}}",
+      "unknown_session": "एक असूचीबद्ध सेशन"
     },
     "sessionsTab": {
       "agent": "एजेंट",
@@ -9192,20 +9366,17 @@
         "copy_command": "कमांड कॉपी करें",
         "couldn_t_check_for_updates": "अपडेट जाँचे नहीं जा सके",
         "couldn_t_check_for_updates_2": "अपडेट जाँचे नहीं जा सके।",
-        "couldn_t_load_the_changelog": "चेंजलॉग लोड नहीं हो सका।",
         "download_failed": "डाउनलोड विफल",
         "download_install": "डाउनलोड और इंस्टॉल",
         "download_the_latest_version": "नवीनतम संस्करण डाउनलोड करें",
         "downloaded_and_verified_the_app_restarts_to_fini": "डाउनलोड और सत्यापित हो गया। इंस्टॉल पूरा करने के लिए ऐप पुनः आरंभ होगा; आप बाद में ऐप बंद भी कर सकते हैं और बंद होने पर यह इंस्टॉल हो जाएगा।",
         "downloading": "डाउनलोड हो रहा है...",
-        "hide_full_changelog": "▾ पूरा चेंजलॉग छिपाएँ",
         "insider": "इनसाइडर",
         "install_failed": "अपडेट इंस्टॉल नहीं हो सका",
         "installing_quiet_note": "इंस्टॉल हो रहा है — Kiro Crew एक-दो मिनट के लिए शांत रहेगा, फिर स्वयं पुनः आरंभ हो जाएगा।",
         "is_available": "उपलब्ध है।",
         "loading_changelog": "चेंजलॉग लोड हो रहा है…",
         "manual_install_fallback": "अगर अपडेट करना काम न करे, तो आप {{link}} और इस कॉपी के ऊपर दोबारा इंस्टॉल कर सकते हैं। आपकी सेटिंग्स, चैट और फ़ाइलें बनी रहती हैं।",
-        "no_changelog_available": "कोई चेंजलॉग उपलब्ध नहीं है।",
         "not_checked_yet": "अभी जाँचा नहीं गया",
         "notify_when_an_update_is_available": "अपडेट उपलब्ध होने पर सूचित करें",
         "open_source_under_the_apache_2_0_license": "Apache 2.0 लाइसेंस के अंतर्गत ओपन सोर्स",
@@ -9246,7 +9417,7 @@
         "updating_gateway_restarting": "अपडेट हो रहा है — गेटवे पुनः आरंभ हो रहा है…",
         "updating_restarts_the_gateway_active_sessions_wi": "अपडेट करने पर गेटवे पुनः आरंभ होता है — सक्रिय सत्र कुछ पल के लिए डिस्कनेक्ट हो जाएँगे।",
         "v": "v",
-        "view_full_changelog": "▸ पूरा चेंजलॉग देखें",
+        "view_all_releases": "सभी रिलीज़ देखो",
         "view_this_commit_on_github": "इस कमिट को GitHub पर देखें",
         "what_s_new": "नया क्या है",
         "you_are_on_the_latest_version": "आप नवीनतम संस्करण पर हैं।",
@@ -9405,7 +9576,7 @@
         "how_long_models_think_before_answering_by_defaul": "डिफ़ॉल्ट रूप से मॉडल उत्तर देने से पहले कितनी देर सोचते हैं। अधिक होने पर धीमा और महँगा पड़ता है। केवल रीज़निंग-सक्षम मॉडल (Opus, Sonnet, Fable, GPT-5.x) पर उपलब्ध है।",
         "how_long_to_wait_for_the_agent_to_honor_a_stop_p": "सेशन को ज़बरदस्ती समाप्त करने से पहले एजेंट के Stop दबाव का पालन करने के लिए कितनी देर प्रतीक्षा करें। लंबा बजट सेशन की स्थिति अधिक बार बचा लेता है, लेकिन जब एजेंट लंबे टूल कॉल्स में फँसे हों तो रोकना सुस्त महसूस होता है।",
         "how_much_an_automatically_registered_source_may_i": "स्वतः पंजीकृत स्रोत एक बार में कितना ले सकता है। दस्तावेज़ के प्रत्येक हिस्से पर एक निष्कर्षण कॉल खर्च होती है, इसलिए यही लागत को सीमित करता है; नवीनतम दस्तावेज़ पहले आते हैं और बाकी बाद के चक्रों में। 0 का अर्थ कोई सीमा नहीं। डिफ़ॉल्ट {{count}}।",
-        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "एजेंट की भाषा कितनी संक्षिप्त हो। अति-संक्षिप्त उस पाठक के लिए है जिसका ध्यान जल्दी भटकता है: उत्तर पहले तीन वाक्यों में आता है, और उसके बाद का विवरण गद्य नहीं बल्कि स्कैन करने योग्य बिंदुओं में होता है। कोड, कमांड और त्रुटि-संदेश अक्षरश: रहते हैं; सुरक्षा चेतावनियाँ और बहु-चरणीय निर्देश हर स्तर पर पूरे विस्तार से रहते हैं।",
+        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "एजेंट की भाषा कितनी संक्षिप्त हो। अति-संक्षिप्त पूरे उत्तर को छोटा रखता है: पहले निष्कर्ष, गद्य के बजाय बिंदु, कोई भराव नहीं। कोड, कमांड और त्रुटि-संदेश हर स्तर पर अक्षरश: रहते हैं, और सुरक्षा चेतावनियाँ तथा बहु-चरणीय निर्देश पूरे विस्तार से रहते हैं।",
         "i_write_code": "मैं कोड लिखता हूँ",
         "immediate": "तुरंत",
         "immediate_mode_shows_raw_chunks_as_they_arrive_s": "इमीडिएट मोड चंक्स को आते ही कच्चे रूप में दिखाता है। स्मूद मोड उन्हें बफ़र करता है और टेक्स्ट को एक समान गति से फ़ेड-इन करता है।",
@@ -9483,7 +9654,7 @@
         "technical_comfort": "तकनीकी सहजता",
         "text_streaming_style": "टेक्स्ट स्ट्रीमिंग शैली",
         "time_window_for_session_restoration": "सेशन पुनर्स्थापना के लिए समय-अवधि",
-        "ultra_concise_3_sentences": "अति-संक्षिप्त — 3 वाक्यों में उत्तर, फिर स्कैन करने योग्य विवरण",
+        "ultra_concise_3_sentences": "अति-संक्षिप्त — पहले उत्तर, न्यूनतम गद्य",
         "ux_designer": "UX डिज़ाइनर",
         "when_enabled_inline_tool_pills_show_simplified_t": "सक्षम होने पर, इनलाइन टूल पिल्स चल रहे सटीक कमांड के बजाय टूल उपयोग का सरलीकृत उद्देश्य दिखाते हैं",
         "which_model_new_sessions_start_with_pick_a_model": "जब किसी एजेंट का अपना कोई मॉडल तय न हो, तो नए सेशन किस मॉडल से शुरू होते हैं। हर एजेंट के लिए मॉडल क्षमताएँ → Crews में सेट करो, या किसी सेशन के भीतर मॉडल चुनकर वहाँ इसे बदल दो।",
@@ -9638,7 +9809,6 @@
         "enabled": "सक्षम है",
         "enabled_but_not_active_yet_restart_the_gateway": "सक्षम है, लेकिन अभी सक्रिय नहीं। गेटवे को पुनरारंभ करें (",
         "enabling": "चालू किया जा रहा है…",
-        "equivalent_cli": "समतुल्य CLI:",
         "failed_to_add_remote_crew": "रिमोट क्रू जोड़ने में विफल",
         "failed_to_load_remote_crews": "रिमोट क्रू लोड करने में विफल",
         "home_you_local_bin_kirocrew_leave_blank_for_stan": "/home/you/.local/bin/kirocrew  —  मानक इंस्टॉल के लिए खाली छोड़ें",
@@ -9647,8 +9817,6 @@
         "is_already_used_by_another_instance_choose_a_dif": "पहले से किसी अन्य रिमोट क्रू द्वारा उपयोग में है — कोई दूसरा चुनें\n              (और उस पोर्ट को रिमोट होस्ट पर कॉन्फ़िगर करें)।",
         "is_installed_somewhere_non_standard_on_the_remot": "रिमोट पर किसी\n            गैर-मानक जगह इंस्टॉल है। PATH पर सामान्य pip इंस्टॉल के लिए खाली छोड़ें। इसे खोजने के\n            लिए, रिमोट होस्ट पर चलाएँ:",
         "kirocrew": "kirocrew",
-        "kirocrew_config_set_instances_enabled_true": "kirocrew config set instances.enabled true",
-        "kirocrew_config_set_instances_warm_set_cap_n": "kirocrew config set instances.warm_set_cap N",
         "kirocrew_restart": "kirocrew restart",
         "loading": "लोड हो रहा है…",
         "local_bin_kirocrew": "~/.local/bin/kirocrew",
@@ -9676,7 +9844,6 @@
         "ssm_target_instance_id": "SSM लक्ष्य (इंस्टेंस id)",
         "the_gateway_opens_an_ssh_tunnel_and_mints_a_shor": "कनेक्ट करते समय गेटवे एक टनल (SSH या AWS SSM) खोलता है और अल्पकालिक टोकन बनाता है।\n        स्थानीय फ़ॉरवर्ड पोर्ट रिमोट पोर्ट को मिरर करता है, इसलिए प्रत्येक कनेक्टेड रिमोट क्रू को\n        एक अलग रिमोट पोर्ट उपयोग करना चाहिए।",
         "the_user_the_remote_gateway_runs_as_sudo_u_for_s": "वह उपयोगकर्ता जिसके रूप में रिमोट गेटवे चलता है — SSM कमांड sudo -u से चलते हैं। Ubuntu AMI पर ubuntu उपयोग करें।",
-        "then": "फिर",
         "to_fully_tear_down_any_tunnels_still_running_fro": "ताकि पहले से चल रही सभी टनल पूरी तरह बंद हो जाएँ।",
         "to_start_the_ssh_tunnel_manager_and_activate_ins": "टनल मैनेजर शुरू करने और रिमोट क्रू स्विचिंग सक्रिय करने के लिए।",
         "token_left": "· टोकन में {{time}} बचा",
@@ -9686,19 +9853,24 @@
         "unknown_error": "अज्ञात त्रुटि",
         "up_to": "अधिकतम",
         "update_setting_failed": "सेटिंग अपडेट करने में विफल: {{error}}",
-        "use_an_absolute_path_no": ")।\n            पूर्ण पथ उपयोग करें (बिना"
+        "use_an_absolute_path_no": ")।\n            पूर्ण पथ उपयोग करें (बिना",
+        "enable_via_setting": "वैकल्पिक रूप से, <settingRef/> सेट करें, फिर <restartCmd/> चलाएँ।"
       },
       "mcpPoolableServers": {
         "blocked": "अवरोधित",
         "could_not_load_mcp_servers": "MCP सर्वर लोड नहीं हो सके।",
+        "could_not_update_all_try_again": "सर्वर अपडेट नहीं हो सके। कोई बदलाव नहीं हुआ। फिर कोशिश करो।",
         "could_not_update_try_again": "{{name}} अपडेट नहीं हो सका। फिर कोशिश करो।",
         "loading_mcp_servers": "MCP सर्वर लोड हो रहे हैं…",
+        "n_of_m_pooled": "{{total}} पूल करने योग्य सर्वर में से {{on}} पूल में",
+        "n_of_m_pooled_plus_agent": "{{total}} पूल करने योग्य सर्वर में से {{on}} पूल में, agent कॉन्फ़िग से {{extra}} और",
         "no_mcp_servers_configured": "कोई MCP सर्वर कॉन्फ़िगर नहीं है।",
         "pool": "{{name}} को पूल करो",
         "poolable_mcp_servers": "पूल करने योग्य MCP सर्वर",
         "poolable_true": "poolable:true",
         "pooling_takes_effect_when_the_shared_mcp_gateway": "पूलिंग तब प्रभावी होती है जब साझा MCP गेटवे सक्षम हो। किसी भी स्थिति में आप यहाँ पहले से तय कर सकते हैं कि कौन-से\n            सर्वर पूल करने योग्य हैं।",
         "shared": "· साझा",
+        "toggle_all": "सभी टॉगल करो",
         "used_by": "इनके द्वारा उपयोग में:"
       },
       "notificationsPanel": {
@@ -9740,7 +9912,8 @@
         "sources": "स्रोत",
         "test": "परखें",
         "use_default": "डिफ़ॉल्ट इस्तेमाल करें",
-        "volume": "वॉल्यूम"
+        "volume": "वॉल्यूम",
+        "preset_pulse": "पल्स"
       },
       "postureDisclosure": {
         "filter": "{{label}} फ़िल्टर करो",
@@ -9749,6 +9922,22 @@
         "no_matches_for_query": "इसके लिए कोई मिलान नहीं: “{{query}}”।",
         "show": "दिखाएँ",
         "unavailable": "अनुपलब्ध"
+      },
+      "releases": {
+        "badge_unreleased": "रिलीज़ नहीं",
+        "detail_no_date": "तारीख़ अज्ञात",
+        "detail_on_prerelease": "तुम प्री-रिलीज़ {{version}} पर हो",
+        "detail_unreleased": "अभी रिलीज़ नहीं हुआ",
+        "empty_in_progress": "इस संस्करण के रिलीज़ नोट्स अभी लिखे नहीं गए हैं।",
+        "empty_released": "यह संस्करण बिना रिलीज़ नोट्स के जारी हुआ।",
+        "list_label": "संस्करण",
+        "load_failed": "रिलीज़ नोट्स लोड नहीं किए जा सके।",
+        "loading": "रिलीज़ लोड हो रहे हैं…",
+        "row_current_no_notes": "तुम्हारा संस्करण · कोई नोट्स नहीं लिखे गए",
+        "row_no_notes": "कोई नोट्स नहीं लिखे गए",
+        "stale_note": "यह सूची तुम्हारे बिल्ड ({{version}}) से आती है और हो सकता है कि इसमें नई प्रविष्टियाँ शामिल न हों।",
+        "unavailable": "इस बिल्ड में कोई रिलीज़ नोट्स उपलब्ध नहीं हैं।",
+        "view_commits": "GitHub पर कमिट देखो"
       },
       "reportProblemCard": {
         "blurb": "कुछ काम नहीं कर रहा? हमें डायग्नोस्टिक रिपोर्ट भेजें — लॉग से सीक्रेट पहले ही हटा दिए जाते हैं।",
@@ -9770,6 +9959,7 @@
         "click_any_control_to_see_exactly_what_it_covers": "यह देखने के लिए कि कोई नियंत्रण ठीक क्या कवर करता है, उस पर क्लिक करें।",
         "collapse_all": "सभी संक्षिप्त करें",
         "collapse_category_rules": "{{category}} नियम समेटें",
+        "custom_deny_note": "कस्टम अस्वीकृति टिप्पणी",
         "custom_deny_pattern": "कस्टम अस्वीकार पैटर्न",
         "custom_patterns_counted_separately": "तुम्हारे स्वयं के पैटर्न “अस्वीकृत कमांड” में अलग से गिने जाते हैं।",
         "custom_patterns_hidden_by_filter": "मौजूदा फ़िल्टर तुम्हारे स्वयं के पैटर्न छिपा रहा है।",
@@ -9863,7 +10053,9 @@
         "not_restricted": "प्रतिबंधित नहीं",
         "nothing_allowed": "कुछ भी अनुमत नहीं",
         "off": "बंद",
+        "optional_why_shown_to_the_agent_when_this_rule_fir": "वैकल्पिक: कारण। यह नियम लागू होने पर एजेंट को दिखाया जाता है",
         "other_surfaces_have_their_own_profiles": "अपनी प्रोफ़ाइल रखने वाला सरफ़ेस वह इजाज़त दे सकता है जो होस्ट नहीं दे सकता: {{surfaces}}.",
+        "enforced_by_floor": "Kiro Crew में निर्मित हमेशा-सक्रिय सुरक्षा द्वारा लागू",
         "pinned_by_policy": "तुम्हारे संगठन की सुरक्षा नीति से लागू",
         "pinned_for_the_host_surface": "होस्ट-सरफ़ेस प्रोफ़ाइल से तय। यह सिर्फ़ इन-प्रोसेस होस्ट कामों की सीमा है — बाक़ी सरफ़ेस की अपनी प्रोफ़ाइल हैं और वे इसकी इजाज़त दे सकती हैं।",
         "policy": "नीति",
@@ -9976,6 +10168,18 @@
         "enabling_shared_mcp_gateway": "साझा MCP गेटवे चालू किया जा रहा है",
         "gateway_stuck_retry": "गेटवे अपेक्षित स्थिति तक नहीं पहुँचा। फिर कोशिश करें।",
         "gateway_stuck_roll_back": "गेटवे अपेक्षित स्थिति तक नहीं पहुँचा। सुरक्षित (बंद) स्थिति पर वापस जाएँ, या फिर कोशिश करें।",
+        "mcp_apps": "MCP ऐप्स",
+        "mcp_apps_applies_to_new": "सहेजा गया। नए MCP कनेक्शन पर लागू होगा; पहले से चल रहे कनेक्शन रीसायकल होने पर इसे अपनाएंगे।",
+        "mcp_apps_gateway_started": "साझा MCP गेटवे शुरू हो गया। सक्रिय सत्र MCP ऐप्स चालू रहते हुए पुनः आरंभ किए गए।",
+        "mcp_apps_no_poolable_servers": "अभी कोई MCP सर्वर पूल-योग्य नहीं है, इसलिए कुछ भी रेंडर नहीं होगा। नीचे पूल-योग्य MCP सर्वर में कम से कम एक चालू करें।",
+        "mcp_apps_saved_unsupported": "सहेजा गया। MCP ऐप्स को साझा MCP गेटवे की आवश्यकता है, जो इस प्लेटफ़ॉर्म पर उपलब्ध नहीं है।",
+        "mcp_apps_retry_gateway": "गेटवे शुरू करने का पुनः प्रयास करें",
+        "mcp_apps_capability": "MCP सर्वर का इंटरैक्टिव UI चैट में रेंडर करें।",
+        "mcp_apps_failed": "लागू नहीं हो सका। सेटिंग नहीं बदली गई।",
+        "mcp_apps_needs_gateway": "ऊपर साझा MCP गेटवे चालू होने पर लागू होता है।",
+        "mcp_apps_will_start_gateway": "इसे चालू करने पर साझा MCP गेटवे भी शुरू होगा, जिससे सक्रिय सत्र पुनः आरंभ होंगे।",
+        "mcp_apps_starting_gateway": "साझा MCP गेटवे शुरू हो रहा है — सक्रिय सत्र पुनः आरंभ होंगे…",
+        "mcp_apps_gateway_follow_failed": "MCP ऐप्स सहेजे गए, लेकिन साझा MCP गेटवे शुरू नहीं हुआ। पुनः प्रयास के लिए ऊपर साझा MCP गेटवे को बंद करके फिर चालू करें।",
         "not_available_on_windows": "Windows पर उपलब्ध नहीं — साझा गेटवे को Unix-डोमेन सॉकेट की आवश्यकता होती है। macOS और Linux पर समर्थित।",
         "roll_back_disable": "रोल बैक करें (अक्षम करें)",
         "shared_mcp_gateway": "साझा MCP गेटवे",
@@ -10361,7 +10565,6 @@
       "daily_trend_point": "{{date}} · कोल्ड {{cold}} · वार्म {{warm}} · {{count}} स्टार्ट",
       "days": "दिनों में।",
       "distribution_col": "वितरण",
-      "enable_with": "सक्षम करने के लिए उपयोग करें:",
       "fault_rate": "फ़ॉल्ट दर",
       "group_by": "ग्रुप",
       "growth_col": "वृद्धि",
@@ -10373,7 +10576,6 @@
       "mean_col": "औसत",
       "mean_credits_by_occupancy": "उपयोग किए गए कॉन्टेक्स्ट के अनुसार प्रति टर्न औसत क्रेडिट",
       "measured_from_token_records": "यहाँ सूचीबद्ध सेशन से पिछले {{days}} दिनों के लिए स्थानीय रूप से मापा गया — टेलीमेट्री स्विच से स्वतंत्र रूप से रखा जाता है",
-      "metrics_stay_local": "। मेट्रिक्स स्थानीय रहते हैं (",
       "min_col": "min",
       "min_max": "न्यू {{min}} · अधि {{max}}",
       "model_col": "मॉडल",
@@ -10383,7 +10585,6 @@
       "no_startups_recorded": "इस विंडो में कोई स्टार्टअप दर्ज नहीं",
       "no_telemetry_recorded_yet_in_the_last": "अभी तक कोई टेलीमेट्री रिकॉर्ड नहीं हुई — पिछले",
       "no_turns_yet": "अभी कोई टर्न नहीं",
-      "nothing_leaves_this_machine": ") — कुछ भी इस मशीन से बाहर नहीं जाता।",
       "occupancy_p50": "उपयोग (p50)",
       "occupancy_p90": "उपयोग (p90)",
       "otel_has_no_per_conversation_split": "OTEL हिस्टोग्राम में सेशन id नहीं होती, इसलिए ये पूरी प्रक्रिया के आँकड़े हैं — टर्न लेटेंसी को इस स्टोर से किसी एक संवाद से नहीं जोड़ा जा सकता।",
@@ -10417,7 +10618,6 @@
       "tab_latency": "लेटेंसी",
       "tab_spend": "खर्च",
       "tab_startup": "स्टार्टअप",
-      "telemetry_enabled_true": "telemetry.enabled = true",
       "telemetry_is_off": "टेलीमेट्री बंद है",
       "throughput": "थ्रूपुट",
       "to_compaction_col": "90% तक",
@@ -10436,7 +10636,8 @@
       "warm_start_p50": "वार्म स्टार्ट (p50)",
       "was_value": "पहले {{value}}",
       "window_last": "OTEL अनुभाग · विंडो: पिछले",
-      "window_tokens_col": "विंडो (टोकन)"
+      "window_tokens_col": "विंडो (टोकन)",
+      "off_body": "<settingRef/> से सक्रिय करें। मेट्रिक्स स्थानीय रहती हैं (<metricsDir/>) — इस मशीन से कुछ भी बाहर नहीं जाता।"
     },
     "terminalPopoutFrame": {
       "return": "डॉक पर वापस जाएँ",
@@ -10693,7 +10894,8 @@
     "worldsPopout": {
       "hide_controls": "नियंत्रण छिपाएँ",
       "show_controls": "नियंत्रण दिखाएँ"
-    }
+    },
+    "sessionMemoryCard": {}
   },
   "privacyDisclosure": {
     "anonymousHeartbeatBody": "दिन में अधिकतम एक बार। यह एक इंस्टॉल की गई कॉपी को दर्शाता है, किसी व्यक्ति को नहीं।",
@@ -10702,7 +10904,6 @@
     "controlsTitle": "टेलीमेट्री नियंत्रण",
     "dataNeverSentBody": "प्रॉम्प्ट, उत्तर, फ़ाइलें, क्रेडेंशियल, होस्टनाम, यूज़रनाम, या तुम्हारा ऑपरेटिंग सिस्टम। तुम्हारा IP संग्रहीत नहीं होता।",
     "dataNeverSentTitle": "कभी नहीं भेजा जाता",
-    "envOverrideNote": "हार्टबीट बंद है क्योंकि इस परिवेश में {{envVar}} सेट है। यहाँ टेलीमेट्री प्रबंधित करने के लिए इसे अनसेट करो।",
     "governanceOverrideNote": "तुम्हारे एडमिन की सुरक्षा नीति इसे बंद रखती है। इसे यहाँ से नहीं बदला जा सकता।",
     "installReceiptBody": "Kiro Crew के आधिकारिक कैटलॉग से सफल इंस्टॉल या अपडेट के बाद एक अनाम रसीद भेजी जाती है। बाहरी रजिस्ट्री, स्थानीय ऐप और स्वयं-पंजीकृत ऐप कभी रिपोर्ट नहीं किए जाते।",
     "installReceiptFields": "आधिकारिक ऐप स्लग · प्रति-ऐप अनाम टोकन (ऐपों के बीच लिंक नहीं किया जा सकता) · नया/अपडेट फ़्लैग · Kiro Crew वर्शन",
@@ -10725,7 +10926,8 @@
     "shellWindowsCmdLabel": "Windows कमांड प्रॉम्प्ट",
     "toggleDescription": "सहेजा गया, आगे के लॉन्च के लिए।",
     "toggleLabel": "अनाम उपयोग हार्टबीट भेजें",
-    "toggleSaveFailed": "तुम्हारी टेलीमेट्री पसंद सहेजी नहीं जा सकी। फिर कोशिश करो।"
+    "toggleSaveFailed": "तुम्हारी टेलीमेट्री पसंद सहेजी नहीं जा सकी। फिर कोशिश करो।",
+    "envOverrideWithSettingRef": "हार्टबीट बंद है क्योंकि <settingRef/> इस वातावरण में सेट है। यहां टेलीमेट्री प्रबंधित करने के लिए इसे हटाएं।"
   },
   "settings": {
     "display": {
@@ -10784,6 +10986,10 @@
       "overview": {
         "description": "सिस्टम स्वास्थ्य, गतिविधि, और उपयोग व मेमोरी एक नज़र में",
         "label": "अवलोकन"
+      },
+      "releases": {
+        "description": "हर संस्करण के रिलीज़ नोट्स",
+        "label": "रिलीज़"
       },
       "security": {
         "description": "सुरक्षा स्थिति, रक्षा की परतें, प्रमाणन और डेटा वर्गीकरण",

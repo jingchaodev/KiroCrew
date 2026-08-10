@@ -70,6 +70,10 @@
         "copied": "Copied!",
         "copy": "Copy",
         "could_not_generate_challenges_please_try_again": "Could not generate challenges. Please try again.",
+        "delete_campaign": "Delete campaign?",
+        "deleting": "Deleting…",
+        "delete_campaign_button": "Delete campaign",
+        "delete_failed": "Delete failed. Please try again.",
         "emergent": "emergent",
         "export_as_artifact": "Export as Artifact",
         "exporting": "Exporting…",
@@ -944,7 +948,7 @@
       "optimizing_another_chat_please_wait": "Optimizing another chat — please wait",
       "project": "Project",
       "project_2": "Project: {{path}}",
-      "queue_run_after_the_current_turn_finishes_enter": "Queue — run after the current turn finishes (Enter)",
+      "queue_run_after_the_current_turn_finishes_enter": "Queue — run after the current work finishes (Enter)",
       "recording_click_mic_to_stop": "Recording… click mic to stop",
       "reject_all": "Reject all",
       "reject_sub_agent": "Reject sub-agent: {{name}}",
@@ -952,7 +956,7 @@
       "resolving": "Resolving…",
       "select_project": "Select project",
       "steer": "Steer",
-      "steer_inject_into_the_running_turn_enter": "Steer — inject into the running turn (Enter)",
+      "steer_inject_into_the_running_turn_enter": "Steer — act on this as soon as possible (Enter)",
       "stop_recording": "Stop recording",
       "stop_the_current_response_to_switch_agents": "Stop the current response to switch agents",
       "stop_the_current_response_to_switch_model": "Stop the current response to switch model",
@@ -963,8 +967,8 @@
       "transcribing_please_wait": "Transcribing, please wait…",
       "voice_input": "Voice input",
       "queue": "Queue",
-      "queue_desc": "Run after the current turn finishes",
-      "steer_desc": "Inject into the running turn right away"
+      "queue_desc": "Run after the current work finishes",
+      "steer_desc": "Act on this right away"
     },
     "chatPane": {
       "forked_from": "Forked from {{name}}"
@@ -1032,7 +1036,9 @@
         }
       },
       "search_for_anything": "Search for anything",
-      "search_scope": "Search {{scope}}…"
+      "search_scope": "Search {{scope}}…",
+      "retry": "Retry",
+      "search_failed": "Search failed"
     },
     "commentsSidebar": {
       "agent": "Agent",
@@ -1249,7 +1255,9 @@
       "reaction_laugh": "Laugh",
       "reaction_minus1": "Thumbs down",
       "reaction_plus1": "Thumbs up",
-      "reaction_rocket": "Rocket"
+      "reaction_rocket": "Rocket",
+      "jira_open_in_browser": "Jira issue — open in browser to view details.",
+      "open_in_jira": "Open in Jira"
     },
     "jobForm": {
       "add": "Add",
@@ -1348,12 +1356,15 @@
       "open_artifact": "Open artifact {{name}}",
       "open_as_artifact": "Open as artifact",
       "open_folder": "Open folder {{path}}",
+      "open_with_default_app": "Open with default app",
+      "path_copied_to_clipboard_no_desktop_available": "Path copied to clipboard (no desktop available)",
       "preview": "Preview",
       "refresh_file_re_read_from_disk": "Refresh file (re-read from disk)",
       "save": "Save",
       "save_failed": "Save failed",
       "save_or_discard_changes_first": "Save or discard changes first",
       "saving": "Saving…",
+      "show_in_file_manager": "Show in file manager",
       "snapshot_version": "Snapshot version",
       "snapshotting": "Snapshotting…",
       "switch_to_split_view": "Switch to split view",
@@ -1708,7 +1719,7 @@
       "suggestion_pipeline_status": "Check my pipeline status",
       "suggestion_review_cr": "Review my latest CR",
       "suggestion_search_code": "Search code for usage examples",
-      "suggestion_summarize_slack": "Summarize this week's Slack activity",
+      "suggestion_summarize_chat": "Summarize this week's chat activity",
       "suggestion_triage_tickets": "Triage my on-call tickets",
       "suggestion_write_design_doc": "Help me write a design doc",
       "switch_back_to_default_mode": "Switch back to default mode",
@@ -2036,16 +2047,10 @@
       "waiting_for_approval_address": "Waiting for the approval address… it appears here when the agent next connects — send any chat message to start authorization now."
     },
     "agentsPage": {
-      "agent_templates_grouped_by_package_update_and_un": "Agent templates grouped by package. Update and uninstall at package level. Individual agents can be deleted (removes config file).",
       "consumption_for_current_billing_period": "{{provider}} consumption for the current billing period. Cached 10 min.",
       "context_window_usage_tip": "Live context window utilization per active {{label}} session. Custom agents show their configured model. Compaction triggers at 90%.",
       "default": "Default",
-      "default_for_new_sessions": "Default for new sessions",
-      "delete_agent": "Delete {{name}}",
-      "delete_subagent": "Delete subagent {{id}}",
-      "remove_default_agent": "Remove default agent",
-      "set_as_default": "Set as default",
-      "set_as_default_agent": "Set as default agent"
+      "delete_subagent": "Delete subagent {{id}}"
     },
     "appDetailPage": {
       "app_not_found_2": "App \"{{name}}\" not found",
@@ -2211,7 +2216,6 @@
       "remove_artifact_confirm": "Remove artifact \"{{slug}}\" from your library?\n\nThis deletes the artifact entry and its version history. If this artifact came from a file on disk or a chat widget, the original is NOT touched — you can re-add it later.",
       "remove_star_from_artifact": "Remove star from artifact",
       "star_artifact": "Star artifact",
-      "star_save_to_library": "Star (save to library)",
       "starred_click_to_unstar": "Starred — click to unstar",
       "start_a_new_blank_document_in_the_library": "Start a new blank document in the library",
       "table": "Table",
@@ -2331,7 +2335,11 @@
       },
       "sideChat": {
         "ask_a_side_question_2": "Ask a side question…",
-        "copied": "Copied!"
+        "copied": "Copied!",
+        "queue_cancel_failed": "Could not cancel that queued question",
+        "queue_edit_failed": "Could not update that queued question",
+        "steer_demoted_to_queue": "The turn ended — queued instead",
+        "steered": "Steered"
       },
       "sidePanel": {
         "hide_line_numbers": "Hide line numbers",
@@ -2418,7 +2426,11 @@
         "aria_show_details": "Show details for tool: {{label}}",
         "blocked_by_security_policy": "Blocked by security policy",
         "open_in_side_panel": "Open {{path}} in side panel",
-        "opened_in_the_side_panel": "Opened in the side panel"
+        "opened_in_the_side_panel": "Opened in the side panel",
+        "wait_end_now": "End wait",
+        "wait_ending": "Ending…",
+        "wait_remaining": "{{time}} left",
+        "wait_status": "Waiting"
       }
     },
     "chatPage": {
@@ -2434,17 +2446,21 @@
       "fork_failed_error": "Fork failed: {{error}}",
       "hide_sessions": "Hide sessions",
       "hide_sessions_sidebar": "Hide sessions sidebar",
+      "knowledge_item_one": "{{count}} knowledge item",
+      "knowledge_item_other": "{{count}} knowledge items",
       "message_queued_until_session_ready": "{{error}}. Your message is queued and will be sent when a session is ready — but it is held in this tab only, so if you navigate away or reload you will need to retype it.",
       "message_saved_as_draft": "{{error}}. Your message is saved as a draft in the session you sent it from.{{extra}}",
       "no_results": "No results",
       "no_tools": "No tools",
       "open_activity_panel": "Open activity panel",
       "open_file": "Open file {{path}}",
+      "open_folder": "Open folder {{path}}",
       "plan_from_here_failed_error": "Plan from here failed: {{error}}",
       "send_failed": "Send failed",
       "session_not_found": "Session \"{{name}}\" not found",
       "show_sessions": "Show sessions",
       "show_sessions_sidebar": "Show sessions sidebar",
+      "this_session_has_no_project_directory_to_branch": "This session has no project directory to branch from.",
       "too_many_files_max_20": "Too many files (max 20)",
       "tool_search_deferred": "Tool Search · Deferred",
       "tool_search_deferred_hint": "Tool specs load on demand — not sent to the model every turn.",
@@ -2458,9 +2474,6 @@
       "unknown_error": "unknown error",
       "upload_failed_check_file_type_and_size_max_50_mb": "Upload failed — check file type and size (max 50 MB)",
       "upload_failed_error": "Upload failed: {{error}}",
-      "knowledge_item_one": "{{count}} knowledge item",
-      "knowledge_item_other": "{{count}} knowledge items",
-      "this_session_has_no_project_directory_to_branch": "This session has no project directory to branch from.",
       "worktree_creation_returned_no_path": "Worktree creation returned no path"
     },
     "chatSidebar": {
@@ -2521,6 +2534,7 @@
       "more_pull_request_in_this_session_other": "{{count}} more pull requests in this session",
       "more_pull_request_or_issue_in_this_session_one": "{{count}} more pull request or issue in this session",
       "more_pull_request_or_issue_in_this_session_other": "{{count}} more pull requests or issues in this session",
+      "open_source_link_in_side_panel": "Open {{url}} in the side panel ({{modifier}} to open it in the browser)",
       "filter_unread": "Unread",
       "filter_unread_description": "Show only sessions with unread messages",
       "filter_running": "In progress",
@@ -3126,14 +3140,12 @@
         "update_error_server": "The update server returned an error.",
         "update_error_server_status": "The update server returned an error (HTTP {{status}}).",
         "update_error_unknown": "Something went wrong. Try checking for updates again.",
-        "hide_full_changelog": "▾ Hide Full Changelog",
         "insider": "Insider",
         "stable": "Stable",
         "update_failed": "Update failed",
         "update_noun": "update",
         "update_now": "Update now",
         "update_to_version": "Update to v{{version}}",
-        "view_full_changelog": "▸ View Full Changelog",
         "channel_help_show": "▸ What's the difference between Stable and Insider?",
         "channel_help_hide": "▾ Hide",
         "channel_explainer_stable": "Tested releases only. Fewer updates, and fewer surprises.",
@@ -3175,8 +3187,12 @@
         "your_chat_sessions_were_restarted_so_this_takes": "Your chat sessions were restarted so this takes effect right away — Kiro reads its tool list once per session, so an open chat would not have picked it up otherwise. Your messages are still there; the agent re-reads its context on your next message."
       },
       "mcpPoolableServers": {
+        "could_not_update_all_try_again": "Could not update servers. No changes were made. Try again.",
         "could_not_update_try_again": "Could not update {{name}}. Try again.",
-        "pool": "Pool {{name}}"
+        "n_of_m_pooled": "{{on}} of {{total}} poolable servers pooled",
+        "n_of_m_pooled_plus_agent": "{{on}} of {{total}} poolable servers pooled, +{{extra}} via agent config",
+        "pool": "Pool {{name}}",
+        "toggle_all": "Toggle all"
       },
       "postureDisclosure": {
         "filter": "Filter {{label}}",
@@ -3362,6 +3378,7 @@
         "preset_ding": "Ding",
         "preset_none": "Silent",
         "preset_pop": "Pop",
+        "preset_pulse": "Pulse",
         "priority_for": "Priority for {{name}}",
         "use_default": "Use default"
       },
@@ -3446,6 +3463,7 @@
         "gov_scope_tools": "Tools",
         "layer_auth": "Auth",
         "layer_n": "Layer {{n}}",
+        "enforced_by_floor": "Enforced by an always-on protection built into Kiro Crew",
         "pinned_by_policy": "Enforced by your organization's security policy",
         "pinned_for_the_host_surface": "Set by the host-surface profile. This is the ceiling for in-process host actions only — other surfaces have their own profiles and may allow this.",
         "yolo_duration_title": "How long auto-approve stays on",
@@ -3717,7 +3735,7 @@
           "label": "Archive"
         },
         "config": {
-          "description": "Kiro Crew and agent configuration viewers (read-only)",
+          "description": "Preview-page opt-ins, plus Kiro Crew and agent configuration viewers (read-only)",
           "label": "Config"
         },
         "logs": {
@@ -3754,7 +3772,6 @@
     "controlsTitle": "Telemetry controls",
     "dataNeverSentBody": "Prompts, responses, files, credentials, hostnames, usernames, or your operating system. Your IP is not stored.",
     "dataNeverSentTitle": "Never sent",
-    "envOverrideNote": "The heartbeat is off because {{envVar}} is set in this environment. Unset it to manage telemetry here.",
     "localDataBody": "Usage and context records. Performance metrics are off by default.",
     "localDataTitle": "Stays on your device",
     "notSendingAlreadySentToday": "Today's heartbeat has already been sent.",
@@ -3777,7 +3794,8 @@
     "shellWindowsCmdLabel": "Windows Command Prompt",
     "toggleDescription": "Saved for future launches.",
     "toggleLabel": "Send anonymous usage heartbeat",
-    "toggleSaveFailed": "Couldn't save your telemetry choice. Try again."
+    "toggleSaveFailed": "Couldn't save your telemetry choice. Try again.",
+    "envOverrideWithSettingRef": "The heartbeat is off because <settingRef/> is set in this environment. Unset it to manage telemetry here."
   },
   "settings": {
     "display": {
@@ -3836,6 +3854,10 @@
       "overview": {
         "description": "System health, activity, and usage & memory at a glance",
         "label": "Overview"
+      },
+      "releases": {
+        "description": "Release notes for each version",
+        "label": "Releases"
       },
       "security": {
         "description": "Security posture, defense layers, certifications, and data classification",

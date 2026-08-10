@@ -227,6 +227,10 @@
         "cycles_2": "সাইকেল",
         "definition_of_done_optional": "সম্পন্ন হওয়ার শর্ত (ঐচ্ছিক)",
         "delete": "মুছুন",
+        "delete_campaign": "ক্যাম্পেইন মুছে ফেলবেন?",
+        "deleting": "মুছে ফেলা হচ্ছে…",
+        "delete_campaign_button": "ক্যাম্পেইন মুছুন",
+        "delete_failed": "মুছে ফেলা ব্যর্থ হয়েছে। আবার চেষ্টা করুন।",
         "delete_this_campaign_and_its_report_this_cannot": "এই ক্যাম্পেইন ও এর রিপোর্ট মুছে ফেলা হবে? এটি আর ফেরানো যাবে না।",
         "done_when": "সম্পন্ন যখন:",
         "dynamic_workflow": "ডাইনামিক ওয়ার্কফ্লো",
@@ -439,12 +443,18 @@
           "this_review_failed": "এই রিভিউ ব্যর্থ হয়েছে"
         },
         "findingCard": {
+          "consequence": "পরিণতি",
+          "evidence": "প্রমাণ",
+          "observation": "পর্যবেক্ষণ",
           "post_finding": "এই পর্যবেক্ষণ pull request-এ দাও",
           "post_finding_on": "এই পর্যবেক্ষণ {{target}}-এ দাও",
           "post_this_comment": "এই মন্তব্য দাও",
           "posted_to_the_pull_request": "pull request-এ দেওয়া হয়েছে",
           "posting": "দেওয়া হচ্ছে…",
+          "select_to_draft_together": "একসাথে ড্রাফ্টের জন্য নির্বাচন করুন",
           "select_to_post": "দিতে {{label}} বেছে নাও",
+          "severity_must_fix": "আবশ্যক",
+          "severity_should_fix": "প্রস্তাবিত",
           "suggestion": "প্রস্তাব",
           "this_finding": "এই পর্যবেক্ষণ"
         },
@@ -2184,6 +2194,11 @@
       },
       "list": {
         "adHocTitle": "তাৎক্ষণিক মিটিং",
+        "deleteConfirm": "“{{title}}” এবং এর সব নোট, চিত্র ও করণীয় স্থায়ীভাবে মুছবেন? এটি আর ফেরানো যাবে না।",
+        "deleteFailed": "এই মিটিংটি মোছা যায়নি।",
+        "deleteMeeting": "{{title}} মুছুন",
+        "deleteUnavailable": "মোছার আগে এই মিটিংটি শেষ করুন",
+        "deleted": "“{{title}}” মোছা হয়েছে",
         "empty": "কোনও মিটিং নেই",
         "emptyHintNoCalendar": "সেটিংসে একটি ক্যালেন্ডার জুড়ুন, বা একটি তাৎক্ষণিক মিটিং শুরু করুন।",
         "emptyHintSynced": "ক্যালেন্ডারে কিছু নেই, আর এখনও কোনও মিটিং নিয়ে কাজ হয়নি।",
@@ -2528,13 +2543,16 @@
         "blurb": "Mochi একটি একক পোষা প্রাণী, এবং প্রতিটি Kiro Crew নিজেরটি চালায়। বেছে নিন এটি কার সঙ্গে থাকবে — শুধু এখন সংযুক্ত ইনস্ট্যান্সগুলো তালিকাভুক্ত।",
         "connecting": "সংযোগ করা হচ্ছে…",
         "current": "বর্তমান",
+        "desktop_only": "পেট কোন ইনস্ট্যান্স দেখাবে তা বেছে নিতে ডেস্কটপ অ্যাপ দরকার।",
         "errored": "সংযোগ সমস্যা",
         "feature_off": "মাল্টি-ইনস্ট্যান্স বন্ধ আছে। দূরবর্তী ইনস্ট্যান্স বেছে নিতে Kiro Crew সেটিংসে এটি চালু করুন।",
+        "host_disable_note": "অন্য কোনও ইনস্ট্যান্সে Mochi বন্ধ করলে শুধু সেই ইনস্ট্যান্সের নিজের ব্যাকগ্রাউন্ড কাজ থামে — তোমার পেট এখানে বেছে নেওয়া ইনস্ট্যান্সেই থাকে।",
         "list_failed": "ইনস্ট্যান্স তালিকা পড়া যায়নি।",
         "loading": "ইনস্ট্যান্স খোঁজা হচ্ছে…",
         "mochi_off": "সেখানে Mochi বন্ধ আছে",
         "needs_restart": "মাল্টি-ইনস্ট্যান্স এইমাত্র চালু হয়েছে — সক্রিয় করতে gateway পুনরায় চালু করুন।",
         "not_connected": "সংযুক্ত নয়",
+        "switch_failed": "এখনই ইনস্ট্যান্স বদলানো গেল না — তোমার পছন্দ সংরক্ষিত হয়েছে এবং সেই ইনস্ট্যান্স সাড়া দিলেই কার্যকর হবে।",
         "switch_note": "পরিবর্তন করলে চেহারা এবং চ্যাট ইতিহাসও পরিবর্তন হয় — প্রতিটি ইনস্ট্যান্স নিজেরটি রাখে। সংরক্ষিত কোনো ইনস্ট্যান্স হারিয়ে গেলে এই কম্পিউটারে ফিরে আসে।",
         "this_computer": "এই কম্পিউটার"
       },
@@ -2759,6 +2777,7 @@
         "shortcut_one_key": "শুধু একটি নন-মডিফায়ার কী চলবে",
         "shortcut_taken": "অন্য একটি অ্যাপ ইতিমধ্যে এই কী ব্যবহার করছে: {{actions}}। ভিন্ন একটি সংমিশ্রণ বেছে নিন।",
         "shortcuts": "শর্টকাট",
+        "shortcuts_desktop_only": "গ্লোবাল শর্টকাট বদলাতে ডেস্কটপ অ্যাপ দরকার।",
         "silent_subagents": "নীরব পটভূমি এজেন্ট",
         "silent_subagents_desc": "পটভূমির কাজ শেষ হলে বিজ্ঞপ্তি দমন করে (পরিকল্পনা, নজরদারি যাচাই)। ফলাফল এখনও চ্যাটে দেখা যায়।",
         "tier_active": "সক্রিয়",
@@ -4381,6 +4400,8 @@
       "search_everywhere": "সর্বত্র অনুসন্ধান করুন",
       "search_for_anything": "যেকোনো কিছু খোঁজো",
       "search_scope": "{{scope}} খোঁজো…",
+      "retry": "আবার চেষ্টা করুন",
+      "search_failed": "অনুসন্ধান ব্যর্থ হয়েছে",
       "searching": "অনুসন্ধান চলছে…",
       "tab": "tab"
     },
@@ -4605,10 +4626,13 @@
       "this_document_is_tracked_as_a_session_artifact_n": "এই ডকুমেন্টটি সেশন আর্টিফ্যাক্ট হিসেবে ট্র্যাক করা হয়, সোর্স-ফাইলের পরিবর্তন হিসেবে নয়"
     },
     "filePickerMenu": {
+      "folder": "ফোল্ডার",
+      "folder_kind": "ফোল্ডার",
       "no_matches": "কোনো মিল নেই",
       "open_in_viewer": "ভিউয়ারে খুলুন",
+      "remove_folder": "ফোল্ডার সরান",
       "searching": "খোঁজা হচ্ছে…",
-      "type_2_chars_to_search_files": "ফাইল খুঁজতে 2+ অক্ষর টাইপ করুন…"
+      "type_2_chars_to_search_files": "ফাইল ও ফোল্ডার খুঁজতে 2+ অক্ষর টাইপ করুন…"
     },
     "fileRenderers": {
       "empty_file": "খালি ফাইল",
@@ -4789,7 +4813,9 @@
       "this_issue_is_locked": "এই issue তালাবন্ধ",
       "unknown_author": "অজানা লেখক",
       "untitled": "শিরোনামহীন",
-      "updated_time": "{{time}} আপডেট হয়েছে"
+      "updated_time": "{{time}} আপডেট হয়েছে",
+      "jira_open_in_browser": "Jira issue — open in browser to view details.",
+      "open_in_jira": "Open in Jira"
     },
     "jobForm": {
       "a_short_label_for_this_job": "এই জবের জন্য একটি সংক্ষিপ্ত লেবেল",
@@ -4997,6 +5023,8 @@
       "open_artifact": "{{name}} আর্টিফ্যাক্ট খোলো",
       "open_as_artifact": "আর্টিফ্যাক্ট হিসেবে খুলুন",
       "open_folder": "ফোল্ডার খুলুন {{path}}",
+      "open_with_default_app": "ডিফল্ট অ্যাপে খোলো",
+      "path_copied_to_clipboard_no_desktop_available": "পাথ ক্লিপবোর্ডে কপি করা হয়েছে (কোনো ডেস্কটপ নেই)",
       "preview": "প্রিভিউ",
       "previous_match": "পূর্ববর্তী মিল",
       "previous_shift_enter": "পূর্ববর্তী (Shift+Enter)",
@@ -5009,6 +5037,7 @@
       "save_this_file_as_an_artifact_versioned_persiste": "এই ফাইলটি আর্টিফ্যাক্ট হিসেবে সংরক্ষণ করুন (ভার্সনযুক্ত, স্থায়ী, মন্তব্য করার যোগ্য)",
       "saving": "সেভ হচ্ছে…",
       "select_any_text_to_add_inline_comments_then_subm": "ইনলাইন মন্তব্য যোগ করতে যেকোনো টেক্সট নির্বাচন করুন, তারপর সেগুলো সবই চ্যাটে পাঠান।",
+      "show_in_file_manager": "ফাইল ম্যানেজারে দেখাও",
       "snapshot_version": "সংস্করণ স্ন্যাপশট করো",
       "snapshotting": "স্ন্যাপশট হচ্ছে…",
       "switch_to_split_view": "স্প্লিট ভিউতে যাও",
@@ -5396,6 +5425,8 @@
       "edit_queued_message": "সারিতে থাকা বার্তা সম্পাদনা করুন",
       "interrupt_current_turn_and_send_this_now": "বর্তমান টার্ন থামিয়ে এটি এখনই পাঠান",
       "queued": "সারিতে",
+      "run_later": "পরে চালান",
+      "run_sooner": "আগে চালান",
       "ready_processing_after_the_current_turn": "প্রস্তুত — বর্তমান টার্নের পরে প্রক্রিয়া করা হবে",
       "save": "সংরক্ষণ করুন",
       "save_edit": "সম্পাদনা সংরক্ষণ করুন",
@@ -5550,6 +5581,13 @@
       "undo_remove": "সরানো আনডু করুন",
       "will_be_removed_on_save": "সেভ করলে সরিয়ে দেওয়া হবে।"
     },
+    "sendToInstanceSubmenu": {
+      "failed": "ব্যর্থ",
+      "not_connected": "সংযুক্ত নয়",
+      "send_a_copy_to": "একটি অনুলিপি পাঠান",
+      "sent": "পাঠানো হয়েছে",
+      "unknown_error": "অজানা ত্রুটি"
+    },
     "sessionActionsMenu": {
       "bring_back_to_main": "মূল উইন্ডোতে ফিরিয়ে আনুন",
       "close_session": "সেশন বন্ধ করুন",
@@ -5584,6 +5622,11 @@
       "split_right": "ডানে স্প্লিট করুন",
       "split_right_d": "ডানে স্প্লিট করুন (⌘D)",
       "terminal_pane_coming_in_phase_2": "টার্মিনাল প্যান — ফেজ 2-এ আসছে"
+    },
+    "sessionRefStrip": {
+      "n_messages": "{{n}} মেসেজ",
+      "remove_reference": "রেফারেন্স সরান",
+      "remove_reference_to": "{{name}}-এর রেফারেন্স সরান"
     },
     "settings": {
       "click_to_reset": "রিসেট করতে ক্লিক করো",
@@ -5988,7 +6031,7 @@
       "suggestion_pipeline_status": "আমার পাইপলাইনের অবস্থা দেখুন",
       "suggestion_review_cr": "আমার সর্বশেষ CR পর্যালোচনা করুন",
       "suggestion_search_code": "ব্যবহারের উদাহরণের জন্য কোড খুঁজুন",
-      "suggestion_summarize_slack": "এই সপ্তাহের Slack কার্যকলাপের সারসংক্ষেপ দিন",
+      "suggestion_summarize_chat": "এই সপ্তাহের চ্যাট কার্যকলাপের সারসংক্ষেপ দিন",
       "suggestion_triage_tickets": "আমার অন-কল টিকিট ট্রায়াজ করুন",
       "suggestion_write_design_doc": "একটি ডিজাইন ডকুমেন্ট লিখতে আমাকে সাহায্য করুন",
       "switch_back_to_default_mode": "ডিফল্ট মোডে ফিরে যাও",
@@ -6026,6 +6069,18 @@
       "select": "নির্বাচন করুন",
       "workspace_name": "ওয়ার্কস্পেসের নাম",
       "workspace_name_2": "workspace-name"
+    },
+    "settingRef": {
+      "envVarAriaLabel": "পরিবেশ পরিবর্তনশীল {{key}}",
+      "envVarDescription": "Kiro Crew শুরু করার আগে এই পরিবেশ ভেরিয়েবলটি সেট করুন।",
+      "envVarUnsetDescription": "Kiro Crew শুরু করার আগে এই পরিবেশ ভেরিয়েবলটি আনসেট করুন।",
+      "fileOnlyDescription": "নিচের CLI কমান্ড দিয়ে এই মানটি সেট করুন।",
+      "copied": "কপি হয়েছে!",
+      "copyFailed": "কপি ব্যর্থ হয়েছে",
+      "copyCommand": "কমান্ড কপি করুন",
+      "orEditConfigJson": "বিকল্পভাবে, সরাসরি ~/.kiro/crew/config.json সম্পাদনা করুন।",
+      "openSettingsAriaLabel": "সেটিংস → {{tab}}-এ {{key}} খুলুন",
+      "fileSettingAriaLabel": "শুধুমাত্র ফাইল সেটিং {{key}}"
     }
   },
   "hooks": {
@@ -6165,9 +6220,7 @@
   },
   "pages": {
     "agentsPage": {
-      "active_sessions_and_subagent_tasks": "সক্রিয় সেশন ও সাবএজেন্ট টাস্ক",
       "agent_templates": "এজেন্ট টেমপ্লেট",
-      "agent_templates_grouped_by_package_update_and_un": "প্যাকেজ অনুযায়ী সাজানো এজেন্ট টেমপ্লেট। আপডেট ও আনইনস্টল প্যাকেজ স্তরে হয়। আলাদা এজেন্ট মুছে ফেলা যায় (কনফিগ ফাইল সরিয়ে দেয়)।",
       "auto_approved": "স্বয়ংক্রিয়ভাবে অনুমোদিত",
       "awaiting_first_prompt": "প্রথম প্রম্পটের অপেক্ষায়",
       "clear_completed": "সম্পন্নগুলো মুছুন",
@@ -6177,8 +6230,6 @@
       "could_not_load_this_agent_s_configuration_skills": "এই এজেন্টের কনফিগারেশন লোড করা যায়নি — ওভাররাইট হওয়া এড়াতে\n                        স্কিল লুকানো হয়েছে। আবার চেষ্টা করতে এজেন্টটি পুনরায় নির্বাচন করুন।",
       "critical": "গুরুতর",
       "default": "ডিফল্ট",
-      "default_for_new_sessions": "নতুন সেশনের জন্য ডিফল্ট",
-      "delete_agent": "{{name}} মুছুন",
       "delete_subagent": "সাবএজেন্ট {{id}} মুছে ফেলো",
       "denied_commands": "নিষিদ্ধ কমান্ড",
       "done": "সম্পন্ন",
@@ -6195,18 +6246,13 @@
       "no_active_sessions": "কোনো সক্রিয় সেশন নেই",
       "no_subagents": "কোনো সাবএজেন্ট নেই",
       "overage_credits": "অতিরিক্ত ক্রেডিট:",
-      "patterns_blocked": "প্যাটার্ন ব্লক করা হয়েছে",
       "plan_credits": "প্ল্যান ক্রেডিট",
       "prompt_one": "{{count}}টি প্রম্পট",
       "prompt_other": "{{count}}টি প্রম্পট",
-      "remove_default_agent": "ডিফল্ট এজেন্ট সরাও",
       "req": "/req",
       "resets": "রিসেট হবে",
       "running": "চলছে",
       "select_an_agent_to_view_details": "বিস্তারিত দেখতে একটি এজেন্ট নির্বাচন করুন",
-      "sessions": "সেশন",
-      "set_as_default": "ডিফল্ট হিসেবে সেট করো",
-      "set_as_default_agent": "ডিফল্ট এজেন্ট হিসেবে সেট করো",
       "skills": "স্কিল",
       "spawn_tasks_from_chat_or_cli": "চ্যাট বা CLI থেকে টাস্ক চালু করুন",
       "subagents": "সাবএজেন্ট",
@@ -6214,7 +6260,41 @@
       "tools": "টুল",
       "tools_2": "টুল",
       "type_to_filter": "ফিল্টার করতে টাইপ করুন…",
-      "usage": "ব্যবহার"
+      "usage": "ব্যবহার",
+      "at_a_glance": "এক নজরে",
+      "cancel": "বাতিল",
+      "cli_chat_chat_channel_threads_and_warm_pool_sessio": "CLI চ্যাট, চ্যাট চ্যানেলের থ্রেড আর ওয়ার্ম-পুল সেশন এটিতে ফিরে আসে — Crew নিজের টেমপ্লেট বলে দেয়",
+      "comes_with_the_template_read_only_here": "টেমপ্লেটের সাথেই আসে — এখানে শুধু দেখা যায়",
+      "config_file": "কনফিগ ফাইল",
+      "delete_template": "টেমপ্লেট মুছে ফেলুন",
+      "delete_the_template_named_confirm": "{{name}} টেমপ্লেট মুছে ফেলবেন? এর কনফিগ ফাইল মুছে যাবে এবং এটি ফেরানো যাবে না।",
+      "editing_this_template_changes_how_they_behave_in_": "এই টেমপ্লেট বদলালে পরের সেশনে তাদের আচরণ বদলে যাবে",
+      "filter_templates": "টেমপ্লেট ফিল্টার করুন",
+      "from_package": "প্যাকেজ থেকে",
+      "guardrails": "সুরক্ষা নিয়ম",
+      "id": "ID",
+      "model": "মডেল",
+      "no_agent_templates_yet": "এখনো কোনো এজেন্ট টেমপ্লেট নেই",
+      "no_crews_use_this_template_yet": "এখনো কোনো Crew এই টেমপ্লেট ব্যবহার করে না",
+      "no_default_template": "কোনো ডিফল্ট টেমপ্লেট নেই",
+      "no_model_pinned_here_a_crew_set_to_inherit_falls_": "এখানে কোনো মডেল পিন করা নেই — ইনহেরিট করা Crew গ্লোবাল ডিফল্টে ফিরে যাবে",
+      "no_templates_match_your_filter": "আপনার ফিল্টারের সাথে কোনো টেমপ্লেট মেলে না",
+      "not_set_for_this_template": "এই টেমপ্লেটের জন্য সেট করা নেই",
+      "overview": "ওভারভিউ",
+      "package": "প্যাকেজ",
+      "pinned_here_a_crew_set_to_inherit_uses_this_model": "এখানে পিন করা — যে Crew ইনহেরিট করা আছে সেটি এই মডেল ব্যবহার করবে",
+      "source": "সোর্স",
+      "status": "স্ট্যাটাস",
+      "task": "টাস্ক",
+      "templates_come_with_kirocrew_or_with_an_app_you_i": "টেমপ্লেট Kiro Crew-এর সাথে আসে, বা আপনি ইনস্টল করা কোনো অ্যাপের সাথে",
+      "this_is_the_fallback_template_point_the_picker_a": "ফলব্যাক টেমপ্লেট মোছা যায় না — আগে উপরের সিলেক্টরটি অন্য টেমপ্লেটে নিয়ে যান",
+      "tools_and_mcp": "টুল ও MCP",
+      "used_by": "যেখানে ব্যবহৃত",
+      "used_by_crews_repoint_them_on_the_crews_tab_firs": "{{crews}} এটি ব্যবহার করছে — মোছার আগে Crews ট্যাবে গিয়ে তাদের অন্য টেমপ্লেটে নিয়ে যান",
+      "what_a_crew_starts_from_its_model_skills_tools_mc": "একটি Crew যা থেকে শুরু করে — তার মডেল, স্কিল, টুল, MCP সার্ভার আর সুরক্ষা নিয়ম",
+      "when_nothing_names_a_template_use": "যখন কোনো টেমপ্লেট বলা হয়নি, তখন ব্যবহার করা হবে",
+      "where_it_comes_from": "এটি কোথা থেকে এসেছে",
+      "yes_delete_it": "হ্যাঁ, মুছে ফেলুন"
     },
     "aidlc": {
       "dagView": {
@@ -6717,6 +6797,7 @@
       "folder_actions": "ফোল্ডার অ্যাকশন",
       "folder_breadcrumb": "ফোল্ডার ব্রেডক্রাম্ব",
       "folder_color": "ফোল্ডারের রঙ",
+      "from_your_chats": "আপনার চ্যাট থেকে",
       "gallery": "গ্যালারি",
       "import_from_a_file": "ফাইল থেকে আমদানি করুন…",
       "kind": "ধরন",
@@ -6753,9 +6834,11 @@
       "slug": "স্লাগ",
       "source": "সোর্স",
       "star_artifact": "আর্টিফ্যাক্টে স্টার দাও",
+      "show_all_count": "সব দেখান ({{count}})",
+      "show_less": "কম দেখান",
+      "star_a_document_in_from_your_chats_to_save_it_he": "এখনও কোনো সংরক্ষিত আর্টিফ্যাক্ট নেই — \"আপনার চ্যাট থেকে\" অংশের একটি ডকুমেন্টে স্টার দিয়ে এখানে সংরক্ষণ করো।",
       "star_creates_a_starred_artifact_from_this_docume": "স্টার দিন (এই ডকুমেন্ট থেকে একটি স্টার দেওয়া আর্টিফ্যাক্ট তৈরি হয়)",
       "star_document": "ডকুমেন্টে স্টার দিন",
-      "star_save_to_library": "স্টার (লাইব্রেরিতে সংরক্ষণ)",
       "starred": "স্টার দেওয়া",
       "starred_click_to_unstar": "স্টার দেওয়া — স্টার সরাতে ক্লিক করো",
       "start_a_new_blank_document_in_the_library": "লাইব্রেরিতে একটি নতুন ফাঁকা নথি শুরু করুন",
@@ -6785,7 +6868,7 @@
       "skills_label": "স্কিল",
       "steering_description": "~/.kiro/steering এবং আপনার প্রকল্পের .kiro/steering থেকে সর্বদা-সক্রিয় markdown কনভেনশন",
       "steering_label": "স্টিয়ারিং",
-      "templates_description": "ইনস্টল করা এজেন্ট কনফিগারেশন এবং প্যাকেজ",
+      "templates_description": "একটি Crew যা থেকে শুরু করে — তার মডেল, স্কিল, টুল, MCP সার্ভার আর সুরক্ষা নিয়ম",
       "templates_label": "এজেন্ট টেমপ্লেট"
     },
     "channelPage": {
@@ -6958,7 +7041,9 @@
         "turn_took_cost": "টার্নে সময় লেগেছে {{elapsed}} ({{cost}} API ব্যয়)",
         "turn_took_credits": "টার্নে সময় লেগেছে {{elapsed}} এবং খরচ হয়েছে {{credits}} ক্রেডিট",
         "turn_took_credits_cost": "টার্নে সময় লেগেছে {{elapsed}} এবং খরচ হয়েছে {{credits}} ক্রেডিট ({{cost}} API ব্যয়)",
-        "use_as_plan_count": "প্ল্যান হিসেবে ব্যবহার করুন ({{count}}টি ধাপ)"
+        "use_as_plan_count": "প্ল্যান হিসেবে ব্যবহার করুন ({{count}}টি ধাপ)",
+        "pin_message": "বার্তা পিন করুন",
+        "unpin_message": "বার্তা আনপিন করুন"
       },
       "chatFooter": {
         "compacting": "কম্প্যাক্ট করা হচ্ছে…",
@@ -7060,6 +7145,7 @@
         "recovered_continuing": "পুনরুদ্ধার হয়েছে · চলছে",
         "resuming_the_interrupted_turn": "বিঘ্নিত পালা আবার শুরু হচ্ছে",
         "safety_policy_continuing": "নিরাপত্তা নীতি · স্বয়ংক্রিয়ভাবে চলছে",
+        "session_busy_continuing": "সেশন ব্যস্ত · স্বয়ংক্রিয়ভাবে চলছে",
         "tool_call_blocked": "টুল কল ব্লক করা হয়েছে",
         "tool_stopped_responding": "টুল সাড়া দেওয়া বন্ধ করেছে",
         "turn_interrupted": "টার্ন বাধাগ্রস্ত হয়েছে",
@@ -7085,8 +7171,14 @@
         "context_from": "কনটেক্সটের উৎস",
         "copied": "কপি হয়েছে!",
         "copy": "কপি করুন",
+        "queue_cancel_failed": "সেই কিউ করা প্রশ্নটি বাতিল করা যায়নি",
+        "queue_edit_failed": "সেই কিউ করা প্রশ্নটি আপডেট করা যায়নি",
         "refresh_context": "কনটেক্সট রিফ্রেশ করুন",
+        "refresh_blocked_queued": "Finish or cancel the queued questions first — refreshing would discard them",
+        "refresh_blocked_busy": "Wait for the current answer to finish — refreshing now would discard the pending question",
         "send": "পাঠান",
+        "steer_demoted_to_queue": "টার্ন শেষ হয়েছে — পরিবর্তে কিউ করা হয়েছে",
+        "steered": "স্টিয়ার করা হয়েছে",
         "thinking": "ভাবছে…",
         "turn_one": "{{count}}টি টার্ন",
         "turn_other": "{{count}}টি টার্ন"
@@ -7195,9 +7287,13 @@
         "aria_awaiting_approval": "টুলের অনুমোদনের অপেক্ষায়: {{label}}",
         "aria_hide_details": "টুলের বিস্তারিত লুকাও: {{label}}",
         "aria_show_details": "টুলের বিস্তারিত দেখাও: {{label}}",
-        "blocked_by_security_policy": "নিরাপত্তা নীতি দ্বারা অবরুদ্ধ",
         "open_in_side_panel": "{{path}} সাইড প্যানেলে খোলো",
-        "opened_in_the_side_panel": "সাইড প্যানেলে খোলা হয়েছে"
+        "opened_in_the_side_panel": "সাইড প্যানেলে খোলা হয়েছে",
+        "wait_end_now": "অপেক্ষা শেষ করো",
+        "wait_ending": "শেষ করা হচ্ছে…",
+        "wait_remaining": "{{time}} বাকি",
+        "wait_status": "অপেক্ষমাণ",
+        "blocked_by_security_policy": "নিরাপত্তা নীতি দ্বারা অবরুদ্ধ"
       },
       "toolDetails": {
         "auto": "স্বয়ংক্রিয়",
@@ -7218,7 +7314,9 @@
         "edit_resend": "সম্পাদনা করে আবার পাঠান",
         "send": "পাঠান",
         "send_enter": "পাঠান (Enter)",
-        "steered_into_the_running_turn": "চলমান টার্নে স্টিয়ার করা হয়েছে"
+        "steered_into_the_running_turn": "চলমান টার্নে স্টিয়ার করা হয়েছে",
+        "pin_message": "বার্তা পিন করুন",
+        "unpin_message": "বার্তা আনপিন করুন"
       },
       "workflowCompletionCard": {
         "hide_result": "ফলাফল লুকাও",
@@ -7236,6 +7334,26 @@
       "workflowSidebarRow": {
         "could_not_load_snapshot": "স্ন্যাপশট লোড করা যায়নি:",
         "events": "ইভেন্ট"
+      },
+      "pins": {
+        "pinned_messages": "পিন করা বার্তা",
+        "close_panel": "পিন করা বার্তা প্যানেল বন্ধ করুন",
+        "loading": "লোড হচ্ছে…",
+        "no_pinned_messages": "এখনও কোনো পিন করা বার্তা নেই। গুরুত্বপূর্ণ বার্তা দ্রুত খুঁজে পেতে পিন করুন।",
+        "message_unavailable": "পিন করা বার্তাটি লোড করা ইতিহাসে আর পাওয়া যাচ্ছে না।",
+        "pin_failed": "বার্তাটি পিন করা যায়নি। আবার চেষ্টা করুন।",
+        "unpin_failed": "বার্তাটির পিন সরানো যায়নি। আবার চেষ্টা করুন।",
+        "you": "আপনি",
+        "assistant": "সহকারী",
+        "just_now": "এইমাত্র",
+        "minutes_ago": "{{count}} মিনিট আগে",
+        "hours_ago": "{{count}} ঘন্টা আগে",
+        "days_ago": "{{count}} দিন আগে",
+        "copy_preview": "টেক্সট কপি করুন",
+        "copy_link": "বার্তার লিঙ্ক কপি করুন",
+        "unpin": "আনপিন",
+        "open_pinned_messages": "পিন করা বার্তা খুলুন",
+        "jump_to_message": "বার্তায় যান"
       }
     },
     "chatPage": {
@@ -7277,6 +7395,7 @@
       "no_tools": "কোনো টুল নেই",
       "open_activity_panel": "কাজের প্যানেল খোলো",
       "open_file": "{{path}} ফাইল খোলো",
+      "open_folder": "{{path}} ফোল্ডার খোলো",
       "plan_from_here_failed_error": "এখান থেকে পরিকল্পনা করা যায়নি: {{error}}",
       "pop_out_session_to_its_own_window": "সেশনটি আলাদা উইন্ডোতে খুলুন",
       "pop_out_to_window": "উইন্ডোতে পপ আউট করুন",
@@ -7372,6 +7491,7 @@
       "double_click_to_rename": "নাম বদলাতে ডাবল-ক্লিক করুন",
       "drag_to_reorder": "ক্রম বদলাতে ড্র্যাগ করুন",
       "drop_here_to_remove_from_folder": "ফোল্ডার থেকে সরাতে এখানে ছাড়ুন",
+      "drop_to_reference_session": "এই সেশনের রেফারেন্স যোগ করতে এখানে ছাড়ুন",
       "duplicate": "ডুপ্লিকেট করুন",
       "expand_folder_name": "{{name}} ফোল্ডার প্রসারিত করো",
       "expand_group_results": "{{group}} ফলাফল প্রসারিত করো",
@@ -7408,7 +7528,6 @@
       "incognito_no_memory_writes": "ছদ্মবেশী — মেমরিতে লেখা হবে না",
       "last_30_days": "শেষ 30 দিন",
       "last_7_days": "শেষ 7 দিন",
-      "linked_to_slack": "Slack-এর সঙ্গে সংযুক্ত",
       "load_more": "আরও লোড করুন…",
       "loop": "লুপ {{count}}/{{total}}",
       "loop_2": "লুপ · {{count}}",
@@ -7442,11 +7561,13 @@
       "older": "পুরোনো",
       "older_sessions": "পুরোনো সেশন",
       "older_sessions_2": "পুরোনো সেশন",
+      "open_source_link_in_side_panel": "সাইড প্যানেলে {{url}} খুলুন (ব্রাউজারে খুলতে {{modifier}})",
       "open_split_view": "স্প্লিট ভিউ খুলুন",
       "pick_a_model_for_every_session_switching_a_sessi": "প্রতিটি সেশনের জন্য একটি মডেল বাছুন। কোনো সেশন পরিবর্তন করলে",
       "pinned": "পিন করা",
       "pinned_sessions_are_kept": "পিন করা সেশন রেখে দেওয়া হয়।",
       "popped_out_to_a_separate_window": "আলাদা উইন্ডোতে পপ আউট করা হয়েছে",
+      "private_session_cannot_be_referenced": "ব্যক্তিগত সেশনের রেফারেন্স দেওয়া যায় না",
       "rename": "নাম পরিবর্তন করুন",
       "rename_flag_as_status_or_delete_tags_changes_app": "ট্যাগের নাম পরিবর্তন করুন, স্ট্যাটাস হিসেবে চিহ্নিত করুন, বা মুছে ফেলুন। ট্যাগ যেখানেই দেখানো হয়, পরিবর্তনগুলি সেখানেই প্রযোজ্য হবে।",
       "resets_its_conversation": "এর কথোপকথন রিসেট করে দেয়",
@@ -7782,6 +7903,15 @@
       "worktrees_count": "Worktrees ({{count}})",
       "worktrees_created_under_a_previous_repository_na": "পূর্ববর্তী রিপোজিটরির নামে তৈরি worktree। ডিফল্টভাবে লুকানো; তবুও Prune merged এগুলো পরিষ্কার করে।"
     },
+    "developer": {
+      "previewSurfacesCard": {
+        "inbound_webhook_tokens_registered_contexts_and_r": "ইনবাউন্ড ওয়েবহুক টোকেন, নিবন্ধিত কনটেক্সট ও রান ইতিহাস। API কাজ করে, তবে পেজটি এখনও শেষ হয়নি।",
+        "open_webhooks": "ওয়েবহুক খুলুন",
+        "preview_surfaces": "প্রিভিউ পেজ",
+        "unreleased_pages_hidden_from_the_sidebar_and_fro": "অপ্রকাশিত পেজ। এখানে চালু না করা পর্যন্ত এগুলো সাইডবারে ও সর্বত্র অনুসন্ধান করুন-এ দেখা যায় না। সেটিংটি শুধু এই ডিভাইসে প্রযোজ্য, আর পেজগুলো ইচ্ছাকৃতভাবেই অসম্পূর্ণ।",
+        "webhooks": "ওয়েবহুক"
+      }
+    },
     "developerPage": {
       "developer": "ডেভেলপার",
       "tabs": {
@@ -7790,7 +7920,7 @@
           "label": "আর্কাইভ"
         },
         "config": {
-          "description": "Kiro Crew ও এজেন্ট কনফিগারেশন ভিউয়ার (শুধু পড়া)",
+          "description": "প্রিভিউ পেজ চালু করার সুইচ, সঙ্গে Kiro Crew ও এজেন্ট কনফিগারেশন ভিউয়ার (শুধু পড়ার জন্য)",
           "label": "কনফিগ"
         },
         "logs": {
@@ -8312,7 +8442,8 @@
         "reembedding": "স্মৃতি পুনরায় এমবেড হচ্ছে…",
         "subtitle": "স্থানীয়ভাবে চলে। পরিবর্তন করলে সংরক্ষিত স্মৃতি পটভূমিতে পুনরায় এমবেড হয়।",
         "title": "এমবেডিং মডেল",
-        "will_revert": "খালি — অন্তর্ভুক্ত মডেলে ফিরে যাবে।"
+        "will_revert": "খালি — অন্তর্ভুক্ত মডেলে ফিরে যাবে।",
+        "err_env_override_with_ref": "<settingRef/> সেট করা আছে এবং এই সেটিং ওভাররাইড করে। এখানে মডেল পরিবর্তন করতে এটি আনসেট করুন।"
       },
       "kiroCrewCfgTab": {
         "agent_for_pool_processes_empty_uses_default_agen": "পুল প্রসেসের জন্য এজেন্ট। খালি রাখলে ডিফল্ট এজেন্ট ব্যবহার হয়। রিস্টার্ট প্রয়োজন।",
@@ -8601,7 +8732,9 @@
         "this_skill_changed_after_this_update_was_written": "এই হালনাগাদ লেখার পরে skill বদলে গেছে, তাই এখন এটা লাগালে সেই নতুন পরিবর্তনগুলো উল্টে যাবে। মঞ্জুরি আটকানো — এই প্রার্থীকে সরিয়ে দাও, বর্তমান সংস্করণের জন্য নতুন হালনাগাদ প্রস্তাব করা হবে।",
         "update": "হালনাগাদ করো",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "ওয়ার্কস্পেস"
+        "workspace": "ওয়ার্কস্পেস",
+        "auto_create_hint": "Kiro Crew সম্পন্ন সেশন থেকে স্বয়ংক্রিয়ভাবে দক্ষতা খসড়া তৈরি করতে পারে — ডিফল্টভাবে বন্ধ, <settingRef/> দ্বারা নিয়ন্ত্রিত।",
+        "approval_required_hint": "প্রার্থীরা আপনার অনুমোদন না পাওয়া পর্যন্ত এখানে অপেক্ষা করে — <settingRef/> দ্বারা প্রয়োজনীয়।"
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "সব সময় চালু Markdown নিয়মকানুন, প্রতিটি সেশনে ঢোকানো হয়। গ্লোবাল ফাইল ~/.kiro/steering এ থাকে ও সব জায়গায় খাটে; ওয়ার্কস্পেস ফাইল <project>/.kiro/steering এ থাকে ও শুধু সেই প্রজেক্টে খাটে।",
@@ -8806,6 +8939,9 @@
       "resource_nav": "রিসোর্স",
       "resource_network": "নেটওয়ার্ক",
       "sandbox_procs": "স্যান্ডবক্স",
+      "session_storage": "সেশন স্টোরেজ",
+      "session_storage_detail": "{{sessions}}টি সেশন · {{reclaimable}} পুনরুদ্ধারযোগ্য",
+      "session_storage_measuring": "পরিমাপ করা হচ্ছে…",
       "threads": "থ্রেড",
       "total": "মোট",
       "upload": "আপলোড",
@@ -9114,11 +9250,49 @@
     "sessionArchive": {
       "fuzzy_filter_substring_match": "ফাজি ফিল্টার (সাবস্ট্রিং মিল)",
       "loading": "লোড হচ্ছে…",
-      "no_archives_archives_are_created_when_session_fi": "কোনো আর্কাইভ নেই। সেশন ফাইল রোটেট (>2MB) বা কম্প্যাক্ট হলে আর্কাইভ তৈরি হয়।",
       "no_matches_for_query": "কোনো মিল পাওয়া যায়নি: \"{{query}}\"।",
       "reload": "আবার লোড করুন",
       "select_an_archive_to_view_its_contents": "বিষয়বস্তু দেখতে একটি আর্কাইভ নির্বাচন করুন।",
-      "truncated_showing_first_200kb": "… সংক্ষিপ্ত করা হয়েছে (প্রথম 200KB দেখানো হচ্ছে) …"
+      "truncated_showing_first_200kb": "… সংক্ষিপ্ত করা হয়েছে (প্রথম 200KB দেখানো হচ্ছে) …",
+      "no_archives_with_compaction_hint": "কোনো আর্কাইভ নেই। সেশন ফাইল রোটেট (>2MB) বা কম্প্যাক্ট হলে আর্কাইভ তৈরি হয়। স্বয়ংক্রিয় কম্প্যাকশন <settingRef/> দ্বারা নিয়ন্ত্রিত হয়।"
+    },
+    "sessionStorage": {
+      "back_to_disk": "সিস্টেম · পারফরম্যান্স › ডিস্ক",
+      "background_group": "ব্যাকগ্রাউন্ড এজেন্ট ({{count}})",
+      "bulk_selected": "{{count}}টি নির্বাচিত",
+      "cancel": "বাতিল",
+      "cannot_delete_resumable": "এই সেশনটি এখনও পুনরারম্ভ করা যায়, তাই এটি রাখা হয়েছে। এটি পুনরুদ্ধারের সুযোগ এখনও দেওয়া হয়নি।",
+      "cannot_delete_running": "এই সেশনে এখনই একটি টার্ন চলছে, তাই এটি ট্র্যাশে সরানো যাবে না।",
+      "clear_selection": "মুছুন",
+      "confirm_delete_forever": "চিরতরে মুছুন",
+      "delete_forever": "চিরতরে মুছুন",
+      "detail_images": "ছবি",
+      "detail_last_used": "সর্বশেষ ব্যবহার",
+      "detail_size": "আকার",
+      "detail_turns": "টার্ন",
+      "heading": "সেশন স্টোরেজ",
+      "in_use": "ব্যবহারে",
+      "move_to_trash_bulk": "ট্র্যাশে সরান",
+      "move_to_trash_single": "ট্র্যাশে সরান",
+      "refused_heading": "{{count}}টি সেশন সরানো যায়নি",
+      "refused_in_use": "সেশনটি ব্যবহার হচ্ছে",
+      "refused_resumable": "এখনও পুনরারম্ভযোগ্য",
+      "refused_too_fresh": "সেশনটি অতি সাম্প্রতিক",
+      "refused_unknown": "সেশন পাওয়া যায়নি",
+      "restore": "পুনরুদ্ধার",
+      "resumable": "পুনরারম্ভযোগ্য",
+      "search_placeholder": "সেশন খুঁজুন",
+      "sort_largest": "সবচেয়ে বড় আগে",
+      "sort_name": "নাম",
+      "sort_oldest": "সবচেয়ে পুরনো আগে",
+      "subheading": "{{sessions}}টি সেশন · ডিস্কে {{total}} · {{reclaimable}} পুনরুদ্ধারযোগ্য",
+      "trash": "ট্র্যাশ",
+      "trash_batch_label": "{{sessions}}টি সেশন · {{size}}",
+      "trash_batch_reason": "{{reason}} দ্বারা সরানো",
+      "trash_empty": "খালি",
+      "trash_note": "খালি না করা পর্যন্ত ডিস্ক স্থান দখল করে থাকবে। এখান থেকে কিছুই স্বয়ংক্রিয়ভাবে মুছে যায় না।",
+      "trash_summary": "{{sessions}}টি সেশন · {{size}}",
+      "unknown_session": "তালিকাভুক্ত নয় এমন একটি সেশন"
     },
     "sessionsTab": {
       "agent": "এজেন্ট",
@@ -9192,20 +9366,17 @@
         "copy_command": "কমান্ড কপি করুন",
         "couldn_t_check_for_updates": "আপডেট খোঁজা যায়নি",
         "couldn_t_check_for_updates_2": "আপডেট খোঁজা যায়নি।",
-        "couldn_t_load_the_changelog": "চেঞ্জলগ লোড করা যায়নি।",
         "download_failed": "ডাউনলোড ব্যর্থ হয়েছে",
         "download_install": "ডাউনলোড ও ইনস্টল",
         "download_the_latest_version": "সর্বশেষ সংস্করণ ডাউনলোড",
         "downloaded_and_verified_the_app_restarts_to_fini": "ডাউনলোড ও যাচাই সম্পন্ন। ইনস্টল শেষ করতে অ্যাপটি রিস্টার্ট হবে; আপনি পরে বন্ধ করলেও প্রস্থানের সময় এটি ইনস্টল হয়ে যাবে।",
         "downloading": "ডাউনলোড হচ্ছে...",
-        "hide_full_changelog": "▾ পূর্ণ চেঞ্জলগ লুকাও",
         "insider": "ইনসাইডার",
         "install_failed": "আপডেট ইনস্টল করা যায়নি",
         "installing_quiet_note": "ইনস্টল হচ্ছে — Kiro Crew এক-দুই মিনিটের জন্য নিশ্চুপ থাকবে, তারপর নিজেই রিস্টার্ট হবে।",
         "is_available": "উপলব্ধ।",
         "loading_changelog": "চেঞ্জলগ লোড হচ্ছে…",
         "manual_install_fallback": "আপডেট কাজ না করলে, আপনি {{link}} করে এই কপির উপরেই আবার ইনস্টল করতে পারেন। আপনার সেটিংস, চ্যাট এবং ফাইল অটুট থাকবে।",
-        "no_changelog_available": "কোনো চেঞ্জলগ নেই।",
         "not_checked_yet": "এখনও পরীক্ষা করা হয়নি",
         "notify_when_an_update_is_available": "আপডেট পাওয়া গেলে জানাও",
         "open_source_under_the_apache_2_0_license": "Apache 2.0 লাইসেন্সের অধীনে ওপেন সোর্স",
@@ -9246,7 +9417,7 @@
         "updating_gateway_restarting": "আপডেট হচ্ছে — গেটওয়ে রিস্টার্ট হচ্ছে…",
         "updating_restarts_the_gateway_active_sessions_wi": "আপডেট করলে গেটওয়ে রিস্টার্ট হয় — সক্রিয় সেশনগুলো অল্প সময়ের জন্য সংযোগ হারাবে।",
         "v": "v",
-        "view_full_changelog": "▸ পূর্ণ চেঞ্জলগ দেখো",
+        "view_all_releases": "সব রিলিজ দেখুন",
         "view_this_commit_on_github": "GitHub-এ এই কমিট দেখুন",
         "what_s_new": "নতুন কী আছে",
         "you_are_on_the_latest_version": "আপনি সর্বশেষ সংস্করণ ব্যবহার করছেন।",
@@ -9405,7 +9576,7 @@
         "how_long_models_think_before_answering_by_defaul": "ডিফল্টে উত্তর দেওয়ার আগে মডেল কতক্ষণ ভাবে। বেশি হলে ধীর এবং খরচও বেশি। শুধু রিজনিং-সক্ষম মডেলে উপলব্ধ (Opus, Sonnet, Fable, GPT-5.x)।",
         "how_long_to_wait_for_the_agent_to_honor_a_stop_p": "সেশন জোর করে বন্ধ করার আগে এজেন্ট স্টপ চাপ মানার জন্য কতক্ষণ অপেক্ষা করা হবে। বেশি সময় দিলে সেশনের অবস্থা বেশিবার সংরক্ষিত থাকে, তবে এজেন্ট দীর্ঘ টুল কলে আটকে থাকলে থামানো ধীর মনে হয়।",
         "how_much_an_automatically_registered_source_may_i": "স্বয়ংক্রিয়ভাবে নিবন্ধিত একটি উৎস একবারে কতটা নিতে পারে। নথির প্রতিটি অংশের জন্য একটি নিষ্কাশন কল খরচ হয়, তাই এটিই খরচ বেঁধে রাখে; নতুন নথি আগে আসে, বাকিগুলো পরের ধাপে। 0 দিলে কোনো সীমা থাকে না। ডিফল্ট {{count}}।",
-        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "এজেন্টের লেখা কতটা সংক্ষিপ্ত হবে। ‘অতি-সংক্ষিপ্ত’ দ্রুত মনোসংযোগ হারানো পাঠকের জন্য: উত্তর শুরুর তিন বাক্যেই আসে, আর পরের বিস্তারিত অংশ অনুচ্ছেদ নয়, সহজে দেখা যায় এমন পয়েন্টে রাখতে হয়। কোড, কমান্ড ও ত্রুটির বার্তা অপরিবর্তিত থাকে; নিরাপত্তা সতর্কতা ও ধাপে ধাপে নির্দেশনা সব স্তরেই সম্পূর্ণ বিস্তারিত থাকে।",
+        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "এজেন্টের লেখা কতটা সংক্ষিপ্ত হবে। ‘অতি-সংক্ষিপ্ত’ পুরো উত্তরটি ছোট রাখে: আগে সিদ্ধান্ত, অনুচ্ছেদের বদলে পয়েন্ট, কোনো ভরাট নয়। কোড, কমান্ড ও ত্রুটির বার্তা সব স্তরেই অপরিবর্তিত থাকে, এবং নিরাপত্তা সতর্কতা ও ধাপে ধাপে নির্দেশনা সম্পূর্ণ বিস্তারিত থাকে।",
         "i_write_code": "আমি কোড লিখি",
         "immediate": "তাৎক্ষণিক",
         "immediate_mode_shows_raw_chunks_as_they_arrive_s": "ইমিডিয়েট মোড চাঙ্কগুলি আসার সঙ্গে সঙ্গে কাঁচা অবস্থায় দেখায়। স্মুথ মোড বাফার করে সমান গতিতে টেক্সট ফেড-ইন করে।",
@@ -9483,7 +9654,7 @@
         "technical_comfort": "প্রযুক্তিগত স্বাচ্ছন্দ্য",
         "text_streaming_style": "টেক্সট স্ট্রিমিং স্টাইল",
         "time_window_for_session_restoration": "সেশন পুনরুদ্ধারের সময়সীমা",
-        "ultra_concise_3_sentences": "অতি-সংক্ষিপ্ত — 3 বাক্যে উত্তর, তারপর সহজে দেখা যায় এমন বিস্তার",
+        "ultra_concise_3_sentences": "অতি-সংক্ষিপ্ত — আগে উত্তর, ন্যূনতম গদ্য",
         "ux_designer": "UX ডিজাইনার",
         "when_enabled_inline_tool_pills_show_simplified_t": "চালু থাকলে, ইনলাইন টুল পিলগুলো চলমান হুবহু কমান্ডের বদলে টুল ব্যবহারের সরলীকৃত উদ্দেশ্য দেখায়",
         "which_model_new_sessions_start_with_pick_a_model": "কোনো এজেন্ট নিজের মডেল না বাঁধলে নতুন সেশন কোন মডেল দিয়ে শুরু হবে। প্রতিটি এজেন্টের জন্য মডেল ঠিক করতে এজেন্ট সক্ষমতা → Crews-এ যাও, বা কোনো নির্দিষ্ট সেশনে তা বদলাতে সেই সেশনের ভিতরে একটি মডেল বেছে নাও।",
@@ -9638,7 +9809,6 @@
         "enabled": "চালু",
         "enabled_but_not_active_yet_restart_the_gateway": "চালু আছে, কিন্তু এখনও সক্রিয় হয়নি। গেটওয়ে রিস্টার্ট করুন (",
         "enabling": "সক্রিয় করা হচ্ছে…",
-        "equivalent_cli": "সমতুল্য CLI:",
         "failed_to_add_remote_crew": "রিমোট crew যোগ করা যায়নি",
         "failed_to_load_remote_crews": "রিমোট crew লোড করা যায়নি",
         "home_you_local_bin_kirocrew_leave_blank_for_stan": "/home/you/.local/bin/kirocrew  —  স্ট্যান্ডার্ড ইনস্টলের জন্য ফাঁকা রাখুন",
@@ -9647,8 +9817,6 @@
         "is_already_used_by_another_instance_choose_a_dif": "ইতিমধ্যেই অন্য একটি রিমোট ক্রু ব্যবহার করছে — ভিন্ন একটি বেছে নিন\n              (এবং রিমোট হোস্টে সেই পোর্ট কনফিগার করুন)।",
         "is_installed_somewhere_non_standard_on_the_remot": "রিমোটে কোনো অ-প্রমিত\n            জায়গায় ইনস্টল করা আছে। PATH-এ সাধারণ pip ইনস্টলের ক্ষেত্রে ফাঁকা রাখুন। এটি খুঁজে পেতে\n            রিমোট হোস্টে চালান:",
         "kirocrew": "kirocrew",
-        "kirocrew_config_set_instances_enabled_true": "kirocrew config set instances.enabled true",
-        "kirocrew_config_set_instances_warm_set_cap_n": "kirocrew config set instances.warm_set_cap N",
         "kirocrew_restart": "kirocrew restart",
         "loading": "লোড হচ্ছে…",
         "local_bin_kirocrew": "~/.local/bin/kirocrew",
@@ -9676,7 +9844,6 @@
         "ssm_target_instance_id": "SSM টার্গেট (ইনস্ট্যান্স id)",
         "the_gateway_opens_an_ssh_tunnel_and_mints_a_shor": "গেটওয়ে একটি টানেল (SSH বা AWS SSM) খোলে এবং সংযোগের সময় একটি স্বল্পস্থায়ী টোকেন তৈরি করে।\n        লোকাল ফরোয়ার্ড পোর্ট রিমোট পোর্টকেই মিরর করে, তাই সংযুক্ত প্রতিটি রিমোট ক্রুকে\n        আলাদা রিমোট পোর্ট ব্যবহার করতে হবে।",
         "the_user_the_remote_gateway_runs_as_sudo_u_for_s": "রিমোট গেটওয়ে যে ব্যবহারকারী হিসেবে চলে — SSM কমান্ড sudo -u দিয়ে চলে। Ubuntu AMI-তে ubuntu ব্যবহার করুন।",
-        "then": "তারপর",
         "to_fully_tear_down_any_tunnels_still_running_fro": "আগে থেকে চলতে থাকা যেকোনো টানেল সম্পূর্ণরূপে বন্ধ করতে।",
         "to_start_the_ssh_tunnel_manager_and_activate_ins": "টানেল ম্যানেজার চালু করতে এবং রিমোট ক্রু অদলবদল সক্রিয় করতে।",
         "token_left": "· টোকেনের {{time}} বাকি",
@@ -9686,19 +9853,24 @@
         "unknown_error": "অজানা ত্রুটি",
         "up_to": "সর্বোচ্চ",
         "update_setting_failed": "সেটিং আপডেট করা যায়নি: {{error}}",
-        "use_an_absolute_path_no": ")।\n            একটি অ্যাবসোলিউট পাথ ব্যবহার করুন (কোনো"
+        "use_an_absolute_path_no": ")।\n            একটি অ্যাবসোলিউট পাথ ব্যবহার করুন (কোনো",
+        "enable_via_setting": "বিকল্পভাবে, <settingRef/> সেট করুন, তারপর <restartCmd/> চালান।"
       },
       "mcpPoolableServers": {
         "blocked": "ব্লক করা",
         "could_not_load_mcp_servers": "MCP সার্ভার লোড করা যায়নি।",
+        "could_not_update_all_try_again": "সার্ভার আপডেট করা যায়নি। কোনো পরিবর্তন হয়নি। আবার চেষ্টা করো।",
         "could_not_update_try_again": "{{name}} আপডেট করা যায়নি। আবার চেষ্টা করো।",
         "loading_mcp_servers": "MCP সার্ভার লোড হচ্ছে…",
+        "n_of_m_pooled": "{{total}}টি পুলযোগ্য সার্ভারের মধ্যে {{on}}টি পুলে",
+        "n_of_m_pooled_plus_agent": "{{total}}টি পুলযোগ্য সার্ভারের মধ্যে {{on}}টি পুলে, agent কনফিগ থেকে আরও {{extra}}টি",
         "no_mcp_servers_configured": "কোনো MCP সার্ভার কনফিগার করা নেই।",
         "pool": "{{name}} পুল করো",
         "poolable_mcp_servers": "পুলযোগ্য MCP সার্ভার",
         "poolable_true": "poolable:true",
         "pooling_takes_effect_when_the_shared_mcp_gateway": "শেয়ার্ড MCP গেটওয়ে সক্রিয় থাকলে পুলিং কার্যকর হয়। যেকোনো ক্ষেত্রেই কোন\n            সার্ভারগুলো পুলযোগ্য তা আপনি এখানে আগেভাগে কনফিগার করতে পারেন।",
         "shared": "· শেয়ার্ড",
+        "toggle_all": "সব টগল করো",
         "used_by": "ব্যবহার করছে:"
       },
       "notificationsPanel": {
@@ -9740,7 +9912,8 @@
         "sources": "উৎস",
         "test": "পরীক্ষা করুন",
         "use_default": "ডিফল্ট ব্যবহার করো",
-        "volume": "ভলিউম"
+        "volume": "ভলিউম",
+        "preset_pulse": "পালস"
       },
       "postureDisclosure": {
         "filter": "{{label}} ফিল্টার করো",
@@ -9749,6 +9922,22 @@
         "no_matches_for_query": "কোনো মিল পাওয়া যায়নি: “{{query}}”।",
         "show": "দেখান",
         "unavailable": "অনুপলব্ধ"
+      },
+      "releases": {
+        "badge_unreleased": "অপ্রকাশিত",
+        "detail_no_date": "তারিখ অজানা",
+        "detail_on_prerelease": "আপনি প্রি-রিলিজ {{version}} ব্যবহার করছেন",
+        "detail_unreleased": "এখনো প্রকাশিত হয়নি",
+        "empty_in_progress": "এই সংস্করণের রিলিজ নোট এখনো লেখা হয়নি।",
+        "empty_released": "এই সংস্করণটি কোনো রিলিজ নোট ছাড়াই প্রকাশিত হয়েছে।",
+        "list_label": "সংস্করণ",
+        "load_failed": "রিলিজ নোট লোড করা যায়নি।",
+        "loading": "রিলিজ লোড হচ্ছে…",
+        "row_current_no_notes": "আপনার সংস্করণ · কোনো নোট লেখা হয়নি",
+        "row_no_notes": "কোনো নোট লেখা হয়নি",
+        "stale_note": "এই তালিকাটি আপনার বিল্ড ({{version}}) থেকে এসেছে, তাই এতে নতুন এন্ট্রি না-ও থাকতে পারে।",
+        "unavailable": "এই বিল্ডে কোনো রিলিজ নোট উপলব্ধ নেই।",
+        "view_commits": "GitHub-এ কমিট দেখুন"
       },
       "reportProblemCard": {
         "blurb": "কিছু কাজ করছে না? আমাদের একটি ডায়াগনস্টিক রিপোর্ট পাঠান — লগ থেকে সিক্রেট আগেই মুছে ফেলা হয়।",
@@ -9770,6 +9959,7 @@
         "click_any_control_to_see_exactly_what_it_covers": "কোনো নিয়ন্ত্রণ ঠিক কী কী অন্তর্ভুক্ত করে তা দেখতে সেটিতে ক্লিক করুন।",
         "collapse_all": "সব সংকুচিত করুন",
         "collapse_category_rules": "{{category}} নিয়ম সংকুচিত করো",
+        "custom_deny_note": "কাস্টম অস্বীকৃতি নোট",
         "custom_deny_pattern": "কাস্টম ডিনাই প্যাটার্ন",
         "custom_patterns_counted_separately": "আপনার নিজের প্যাটার্নগুলো “প্রত্যাখ্যাত কমান্ড”-এ আলাদাভাবে গণনা করা হয়।",
         "custom_patterns_hidden_by_filter": "বর্তমান ফিল্টার আপনার নিজের প্যাটার্নগুলো লুকিয়ে রেখেছে।",
@@ -9863,7 +10053,9 @@
         "not_restricted": "সীমাবদ্ধ নয়",
         "nothing_allowed": "কিছুই অনুমোদিত নয়",
         "off": "বন্ধ",
+        "optional_why_shown_to_the_agent_when_this_rule_fir": "ঐচ্ছিক: কারণ। এই নিয়ম কার্যকর হলে এজেন্টকে দেখানো হয়",
         "other_surfaces_have_their_own_profiles": "নিজস্ব প্রোফাইল আছে এমন সারফেস হোস্ট যা পারে না তা অনুমোদন করতে পারে: {{surfaces}}.",
+        "enforced_by_floor": "Kiro Crew-এর অন্তর্নির্মিত সর্বদা-চালু সুরক্ষা দ্বারা প্রয়োগ করা",
         "pinned_by_policy": "তোমার প্রতিষ্ঠানের সিকিউরিটি নীতিতে নির্ধারিত",
         "pinned_for_the_host_surface": "হোস্ট-সারফেস প্রোফাইল থেকে নির্ধারিত। এটি কেবল ইন-প্রসেস হোস্ট কাজের সীমা — অন্য সারফেসগুলোর নিজস্ব প্রোফাইল আছে এবং সেগুলো এটি অনুমোদন করতে পারে।",
         "policy": "পলিসি",
@@ -9976,6 +10168,18 @@
         "enabling_shared_mcp_gateway": "শেয়ারড MCP গেটওয়ে সক্রিয় করা হচ্ছে",
         "gateway_stuck_retry": "গেটওয়ে প্রত্যাশিত অবস্থায় পৌঁছায়নি। আবার চেষ্টা করো।",
         "gateway_stuck_roll_back": "গেটওয়ে প্রত্যাশিত অবস্থায় পৌঁছায়নি। নিরাপদ (নিষ্ক্রিয়) অবস্থায় ফিরে যাও, বা আবার চেষ্টা করো।",
+        "mcp_apps": "MCP অ্যাপ",
+        "mcp_apps_applies_to_new": "সংরক্ষিত। নতুন MCP সংযোগে প্রযোজ্য; ইতিমধ্যে চালু সংযোগ রিসাইকল হলে এটি গ্রহণ করবে।",
+        "mcp_apps_gateway_started": "শেয়ার্ড MCP গেটওয়ে শুরু হয়েছে। সক্রিয় সেশনগুলি MCP অ্যাপ চালু রেখে পুনরারম্ভ হয়েছে।",
+        "mcp_apps_no_poolable_servers": "এখনও কোনো MCP সার্ভার পুলযোগ্য নয়, তাই কিছুই রেন্ডার হবে না। নিচের পুলযোগ্য MCP সার্ভার-এ অন্তত একটি চালু করুন।",
+        "mcp_apps_saved_unsupported": "সংরক্ষিত হয়েছে। MCP অ্যাপের জন্য শেয়ার্ড MCP গেটওয়ে প্রয়োজন, যা এই প্ল্যাটফর্মে উপলভ্য নয়।",
+        "mcp_apps_retry_gateway": "গেটওয়ে শুরু করার পুনরায় চেষ্টা করুন",
+        "mcp_apps_capability": "MCP সার্ভারের ইন্টারঅ্যাকটিভ UI চ্যাটে রেন্ডার করুন।",
+        "mcp_apps_failed": "প্রয়োগ করা যায়নি। সেটিং পরিবর্তন হয়নি।",
+        "mcp_apps_needs_gateway": "উপরের শেয়ার্ড MCP গেটওয়ে চালু হলে কার্যকর হবে।",
+        "mcp_apps_will_start_gateway": "এটি চালু করলে শেয়ার্ড MCP গেটওয়েও শুরু হবে, ফলে সক্রিয় সেশন পুনরারম্ভ হবে।",
+        "mcp_apps_starting_gateway": "শেয়ার্ড MCP গেটওয়ে শুরু হচ্ছে — সক্রিয় সেশন পুনরারম্ভ হবে…",
+        "mcp_apps_gateway_follow_failed": "MCP অ্যাপ সংরক্ষিত হয়েছে, তবে শেয়ার্ড MCP গেটওয়ে চালু হয়নি। আবার চেষ্টা করতে উপরে শেয়ার্ড MCP গেটওয়ে বন্ধ করে আবার চালু করুন।",
         "not_available_on_windows": "Windows-এ উপলব্ধ নয় — শেয়ার্ড গেটওয়ের জন্য Unix-ডোমেন সকেট প্রয়োজন। macOS এবং Linux-এ সমর্থিত।",
         "roll_back_disable": "রোল ব্যাক (নিষ্ক্রিয় করুন)",
         "shared_mcp_gateway": "শেয়ারড MCP গেটওয়ে",
@@ -10361,7 +10565,6 @@
       "daily_trend_point": "{{date}} · কোল্ড {{cold}} · ওয়ার্ম {{warm}} · {{count}} স্টার্ট",
       "days": "দিন।",
       "distribution_col": "বিতরণ",
-      "enable_with": "সক্রিয় করতে ব্যবহার করুন",
       "fault_rate": "ফল্ট রেট",
       "group_by": "গ্রুপ",
       "growth_col": "বৃদ্ধি",
@@ -10373,7 +10576,6 @@
       "mean_col": "গড়",
       "mean_credits_by_occupancy": "ব্যবহৃত কনটেক্সট অনুসারে প্রতি টার্নের গড় ক্রেডিট",
       "measured_from_token_records": "এখানে তালিকাভুক্ত সেশন থেকে গত {{days}} দিনের জন্য স্থানীয়ভাবে পরিমাপ করা — টেলিমেট্রি স্যুইচ নির্বিশেষে রাখা হয়",
-      "metrics_stay_local": ". মেট্রিক স্থানীয়ই থাকে (",
       "min_col": "min",
       "min_max": "min {{min}} · max {{max}}",
       "model_col": "মডেল",
@@ -10383,7 +10585,6 @@
       "no_startups_recorded": "এই উইন্ডোতে কোনো স্টার্টআপ রেকর্ড হয়নি",
       "no_telemetry_recorded_yet_in_the_last": "এখনও কোনো টেলিমেট্রি রেকর্ড হয়নি, গত",
       "no_turns_yet": "এখনো কোনো টার্ন নেই",
-      "nothing_leaves_this_machine": ") — কোনো কিছুই এই মেশিন থেকে বাইরে যায় না।",
       "occupancy_p50": "ব্যবহার (p50)",
       "occupancy_p90": "ব্যবহার (p90)",
       "otel_has_no_per_conversation_split": "OTEL হিস্টোগ্রামে সেশন id থাকে না, তাই এগুলো পুরো প্রক্রিয়ার পরিসংখ্যান — টার্ন লেটেন্সি এই স্টোর থেকে একটি কথোপকথনে আলাদা করা যায় না।",
@@ -10417,7 +10618,6 @@
       "tab_latency": "লেটেন্সি",
       "tab_spend": "খরচ",
       "tab_startup": "স্টার্টআপ",
-      "telemetry_enabled_true": "telemetry.enabled = true",
       "telemetry_is_off": "টেলিমেট্রি বন্ধ আছে",
       "throughput": "থ্রুপুট",
       "to_compaction_col": "90% পর্যন্ত",
@@ -10436,7 +10636,8 @@
       "warm_start_p50": "ওয়ার্ম স্টার্ট (p50)",
       "was_value": "আগে {{value}}",
       "window_last": "OTEL বিভাগ · উইন্ডো: গত",
-      "window_tokens_col": "উইন্ডো (টোকেন)"
+      "window_tokens_col": "উইন্ডো (টোকেন)",
+      "off_body": "সক্রিয় করুন <settingRef/> দিয়ে। মেট্রিক্স স্থানীয় থাকে (<metricsDir/>) — এই মেশিন থেকে কিছুই বের হয় না।"
     },
     "terminalPopoutFrame": {
       "return": "ডকে ফিরে যান",
@@ -10693,7 +10894,8 @@
     "worldsPopout": {
       "hide_controls": "কন্ট্রোল লুকাও",
       "show_controls": "কন্ট্রোল দেখাও"
-    }
+    },
+    "sessionMemoryCard": {}
   },
   "privacyDisclosure": {
     "anonymousHeartbeatBody": "দিনে সর্বোচ্চ একটি। এটি একটি ইনস্টল করা কপি শনাক্ত করে, কোনো ব্যক্তিকে নয়।",
@@ -10702,7 +10904,6 @@
     "controlsTitle": "টেলিমেট্রি নিয়ন্ত্রণ",
     "dataNeverSentBody": "প্রম্পট, উত্তর, ফাইল, ক্রেডেনশিয়াল, হোস্টনাম, ব্যবহারকারীর নাম, বা তোমার অপারেটিং সিস্টেম। তোমার IP সংরক্ষণ করা হয় না।",
     "dataNeverSentTitle": "কখনও পাঠানো হয় না",
-    "envOverrideNote": "হার্টবিট বন্ধ আছে কারণ এই পরিবেশে {{envVar}} সেট করা আছে। এখানে টেলিমেট্রি পরিচালনা করতে এটি আনসেট করুন।",
     "governanceOverrideNote": "তোমার অ্যাডমিনের নিরাপত্তা নীতি এটি বন্ধ রাখে। এখান থেকে বদলানো যায় না।",
     "installReceiptBody": "Kiro Crew-এর অফিশিয়াল ক্যাটালগ থেকে সফল ইনস্টল বা আপডেটের পরে একটি বেনামী রসিদ পাঠানো হয়। বাহ্যিক রেজিস্ট্রি, স্থানীয় অ্যাপ এবং স্ব-নিবন্ধিত অ্যাপ কখনও রিপোর্ট করা হয় না।",
     "installReceiptFields": "অফিশিয়াল অ্যাপ স্লাগ · প্রতি-অ্যাপ বেনামী টোকেন (অ্যাপগুলোর মধ্যে সংযোগযোগ্য নয়) · নতুন/আপডেট পতাকা · Kiro Crew সংস্করণ",
@@ -10725,7 +10926,8 @@
     "shellWindowsCmdLabel": "Windows কমান্ড প্রম্পট",
     "toggleDescription": "পরবর্তী চালুর জন্য সংরক্ষিত।",
     "toggleLabel": "বেনামী ব্যবহারের হার্টবিট পাঠান",
-    "toggleSaveFailed": "আপনার টেলিমেট্রি পছন্দ সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।"
+    "toggleSaveFailed": "আপনার টেলিমেট্রি পছন্দ সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।",
+    "envOverrideWithSettingRef": "হার্টবিট বন্ধ আছে কারণ <settingRef/> এই পরিবেশে সেট করা আছে। এখানে টেলিমেট্রি পরিচালনা করতে এটি আনসেট করুন।"
   },
   "settings": {
     "display": {
@@ -10784,6 +10986,10 @@
       "overview": {
         "description": "এক নজরে সিস্টেমের স্বাস্থ্য, অ্যাক্টিভিটি, এবং ব্যবহার ও মেমরি",
         "label": "ওভারভিউ"
+      },
+      "releases": {
+        "description": "প্রতিটি সংস্করণের রিলিজ নোট",
+        "label": "রিলিজ"
       },
       "security": {
         "description": "নিরাপত্তার অবস্থা, প্রতিরক্ষা স্তর, সার্টিফিকেশন, এবং ডেটা শ্রেণিবিন্যাস",

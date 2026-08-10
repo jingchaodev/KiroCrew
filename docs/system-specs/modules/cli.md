@@ -4,6 +4,18 @@
 
 The CLI module (`kiro_crew/cli.py`) provides the `kirocrew` command using stdlib `argparse`.
 
+## Source Checkout Launcher
+
+The POSIX wrapper at `bin/kirocrew` resolves symlinks to find the real checkout,
+sets `KIROCREW_PROJECT_DIR` to that checkout unless the caller already supplied
+one, and delegates every argument to `.venv/bin/kirocrew`. The virtualenv entry
+point comes from the editable install created by the setup scripts, so it makes
+`src/kiro_crew` importable without adding the source tree to `PYTHONPATH`. Any
+caller-provided `PYTHONPATH` is inherited unchanged.
+
+If `.venv/bin/kirocrew` is unavailable, the wrapper exits with source-install
+guidance instead of falling through to a different Python environment.
+
 ## Standalone Wheel Installer Trust Contract
 
 `cli.sh` installs channel or pinned-version wheels only from an authenticated
@@ -56,11 +68,12 @@ This allows `kirocrew` to find project-level agent config and skills from any di
 | `kirocrew chat -m "msg"` | Send a single message, print streaming response |
 | `kirocrew chat` | Interactive chat mode (readline, exit with Ctrl+D) |
 | `kirocrew chat --model X` | Override model for this session |
-| `kirocrew gateway` | Start the KiroCrew server (dashboard + Slack) |
+| `kirocrew gateway` | Start the Kiro Crew server (dashboard + messaging channels) |
 | `kirocrew gateway --slack-only` | Start without dashboard or SSH tunnel instructions |
 | `kirocrew gateway --no-crons` | Start without cron scheduler (use when another instance handles crons) |
 | `kirocrew setup` | Install agent config, save project dir, configure credentials |
 | `kirocrew setup --agent-only` | Only install agent config (skip credentials) |
+| `kirocrew setup --slack` | Run the guided Slack credential + slash-command setup (opt-in) |
 | `kirocrew doctor` | Verify kiro-cli is installed and config is valid |
 | `kirocrew cron add/list/remove` | Manage cron jobs |
 | `kirocrew spawn run/list` | Manage background subagents |
@@ -139,7 +152,9 @@ exfiltration redactors run.
 
 1. Saves `KIROCREW_PROJECT_DIR` to `~/.kiro/crew/project_dir`
 2. Installs agent config to `~/.kiro/agents/kirocrew.json`
-3. Prompts for Slack credentials (unless `--agent-only`)
+3. Prompts for Slack credentials and the slash-command name only when `--slack`
+   is passed; the default wizard configures no messaging channels and prints a
+   pointer to connect them later
 4. Offers to set up custom domain `kirocrew.localhost` (macOS/Linux)
 
 The saved project dir enables running `kirocrew` from any directory.
@@ -392,7 +407,7 @@ CLI compaction is blocking (single-user, acceptable).
 
 ## Entry Point
 
-`console_scripts` in `setup.cfg` maps `kirocrew` → `kiro_crew.cli:main`.
+`console_scripts` in `setup.cfg` maps `kirocrew` → `kiro_crew._bootstrap:main`.
 
 ### Gateway asyncio child watcher
 
@@ -477,7 +492,7 @@ The wrapper sets `KIROCREW_PROJECT_DIR` and routes to the right runtime based on
 6. Backend build (`pip install -e .`)
 7. PATH setup + shell profile persistence
 8. `kirocrew setup --agent-only` (install kiro-cli agent config)
-9. Optional Slack credential configuration
+9. Optional Slack credential configuration (`kirocrew setup --slack`)
 
 Each step checks if the tool is already installed and skips if present.
 
@@ -490,7 +505,7 @@ Each step checks if the tool is already installed and skips if present.
 5. **MCP tools**: `@kirocrew-cron` and `@kirocrew-core` in `tools`, `allowedTools`, and `mcpServers` — auto-fixes missing entries
 6. **Global mcp.json**: kirocrew MCP servers present with valid binary paths — auto-fixes stale paths
 7. **Python environment**: checks Python 3.9+ availability and dependency installation
-8. **Vector memory (in-process embeddings)**: vendored llama-cpp-python runtime importable, embedding model file present (downloads in background on gateway start; when absent, a light HTTPS-reachability probe of the resolved model URL runs); embeddings are always-on (`embeddings:  ✅ always-on`). On platforms with no vendored native libs (`_platform_libs_dirname()` returns None, e.g. darwin/x86_64 — Intel Macs or a Rosetta interpreter), the runtime line reports `⏹ unsupported platform … — memory uses keyword search` and is NOT counted as an issue (designed degradation per `embeddings.py`); only a load failure on a supported platform flags `embedding runtime`. A `faiss:` line reports whether the optional FAISS accelerator is importable — never an issue on any platform (episodic recall falls back to the stdlib cosine scan); when absent it suggests `pip install faiss-cpu`
+8. **Vector memory (in-process embeddings)**: vendored llama-cpp-python runtime importable, embedding model file present (downloads in background on gateway start; when absent, a light HTTPS-reachability probe of the resolved model URL runs); embeddings are always-on (`embeddings:  ✅ always-on`). On platforms with no vendored native libs (`_platform_libs_dirname()` returns None, e.g. darwin/x86_64 — Intel Macs or a Rosetta interpreter), the runtime line reports `⏹ unsupported platform … — memory uses keyword search` and is NOT counted as an issue (designed degradation per `embeddings.py`); only a load failure on a supported platform flags `embedding runtime`. When that failure is an INCOMPLETE shipped payload, doctor additionally names the absent files (`Missing native libs for <platform>: …`, from `embeddings.verify_vendored_libs()`) and says it is a packaging defect rather than an unsupported platform — the two are indistinguishable in ctypes' own `Shared library with base name 'llama' not found`, which reads as an architecture problem and misdirects diagnosis. When `LLAMA_CPP_LIB_PATH` is set, doctor reports THAT directory as the thing to check instead (mirroring the loader's exemption): the libs load from there, so blaming the bundled tree would send the operator to reinstall a package they are deliberately not loading from. A `faiss:` line reports whether the optional FAISS accelerator is importable — never an issue on any platform (episodic recall falls back to the stdlib cosine scan); when absent it suggests `pip install faiss-cpu`
 9. **Speech-to-Text (optional)**: whisper + ffmpeg presence when STT is enabled. On Windows these are reported as non-fatal `⚠️` notes (neither is a Kiro Crew dependency there, and STT ships enabled-by-default) so a healthy first install exits 0 and the guide's `kirocrew doctor && kirocrew gateway` chain proceeds; on macOS/Linux a missing binary still flags an issue. Fix hints are OS-aware (`brew` / `winget` / Linux)
 10. Slack credentials (optional)
 11. kiro-cli connectivity
@@ -616,9 +631,12 @@ that must not change, because the SPA's per-origin `localStorage` is keyed on it
    that does not resolve there counts as absent rather than falling back.
    `listening_pid_tool_available()` performs the same pinned resolution, so it
    distinguishes "no listener" from "lookup tool missing" without disagreeing
-   with the lookup it describes. A host that installs the tool outside those
-   directories (NixOS, a Homebrew or conda prefix) therefore reads as not having
-   it; `trusted_system_bin()` logs a warning once per name when the tool is on
+   with the lookup it describes. The pinned set is the FHS directories plus
+   `/run/current-system/sw/bin`, which is root-owned and rewritten only by a
+   system rebuild. A tool installed anywhere else — a Homebrew or conda prefix —
+   still reads as absent, and deliberately so: those prefixes are writable by the
+   invoking user, which is the exposure the pin exists to close.
+   `trusted_system_bin()` logs a warning once per name when the tool is on
    `PATH` but not resolvable under the pin, and `tool_outside_trusted_dirs()`
    lets `stop` name where the tool actually is rather than tell an operator who
    already has it to install it. That case carries SEL

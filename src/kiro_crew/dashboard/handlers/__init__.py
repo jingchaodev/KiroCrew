@@ -177,6 +177,7 @@ from kiro_crew.dashboard.handlers.mcp import (  # noqa: E402, F401
     _sync_mcp_to_agent,
     api_mcp_active,
     api_mcp_apply,
+    api_mcp_gateway_apps_enable,
     api_mcp_gateway_enable,
     api_mcp_gateway_metrics,
     api_mcp_gateway_servers,
@@ -300,6 +301,15 @@ from kiro_crew.dashboard.handlers.prompts import (  # noqa: E402, F401
 )
 
 # ── Sessions (extracted to handlers/sessions.py) ──
+from kiro_crew.dashboard.handlers.session_storage import (  # noqa: E402, F401
+    api_session_inventory,
+    api_session_inventory_detail,
+    api_session_inventory_trash,
+    api_session_storage,
+    api_session_storage_cleanup,
+    api_session_storage_empty,
+    api_session_storage_restore,
+)
 from kiro_crew.dashboard.handlers.sessions import (  # noqa: E402, F401
     _SHUTDOWN_TIMEOUT_SECS,
     _fetch_usage_bg,
@@ -329,6 +339,8 @@ from kiro_crew.dashboard.handlers.sessions import (  # noqa: E402, F401
 from kiro_crew.dashboard.handlers.side import (  # noqa: E402, F401
     api_side_close,
     api_side_open,
+    api_side_queue_cancel,
+    api_side_queue_edit,
     api_side_turn,
 )
 
@@ -417,6 +429,7 @@ from kiro_crew.dashboard.handlers.updates import (  # noqa: E402, F401
     api_log_level,
     api_log_level_get,
     api_logs,
+    api_releases,
     api_stream,
     api_update_apply,
     api_update_auto,
@@ -493,14 +506,16 @@ def _list_aim_prompts() -> list[dict[str, Any]]:
                 logger.debug("Skipping sensitive path: %s", sop_file)
                 continue
             name = sop_file.stem.removesuffix(".sop")
-            result.append({
-                "name": name,
-                "fullName": f"agent-sop:{name}",
-                "description": _extract_sop_description(sop_file),
-                "path": resolved,
-                "package": root.name,
-                "source": "package",
-            })
+            result.append(
+                {
+                    "name": name,
+                    "fullName": f"agent-sop:{name}",
+                    "description": _extract_sop_description(sop_file),
+                    "path": resolved,
+                    "package": root.name,
+                    "source": "package",
+                }
+            )
 
     # Also scan ~/.kiro/prompts/ for user-created prompts
     home = Path.home()

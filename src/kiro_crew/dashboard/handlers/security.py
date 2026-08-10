@@ -10,8 +10,13 @@ the agent-readable ``config.json``. The file root IS the opt-out object:
       "disable_all": false,
       "disabled_ids": ["<builtin-rule-id>", ...],
       "user_added": [{"id": "user-xxxx", "pattern": "rm -rf /tmp/mine",
-                      "enabled": true}]
+                      "enabled": true, "note": "use a scoped path instead"}]
     }
+
+``note`` is optional operator prose surfaced in the refusal when the rule fires,
+so the caller reads remediation instead of a raw regex. It is metadata only: it
+never participates in matching. Create-only, mirroring ``pattern`` — neither has
+an edit endpoint; you delete the rule and re-add it.
 
 Mutations run under the shared config lock, write atomically (0600), and emit a
 SEL audit entry (``ok`` on success, ``denied`` on reject). Governance
@@ -77,10 +82,15 @@ from kiro_crew.platform.governance_profiles import (
     bound_surfaces,
     resolve_active_scope,
 )
+from kiro_crew.security import DENY_REASON_MATCH_PREFIX
 
 logger = logging.getLogger(__name__)
 
 _MAX_PATTERN_LEN = 512
+# Notes are prose, not regexes, and land in a refusal the agent reads inline, so
+# they get their own (tighter) cap. A note is a one-line remediation hint; a
+# paragraph would bury the pattern it annotates.
+_MAX_NOTE_LEN = 200
 
 
 def _sel():
@@ -221,11 +231,21 @@ async def _pinned_ids_for_snapshot_async() -> set:
 def build_denied_commands_snapshot() -> dict:
     """Compute the full snapshot returned by every endpoint.
 
-    ``enabled = pinned OR (not disable_all AND id not in disabled_ids)``;
-    ``governance_locked = len(pinned_builtin_command_ids()) > 0``;
+    ``enabled = pinned OR floor-enforced OR (not disable_all AND id not in
+    disabled_ids)``; ``governance_locked = len(pinned_builtin_command_ids()) > 0``;
     ``effective_count = #enabled builtins + #enabled user_added``.
+
+    Each builtin carries an additive ``lock_reason`` discriminator so the UI can
+    say WHY a rule is locked: ``"floor"`` (enforced by an always-on floor,
+    never opt-out-able), ``"policy"`` (governance-pinned), or ``None``
+    (freely toggleable). ``pinned`` keeps its existing governance-only meaning
+    for current consumers.
     """
-    from kiro_crew.security import builtin_denied_rules, pinned_builtin_command_ids_for_snapshot
+    from kiro_crew.security import (
+        builtin_denied_rules,
+        floor_enforced_builtin_command_ids,
+        pinned_builtin_command_ids_for_snapshot,
+    )
 
     state = _denied_state(_read_denied_data())
     disable_all = state["disable_all"]
@@ -235,12 +255,20 @@ def build_denied_commands_snapshot() -> dict:
     # gate uses the ctx-scoped pinned_builtin_command_ids + bound-profile plane,
     # so this display-only union does not widen enforcement.
     pinned = pinned_builtin_command_ids_for_snapshot()
+    floor_ids = floor_enforced_builtin_command_ids()
 
     builtins: list[dict] = []
     for rule in builtin_denied_rules():
         rid = rule["id"]
         is_pinned = rid in pinned
-        enabled = is_pinned or (not disable_all and rid not in disabled_ids)
+        is_floor = rid in floor_ids
+        # Floor-enforced rules render forced-on even when the id somehow sits in
+        # disabled_ids (state persisted before the toggle rejected it): the floor
+        # consults no opt-out state, so honesty requires enabled=true.
+        enabled = is_pinned or is_floor or (not disable_all and rid not in disabled_ids)
+        # "floor" wins over "policy": the floor holds even if every governance
+        # pin were removed, so it is the stronger (and always-true) reason.
+        lock_reason = "floor" if is_floor else ("policy" if is_pinned else None)
         builtins.append(
             {
                 "id": rid,
@@ -249,6 +277,7 @@ def build_denied_commands_snapshot() -> dict:
                 "description": rule["description"],
                 "enabled": enabled,
                 "pinned": is_pinned,
+                "lock_reason": lock_reason,
             }
         )
 
@@ -266,6 +295,10 @@ def build_denied_commands_snapshot() -> dict:
                 # truthy under bool(); mirror from_dict so the snapshot's enabled
                 # flag matches what the gate actually enforces.
                 "enabled": _coerce_bool(entry.get("enabled", True), default=True),
+                # This serializer is an ALLOWLIST rebuild, not a passthrough — a
+                # key absent here is stored on disk but invisible to every
+                # endpoint, so the Settings row could never render the note.
+                "note": str(entry.get("note", "") or ""),
             }
         )
 
@@ -417,7 +450,7 @@ async def api_denied_commands_list(request: web.Request) -> web.Response:
 
 async def api_denied_command_builtin_toggle(request: web.Request) -> web.Response:
     """PATCH /api/security/denied-commands/builtins/{id} — {enabled: bool}."""
-    from kiro_crew.security import builtin_denied_rules
+    from kiro_crew.security import builtin_denied_rules, floor_enforced_builtin_command_ids
 
     op = "security.denied_commands.builtin_toggle"
     rule_id = request.match_info["id"]
@@ -438,6 +471,20 @@ async def api_denied_command_builtin_toggle(request: web.Request) -> web.Respons
     if rule_id not in {r["id"] for r in builtin_denied_rules()}:
         _audit(request, operation=op, outcome="denied", resources=f"{rule_id}=unknown")
         return web.json_response({"error": "unknown builtin rule"}, status=404)
+
+    # Floor-enforced rules (always-on git-publish floor) are never opt-out-able:
+    # a disable must be rejected here, before any state write, or disabled_ids
+    # records an id nothing ever reads (silent no-op opt-out). Re-enabling stays
+    # a no-op success below. Pure set lookup — no FS, safe on the event loop.
+    if not enabled and rule_id in floor_enforced_builtin_command_ids():
+        _audit(request, operation=op, outcome="denied", resources=f"{rule_id}=floor_enforced")
+        return web.json_response(
+            {
+                "error": "rule is enforced by an always-on security floor and cannot be disabled",
+                "code": "floor_enforced",
+            },
+            status=409,
+        )
 
     # Snapshot-scoped (all-profile union) to match what the UI renders locked:
     # a rule shown pinned must reject a disable with 409, not silently 200.
@@ -498,7 +545,7 @@ async def api_denied_commands_disable_all(request: web.Request) -> web.Response:
 
 
 async def api_denied_command_user_add(request: web.Request) -> web.Response:
-    """POST /api/security/denied-commands/user — {pattern: str}."""
+    """POST /api/security/denied-commands/user — {pattern: str, note?: str}."""
     op = "security.denied_commands.user_add"
     try:
         body = await request.json()
@@ -535,12 +582,53 @@ async def api_denied_command_user_add(request: web.Request) -> web.Response:
             status=400,
         )
 
+    # Optional operator note. Absent is the norm (and the pre-existing shape), so
+    # a missing key is NOT an error — but a present-and-wrong-typed one is, to
+    # match how ``pattern`` is handled rather than silently dropping input the
+    # caller believes it supplied.
+    note_raw = body.get("note", "")
+    if not isinstance(note_raw, str):
+        _audit(request, operation=op, outcome="denied", resources="note_bad_type")
+        return web.json_response(
+            {"error": "note must be a string", "code": "note_not_a_string"}, status=400
+        )
+    # Newlines would forge extra lines in the refusal, where the first line is a
+    # parsed contract (RecoveryCard's per-line POLICY_RE). Collapse rather than
+    # reject: the intent is unambiguous and a 400 over whitespace is hostile.
+    note = " ".join(note_raw.split())
+    if len(note) > _MAX_NOTE_LEN:
+        _audit(request, operation=op, outcome="denied", resources="note_oversize")
+        return web.json_response(
+            {
+                "error": f"note must be at most {_MAX_NOTE_LEN} characters",
+                "code": "note_too_long",
+            },
+            status=400,
+        )
+    # The note is emitted on its own line of the refusal, and RecoveryCard parses
+    # refusals with a GLOBAL per-line regex — so a note carrying the refusal
+    # prefix would be read as a second, fabricated deny pattern. Pasting a
+    # refusal you just saw into this field is a natural thing to do, so reject it
+    # with a real error rather than silently mangling the text. Guard on the
+    # COLON-terminated form: the regex makes the space after the colon optional,
+    # so "…policy:forged" parses as a refusal line without matching the emitted
+    # prefix.
+    if DENY_REASON_MATCH_PREFIX in note:
+        _audit(request, operation=op, outcome="denied", resources="note_forges_reason")
+        return web.json_response(
+            {
+                "error": f"note must not contain {DENY_REASON_MATCH_PREFIX!r}",
+                "code": "note_forges_reason",
+            },
+            status=400,
+        )
+
     rule_id = "user-" + uuid.uuid4().hex[:12]
 
     def _mutate(denied: dict) -> None:
         current = denied.get("user_added")
         current = list(current) if isinstance(current, list) else []
-        current.append({"id": rule_id, "pattern": pattern, "enabled": True})
+        current.append({"id": rule_id, "pattern": pattern, "enabled": True, "note": note})
         denied["user_added"] = current
 
     err = await _apply_mutation(request, op, _mutate)

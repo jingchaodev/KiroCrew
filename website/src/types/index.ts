@@ -68,6 +68,103 @@ export interface SystemData {
   ollama_running?: boolean; ollama_pid?: number; ollama_mem_mb?: number; ollama_remote?: boolean
 }
 
+/** One age band of the storage report. The labels come from the server so the
+ *  buckets the UI offers can never disagree with the ones it measures. */
+export interface SessionStorageBucket {
+  label: string; sessions: number; bytes: number
+}
+
+export interface SessionStorageBatch {
+  batch_id: string; created_at: number; reason: string
+  sessions: number; bytes: number
+}
+
+/**
+ * What sessions cost on disk, and what may be reclaimed.
+ *
+ * Deliberately carries NO per-store breakdown: a session is one unit to the
+ * person reading this, and the fact that it is written in two places is an
+ * implementation detail the product does not surface.
+ */
+export interface SessionStorageReport {
+  total_bytes: number; total_sessions: number
+  active_sessions: number; active_bytes: number
+  reclaimable_sessions: number; reclaimable_bytes: number
+  /** Non-empty when this instance must not reclaim — show it instead of the action. */
+  reclaim_blocked_reason: string
+  buckets: SessionStorageBucket[]
+  trash: {
+    bytes: number
+    /** Staged bytes are still occupying the disk until the trash is emptied. */
+    still_on_disk: boolean
+    /** True when the trash shares a filesystem with the stores, so moves are renames. */
+    instant: boolean
+    batches: SessionStorageBatch[]
+  }
+}
+
+export interface SessionStorageCleanup {
+  sessions: number; bytes: number; remaining: number
+  /** Empty on a dry run — nothing was staged, so there is no batch to undo. */
+  batch_id?: string
+  dry_run?: boolean
+}
+
+/* ── Session inventory (contract §1–§3) ── */
+
+/** One session row in the inventory list. */
+export interface SessionInventoryItem {
+  uid: string
+  title: string
+  origin: string
+  bytes: number
+  mtime: number
+  active: boolean
+  /** A turn is in flight. Narrower than `active`: everything live is active,
+   *  but an idle session that the product could still resume is not live. */
+  live: boolean
+  background: boolean
+}
+
+/** GET /api/system/session-storage/sessions */
+export interface SessionInventoryList {
+  total_bytes: number
+  total_sessions: number
+  reclaimable_bytes: number
+  reclaim_blocked_reason: string
+  sessions: SessionInventoryItem[]
+  trash: {
+    bytes: number
+    still_on_disk: boolean
+    instant: boolean
+    batches: SessionStorageBatch[]
+  }
+}
+
+/** GET /api/system/session-storage/sessions/{uid} — lazy detail */
+export interface SessionInventoryDetail {
+  uid: string
+  first_message: string
+  turns: number
+  images: number
+  bytes: number
+  mtime: number
+}
+
+/** One uid the server refused in POST .../trash */
+export interface SessionTrashRefusal {
+  uid: string
+  reason: 'in_use' | 'too_fresh' | 'unknown'
+}
+
+/** POST /api/system/session-storage/trash response */
+export interface SessionTrashResult {
+  sessions: number
+  bytes: number
+  batch_id: string
+  refused: SessionTrashRefusal[]
+}
+
 export interface CronJob {
   id: string; name: string; message: string
   enabled: boolean; schedule: string; last_status: string
@@ -384,7 +481,7 @@ export interface ConfiguredChannelTarget {
 }
 
 export interface ChatSlot {
-  key: string; title?: string; messages: number; running: boolean; stopping?: boolean; pending_approval?: boolean; created?: string; last_ts?: string; last_message?: string; agent?: string; model?: string; reasoning_effort?: string; mode?: string; surface?: string; workspace?: string; trust?: boolean; trust_reads?: boolean; folder_id?: string; pinned?: boolean; tags?: string[]; links?: SessionLink[]; slack_linked?: boolean; slack_channel?: string; slack_thread_ts?: string; color_index?: number | null; memory_mode?: 'persistent' | 'incognito' | 'temporary'; clean_mode?: boolean; project?: string; forked_from?: string | null; source_links?: { provider: 'github' | 'gitlab'; number: number; url: string; ci?: 'running' | 'passed' | 'failed' | null; state?: 'open' | 'draft' | 'merged' | 'closed'; mergeable?: string; mergeStateStatus?: string; kind?: 'change' | 'issue' }[]; source_links_total?: number
+  key: string; title?: string; messages: number; running: boolean; stopping?: boolean; pending_approval?: boolean; created?: string; last_ts?: string; last_message?: string; agent?: string; model?: string; reasoning_effort?: string; mode?: string; surface?: string; workspace?: string; trust?: boolean; trust_reads?: boolean; folder_id?: string; pinned?: boolean; tags?: string[]; links?: SessionLink[]; slack_linked?: boolean; slack_channel?: string; slack_thread_ts?: string; color_index?: number | null; memory_mode?: 'persistent' | 'incognito' | 'temporary'; clean_mode?: boolean; project?: string; forked_from?: string | null; source_links?: { provider: 'github' | 'gitlab' | 'jira'; number: number; url: string; repo?: string; ci?: 'running' | 'passed' | 'failed' | null; state?: 'open' | 'draft' | 'merged' | 'closed'; mergeable?: string; mergeStateStatus?: string; kind?: 'change' | 'issue' }[]; source_links_total?: number
   /** Artifact companion binding: slug of the artifact this slot is a companion
    * chat for. Set at slot create and persisted in the history meta line, so the
    * binding survives a gateway restart and a History-page resume. */
@@ -395,6 +492,11 @@ export interface ChatSlot {
   has_options?: boolean; options?: string[]; pending_approval_info?: PendingApproval | null; last_activity_ts?: string; waiting_for_input?: boolean; prompt_preview?: string; subagents_running?: boolean; orchestrating?: boolean
   // Soft-stop state machine
   stop_state?: 'idle' | 'soft_pending' | 'killing'
+  /** In-flight `wait` tool sleep, absent when nothing is sleeping. `deadline_ts`
+   * is absolute seconds on the BACKEND clock (Date.now() / 1000 territory), so
+   * the transcript can count down against it and survive a page reload;
+   * `wait_id` is the handle the End-wait button must quote. */
+  wait_state?: { wait_id: string; seconds: number; deadline_ts: number } | null
   /** Agent TODO list. Null/absent = the todo tool was never used in this slot. */
   todo?: TodoList | null
 }
@@ -580,6 +682,8 @@ export interface ToolActivity {
   approval_type?: string // 'chat' or 'spawn'
   tool_call_id?: string  // for matching tool results
   rejected?: boolean     // true when approval was rejected
+  kind?: string          // ACP tool kind; execute is the legacy shell signal
+  is_shell?: boolean     // shell tools can expose an indeterminate live status
 }
 
 /** Parsed content block produced by the block assembler. */

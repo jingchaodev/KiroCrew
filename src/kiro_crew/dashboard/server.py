@@ -40,6 +40,7 @@ from kiro_crew.dashboard import (
     handlers_instances,
     handlers_project,
     openai_compat,
+    session_transfer,
     stt_stream,
     tailnet,
     ws,
@@ -51,6 +52,7 @@ from kiro_crew.dashboard.crash_dump_store import (
     newest_dump_with_stacks,
     open_dump_file,
     rotate_dumps,
+    sweep_stale_dumps,
 )
 from kiro_crew.dashboard.handlers.artifacts import (
     api_artifact_comments,
@@ -188,6 +190,7 @@ from kiro_crew.safety_override import (
 )
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
+from kiro_crew.skill_usage import register_skill_read_observer
 from kiro_crew.skills import SkillsLoader, set_pending_staged_hook
 from kiro_crew.suggestions import api_suggestions
 from kiro_crew.tips import api_tips_feedback, api_tips_next, api_tips_status
@@ -321,6 +324,10 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         "/api/slack/reactions",
         "/api/slack-profile",  # MCP-only (slack_profile tool); no browser caller
         "/api/sessions/summarize",  # MCP-only (list_sessions summarize leg); internal-secret, no browser caller
+        # MCP-only (knowledge_add_document tool); no browser caller — the
+        # dashboard ingests via its own cookie-authed knowledge routes. Same
+        # wiring class as "/api/notifications/agent" above.
+        "/api/knowledge/agent-document",
         "/api/mcp/servers",
     }
 )
@@ -424,6 +431,33 @@ _MIXED_INTERNAL_API_PATHS = frozenset(
         # anything holding the internal secret. This route is local-only triage
         # state — no forge write, no shared ledger.
         "/api/apps/issue-radar/investigation",
+        # Ops Mission Control agent surface — the routes the app's SOP-driven
+        # crons and investigation slots call through the ``ops_mission_control_api``
+        # MCP tool (the app's ONLY credentialed agent path; same trust model as
+        # ``/api/apps/issue-radar/investigation`` above: agents hold no cookie,
+        # no gateway IPC secret, and the CLI credential mint is denied by the
+        # builtin ``credential-exfil`` rules — deliberately, see security.py).
+        # Enumerated EXACT paths, never the app prefix: prefix-matching
+        # ``/api/apps/ops-mission-control`` would also admit provider
+        # configuration/secret writes, ``/settings``, the external ``/webhook``
+        # ingest and the human-only ``/incident/proposal/decide`` route to
+        # anything holding the internal secret. Bare ``/incident`` is excluded
+        # for the same reason (this matcher is exact-or-prefix, so admitting it
+        # would admit ``/incident/propose`` and ``/incident/proposal/decide``);
+        # single-incident reads go through ``/incidents?id=`` instead. The
+        # ``/rotation`` and ``/ledger`` entries DO cover their sub-routes
+        # (``/rotation/arm``, ``/ledger/contradictions``, ``/ledger/hygiene``)
+        # — all agent-surface by design.
+        "/api/apps/ops-mission-control/state",
+        "/api/apps/ops-mission-control/signals",
+        "/api/apps/ops-mission-control/incidents",
+        "/api/apps/ops-mission-control/handover",
+        "/api/apps/ops-mission-control/rotation",
+        "/api/apps/ops-mission-control/ledger",
+        "/api/apps/ops-mission-control/dispatch",
+        "/api/apps/ops-mission-control/incident/transition",
+        "/api/apps/ops-mission-control/incident/claim",
+        "/api/apps/ops-mission-control/incident/action",
         # Registry skill discovery — the READ leg only, for the
         # ``skill_discover`` / ``skill_fetch`` MCP tools. The Skills page calls
         # the same two routes with cookie auth, hence mixed rather than strict.
@@ -1248,9 +1282,7 @@ def _claimed_dashboard_slots(state: DashboardState) -> frozenset[str]:
         data = getattr(smap, "_data", None)
         if not isinstance(data, dict):
             return frozenset()
-        return frozenset(
-            k[len("dashboard:"):] for k in data if k.startswith("dashboard:")
-        )
+        return frozenset(k[len("dashboard:") :] for k in data if k.startswith("dashboard:"))
     except Exception:
         logger.debug("could not read claimed dashboard slots", exc_info=True)
         return frozenset()
@@ -1774,11 +1806,7 @@ async def start_dashboard(
                 description = str(info.get("description") or "").strip()
                 triggers = str(info.get("triggers") or "").strip()
                 subject = target or name if is_update else name
-                title = (
-                    "Skill update awaiting review"
-                    if is_update
-                    else "New skill awaiting review"
-                )
+                title = "Skill update awaiting review" if is_update else "New skill awaiting review"
                 # The body LEADS with name + description because the feed row
                 # renders only its first ~80 characters, stripped to one line.
                 # The title already says a skill is awaiting review, so opening
@@ -1798,9 +1826,7 @@ async def start_dashboard(
                 if triggers:
                     lines.append(f"\n**Triggers:** {triggers}")
                 if info.get("has_scripts"):
-                    lines.append(
-                        "\n_Bundles executable scripts — review them before approving._"
-                    )
+                    lines.append("\n_Bundles executable scripts — review them before approving._")
                 body = "\n".join(lines)
                 payload = {
                     "slug": slug,
@@ -1977,6 +2003,10 @@ async def start_dashboard(
     state._hook_store = ScriptHookStore()
     set_global_hook_store(state._hook_store)
 
+    # Credit the skill-usage ledger for skill bodies the model reads directly
+    # (a file-read tool or `cat`), which bypass the loader entirely.
+    register_skill_read_observer(state.context_builder)
+
     # Wire script hooks into subagent tool execution path
     if state.subagents is not None:
         state.subagents.hook_store = state._hook_store
@@ -2017,6 +2047,8 @@ async def start_dashboard(
     # Off-loop: a large cron_folders.json would otherwise block the event
     # loop with synchronous file I/O + JSON parsing during startup.
     await asyncio.to_thread(state.load_cron_folders)
+    # Off-loop: a large chat_pins.json must not block the event loop at startup.
+    await asyncio.to_thread(state.load_chat_pins)
     state.load_tags()
     app["port"] = port
 
@@ -2048,6 +2080,17 @@ async def start_dashboard(
     # Status / system
     app.router.add_get("/api/status", handlers.api_status)
     app.router.add_get("/api/system", handlers.api_system)
+    app.router.add_get("/api/system/session-storage", handlers.api_session_storage)
+    # The inventory list and its per-row detail. Registered before the {uid} route
+    # so the literal path cannot be swallowed by the pattern.
+    app.router.add_get("/api/system/session-storage/sessions", handlers.api_session_inventory)
+    app.router.add_get(
+        "/api/system/session-storage/sessions/{uid}", handlers.api_session_inventory_detail
+    )
+    app.router.add_post("/api/system/session-storage/trash", handlers.api_session_inventory_trash)
+    app.router.add_post("/api/system/session-storage/cleanup", handlers.api_session_storage_cleanup)
+    app.router.add_post("/api/system/session-storage/restore", handlers.api_session_storage_restore)
+    app.router.add_post("/api/system/session-storage/empty", handlers.api_session_storage_empty)
     app.router.add_get("/api/stream", handlers.api_stream)
     app.router.add_get("/api/sso-ttl", handlers.api_sso_ttl)
     app.router.add_get("/api/dashboard/branding", handlers.api_branding)
@@ -2182,9 +2225,7 @@ async def start_dashboard(
     app.router.add_post("/api/skills/-/pending/{slug}/approve", handlers.api_skill_pending_approve)
     app.router.add_post("/api/skills/-/pending/{slug}/dismiss", handlers.api_skill_pending_dismiss)
     app.router.add_post("/api/skills/-/pin", handlers.api_skill_pin)
-    app.router.add_post(
-        "/api/skills/-/inject-on-trigger", handlers.api_skill_inject_on_trigger
-    )
+    app.router.add_post("/api/skills/-/inject-on-trigger", handlers.api_skill_inject_on_trigger)
     # Skill context budget (read-only cost analysis with alias folding).
     app.router.add_get("/api/skills/-/budget", handlers.api_skills_budget)
     app.router.add_get("/api/skills/{name:.+}/-/tree", handlers.api_skill_tree)
@@ -2268,6 +2309,7 @@ async def start_dashboard(
     # Shared MCP gateway (pool)
     app.router.add_get("/api/mcp-gateway/status", handlers.api_mcp_gateway_status)
     app.router.add_post("/api/mcp-gateway/enable", handlers.api_mcp_gateway_enable)
+    app.router.add_post("/api/mcp-gateway/apps-enable", handlers.api_mcp_gateway_apps_enable)
     app.router.add_get("/api/mcp-gateway/metrics", handlers.api_mcp_gateway_metrics)
     app.router.add_get("/api/mcp-gateway/servers", handlers.api_mcp_gateway_servers)
     app.router.add_post("/api/mcp-gateway/servers/poolable", handlers.api_mcp_gateway_set_poolable)
@@ -2292,20 +2334,21 @@ async def start_dashboard(
     app.router.add_post("/api/source/pull-request/comment", api_pull_request_comment)
     app.router.add_post("/api/source/pull-request/auto-merge", api_pull_request_auto_merge)
     app.router.add_post("/api/source/pull-request/ready", api_pull_request_ready)
-    app.router.add_post(
-        "/api/source/pull-request/pending-review", api_pull_request_pending_review
-    )
-    app.router.add_post(
-        "/api/source/pull-request/submit-review", api_pull_request_submit_review
-    )
+    app.router.add_post("/api/source/pull-request/pending-review", api_pull_request_pending_review)
+    app.router.add_post("/api/source/pull-request/submit-review", api_pull_request_submit_review)
     app.router.add_post("/api/source/issue", api_issue_source)
     app.router.add_get("/api/chat/slots", chat.api_chat_slots)
     app.router.add_post("/api/chat/slots", chat.api_chat_slot_create)
     app.router.add_post("/api/chat/slots/cleanup", chat.api_chat_slots_cleanup)
     app.router.add_post("/api/chat/slots/model", chat.api_chat_slots_model)
+    # Static segment BEFORE the {slot} routes below, matching the cleanup/model
+    # precedent: aiohttp resolves in registration order, so a later
+    # ``/api/chat/slots/{slot}`` POST would otherwise shadow this path.
+    app.router.add_post("/api/chat/slots/import", session_transfer.api_chat_slot_import)
     app.router.add_get("/api/chat/slots/{slot}", chat.api_chat_slot_detail)
     app.router.add_post("/api/chat/slots/{slot}/stop", chat.api_chat_slot_stop)
     app.router.add_post("/api/chat/slots/{slot}/interrupt", chat.api_chat_slot_interrupt)
+    app.router.add_post("/api/chat/slots/{slot}/end-wait", chat.api_chat_slot_end_wait)
     # Deliberately NOT /resume — that path is already taken by "open a history
     # session into a tab" (api_chat_slot_resume) and means something else.
     app.router.add_post("/api/chat/slots/{slot}/continue", chat.api_chat_slot_continue)
@@ -2336,6 +2379,14 @@ async def start_dashboard(
     app.router.add_post("/api/chat/slots/{slot}/side/open", handlers.api_side_open)
     app.router.add_post("/api/chat/slots/{slot}/side/turn", handlers.api_side_turn)
     app.router.add_post("/api/chat/slots/{slot}/side/close", handlers.api_side_close)
+    app.router.add_delete(
+        "/api/chat/slots/{slot}/side/queue/{queue_id}",
+        handlers.api_side_queue_cancel,
+    )
+    app.router.add_patch(
+        "/api/chat/slots/{slot}/side/queue/{queue_id}",
+        handlers.api_side_queue_edit,
+    )
     # Workspaces
     app.router.add_get("/api/workspaces", handlers.api_workspaces)
     app.router.add_post("/api/workspaces", handlers.api_workspaces_create)
@@ -2351,9 +2402,7 @@ async def start_dashboard(
     app.router.add_delete("/api/agents/detail/{name}", handlers.api_agent_detail)
     # KiroCrew Agent CRUD
     app.router.add_get("/api/agents", handlers.api_kirocrew_agents)
-    app.router.add_get(
-        "/api/agents/resolved-model", handlers.api_kirocrew_agent_resolved_model
-    )
+    app.router.add_get("/api/agents/resolved-model", handlers.api_kirocrew_agent_resolved_model)
     app.router.add_post("/api/agents", handlers.api_kirocrew_agents_create)
     app.router.add_post("/api/agents/sync", handlers.api_kirocrew_agents_sync)
     app.router.add_put("/api/agents/{name}", handlers.api_kirocrew_agent_update)
@@ -2393,6 +2442,11 @@ async def start_dashboard(
     app.router.add_patch("/api/chat/slots/{slot}/folder", chat.api_chat_slot_folder)
     app.router.add_patch("/api/chat/slots/{slot}/pin", chat.api_chat_slot_pin)
     app.router.add_patch("/api/chat/slots/{slot}/mode", chat.api_chat_slot_mode)
+    # Message pins
+    app.router.add_get("/api/chat/pins", chat.api_chat_pins_list)
+    app.router.add_post("/api/chat/pins", chat.api_chat_pins_create)
+    app.router.add_delete("/api/chat/pins/by-query", chat.api_chat_pins_delete_by_query)
+    app.router.add_delete("/api/chat/pins/{id}", chat.api_chat_pins_delete)
     # Tags
     app.router.add_get("/api/chat/tags", chat.api_chat_tags)
     app.router.add_post("/api/chat/tags", chat.api_chat_tag_create)
@@ -2467,9 +2521,7 @@ async def start_dashboard(
 
     # Diagnostics / "Report a Problem" (redacted support bundle)
     app.router.add_post("/api/diagnostics/collect", handlers.api_diagnostics_collect)
-    app.router.add_get(
-        "/api/diagnostics/download/{filename}", handlers.api_diagnostics_download
-    )
+    app.router.add_get("/api/diagnostics/download/{filename}", handlers.api_diagnostics_download)
 
     # Portability (export/import config+memory as zip)
     app.router.add_get("/api/portability/export", handlers.api_portability_export)
@@ -2557,6 +2609,9 @@ async def start_dashboard(
         "/api/instances/{id}/disconnect", handlers_instances.api_instances_disconnect
     )
     app.router.add_post("/api/instances/{id}/restart", handlers_instances.api_instances_restart)
+    app.router.add_post(
+        "/api/instances/{id}/send-session", handlers_instances.api_instances_send_session
+    )
 
     # Misc (notifications GET/clear and send-message via _register_mcp_routes)
     app.router.add_get("/api/notifications", handlers.api_notifications)
@@ -2570,6 +2625,7 @@ async def start_dashboard(
     )
     app.router.add_get("/api/update/check", handlers.api_update_check)
     app.router.add_get("/api/changelog", handlers.api_changelog)
+    app.router.add_get("/api/releases", handlers.api_releases)
     app.router.add_post("/api/update", handlers.api_update_apply)
     app.router.add_post("/api/update/auto", handlers.api_update_auto)
     app.router.add_post("/api/update/cancel", handlers.api_update_cancel)
@@ -3153,6 +3209,11 @@ async def start_dashboard(
     # Crash-dump discoverability: route dumps to a dedicated file under
     # ~/.kiro/crew/logs/crash-dumps/ so they are findable via `kirocrew doctor`
     # and startup warnings, rather than buried in interleaved stderr/journal.
+    # Crash-dump hygiene: sweep header-only dumps left by prior sessions that
+    # exited without ever wedging (every startup pre-creates one for
+    # faulthandler's fd), THEN rotate. Sweeping first keeps empty startup files
+    # from aging real stall dumps out of the rotation window.
+    await asyncio.to_thread(sweep_stale_dumps)
     await asyncio.to_thread(rotate_dumps)
     _dump_file = await asyncio.to_thread(open_dump_file)
     # exit_after is configurable because the right budget is host-dependent: a
@@ -3341,9 +3402,7 @@ async def start_dashboard(
         # dashboard session that merely happens to be named like a channel
         # stem is never mistaken for an orphan of it.
         _claimed = await asyncio.to_thread(_claimed_dashboard_slots, state)
-        merged = await asyncio.to_thread(
-            migrate_channel_transcripts, dashboard_slots=_claimed
-        )
+        merged = await asyncio.to_thread(migrate_channel_transcripts, dashboard_slots=_claimed)
         if merged:
             logger.info("Merged %d leftover channel transcript copies", merged)
     except Exception:
@@ -3468,6 +3527,13 @@ async def start_api_server(
     state._hook_store = ScriptHookStore()
     set_global_hook_store(state._hook_store)
 
+    # This path builds its state without a context_builder, so the loader is
+    # reached through the task runner. Logged on a miss rather than silently
+    # recording nothing, since a route that credits no reads is the bias this
+    # observer exists to remove.
+    if not register_skill_read_observer(state.context_builder, getattr(task_runner, "_ctx", None)):
+        logger.info("skill-read observer not registered: no skills loader reachable")
+
     # Wire script hooks into subagent tool execution path
     if state.subagents is not None:
         state.subagents.hook_store = state._hook_store
@@ -3498,6 +3564,8 @@ async def start_api_server(
     # Off-loop: a large cron_folders.json would otherwise block the event
     # loop with synchronous file I/O + JSON parsing during startup.
     await asyncio.to_thread(state.load_cron_folders)
+    # Off-loop: a large chat_pins.json must not block the event loop at startup.
+    await asyncio.to_thread(state.load_chat_pins)
     state.load_tags()
     app["port"] = port
 

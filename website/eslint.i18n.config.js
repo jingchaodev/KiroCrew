@@ -60,6 +60,15 @@ export default [
       // the module may contain ONLY paint data, so the filename IS the
       // boundary and its consumer (FolderGlyph.tsx) stays fully covered.
       'src/components/folderColorPaint.ts',
+      // Per-shell env-var export command builders for SettingRef's env popover:
+      // every string is CLI syntax handed to a terminal (`export`, `$env:`,
+      // `set`, `=1`), never user-visible copy — translating a fragment would
+      // break the command. Same named-boundary idiom as `*.prompt.ts` above:
+      // the module may contain ONLY command builders (shell display names live
+      // in the catalog as `privacyDisclosure.shell*Label` keys), so the
+      // filename IS the boundary and its consumer (SettingRef.tsx) stays fully
+      // covered by the gate.
+      'src/components/settingRef/envShellCommands.ts',
       // Generated and data-only.
       'src/i18n/locales/**',
       // Generated sources: the copy's real home is the panel that declares the
@@ -270,8 +279,15 @@ export default [
               // A URL query built from an already-encoded value, e.g.
               // `${PATH}?id=${encodeURIComponent(x)}`. A request path is a server
               // contract; translating it would 404. Full-string for the same reason as
-              // above; the literals that reach the linter here are `?id=` and `?since=`.
-              String.raw`^\?[a-z_]+=$`,
+              // above; the literals that reach the linter here are `?id=`, `?since=`
+              // and `&v=`.
+              //
+              // The leading character is `[?&]`, not `?` alone: a CONTINUATION
+              // parameter is exactly the same server contract as the first one, and a
+              // URL carrying two parameters has to spell one of them with `&`. The
+              // shape stays just as tight — prose takes neither a leading `?`/`&` nor
+              // a trailing `=`, so this still reports real copy.
+              String.raw`^[?&][a-z_]+=$`,
 
               // A catalog KEY assembled at runtime, e.g.
               // `apps.crewCompanion.state.${slot}`. Translating a key would break the
@@ -495,9 +511,10 @@ export default [
               // pattern, so a prefix-only one is inert.
               '/[\\w./-]*(?:\\?[\\w=&%-]*)?$',
               // The attachment wire format a composer writes into the outgoing message,
-              // mirroring core's own convention (`[attached_file N] /path`, `![image](path)`).
+              // mirroring core's own convention (`[attached_file N] /path`,
+              // `[attached_dir N] /path`, `![image](path)`).
               // Machine syntax the agent parses, not copy.
-              '!\\[image\\]\\($', '\\[attached_file$',
+              '!\\[image\\]\\($', '\\[attached_(?:file|dir)$',
               // An escaped newline joining two interpolations. Quasi values are
               // TRIMMED before matching, so this arrives as the two characters
               // backslash and `n` — which the letterless pattern below cannot cover.

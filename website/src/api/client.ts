@@ -8,6 +8,11 @@ import type {
   PullRequestStatusBatch,
   PublishProviderDescriptor,
   SessionDoc,
+  SessionInventoryDetail,
+  SessionInventoryList,
+  SessionStorageCleanup,
+  SessionStorageReport,
+  SessionTrashResult,
 } from '../types'
 import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
 import { beginArtifactWrite, endArtifactWrite } from '../lib/artifactWrites'
@@ -16,6 +21,7 @@ import { queryClient } from './queryClient'
 import { getStoredConsent } from '../utils/themeConsent'
 import { recordError, parseErrorCode, requestPath } from '../utils/errorReport'
 import { i18nT } from '../i18n/t'
+import { TAB_ID } from './tabId'
 
 /**
  * Resolve the theme-consent token to transmit for an installed pack's chat.
@@ -330,6 +336,11 @@ export interface DeniedCommandRule {
   description: string
   enabled: boolean
   pinned: boolean
+  /** Why the rule is locked (forced-on, non-toggleable): 'floor' = enforced by
+   *  an always-on floor built into Kiro Crew; 'policy' = governance-pinned;
+   *  null/absent = freely toggleable. Additive — `pinned` keeps its
+   *  governance-only meaning. */
+  lock_reason?: 'floor' | 'policy' | null
 }
 
 /** A user-authored denied-command pattern. */
@@ -337,6 +348,9 @@ export interface DeniedUserRule {
   id: string
   pattern: string
   enabled: boolean
+  /** Operator prose shown in the refusal when this rule fires. Optional: rules
+   *  added before the field existed, and rules added without one, omit it. */
+  note?: string
 }
 
 /** Full denied-commands snapshot returned by every denied-commands endpoint. */
@@ -1104,6 +1118,24 @@ export const api = {
   status: () => fetch('/api/status').then(j),
   tunnelStatus: () => fetch('/api/tunnel/status').then(j) as Promise<TunnelStatus>,
   system: () => fetch('/api/system').then(j),
+  sessionStorage: () => get('/api/system/session-storage').then(j) as Promise<SessionStorageReport>,
+  sessionStorageCleanup: (olderThanDays: number, dryRun = false) =>
+    post('/api/system/session-storage/cleanup', { older_than_days: olderThanDays, dry_run: dryRun })
+      .then(j) as Promise<SessionStorageCleanup>,
+  sessionStorageRestore: (batchId: string, uids?: string[]) =>
+    post('/api/system/session-storage/restore', uids ? { batch_id: batchId, uids } : { batch_id: batchId })
+      .then(j) as Promise<{ restored: number }>,
+  sessionStorageEmpty: (batchIds: string[]) =>
+    post('/api/system/session-storage/empty', { batch_ids: batchIds }).then(j) as Promise<{ freed_bytes: number }>,
+  /** Session inventory — the flat list contract (§1). */
+  sessionInventory: () =>
+    get('/api/system/session-storage/sessions').then(j) as Promise<SessionInventoryList>,
+  /** Session detail — lazy per-row fetch (§2). */
+  sessionInventoryDetail: (uid: string) =>
+    get(`/api/system/session-storage/sessions/${encodeURIComponent(uid)}`).then(j) as Promise<SessionInventoryDetail>,
+  /** Move explicit selection to trash (§3). */
+  sessionInventoryTrash: (uids: string[]) =>
+    post('/api/system/session-storage/trash', { uids }).then(j) as Promise<SessionTrashResult>,
   telemetryStartup: () => fetch('/api/telemetry/startup').then(j),
   // Per-turn context injection breakdown for one session. Independent of the
   // telemetry main switch: the usage rows it reads are always written.
@@ -1158,8 +1190,8 @@ export const api = {
     patch('/api/security/denied-commands/builtins/' + encodeURIComponent(id), { enabled }).then(j) as Promise<DeniedCommandsData>,
   setDeniedCommandsDisableAll: (value: boolean) =>
     patch('/api/security/denied-commands/disable-all', { value }).then(j) as Promise<DeniedCommandsData>,
-  addUserDeniedCommand: (pattern: string) =>
-    post('/api/security/denied-commands/user', { pattern }).then(j) as Promise<DeniedCommandsData>,
+  addUserDeniedCommand: (pattern: string, note = '') =>
+    post('/api/security/denied-commands/user', { pattern, note }).then(j) as Promise<DeniedCommandsData>,
   toggleUserDeniedCommand: (id: string, enabled: boolean) =>
     patch('/api/security/denied-commands/user/' + encodeURIComponent(id), { enabled }).then(j) as Promise<DeniedCommandsData>,
   deleteUserDeniedCommand: (id: string) =>
@@ -1210,6 +1242,15 @@ export const api = {
     post('/api/instances/' + encodeURIComponent(id) + '/restart').then(j) as Promise<{
       ok: boolean
       message: string
+    }>,
+  // Copies a session to another instance. The local session is left untouched:
+  // the peer allocates its own key, so this is a copy and never a move.
+  sendSessionToInstance: (id: string, slot: string) =>
+    post('/api/instances/' + encodeURIComponent(id) + '/send-session', { slot }).then(j) as Promise<{
+      ok: boolean
+      instance: string
+      remote_key: string
+      messages: number
     }>,
   // Memory
   memoryPreferences: () => fetch('/api/memory/preferences').then(j),
@@ -1464,11 +1505,15 @@ export const api = {
   mcpOAuthRelay: (server: string, redirectUrl: string) =>
     post('/api/mcp/oauth/relay', { server, redirect_url: redirectUrl }).then(j) as Promise<{ ok: boolean }>,
   // MCP Gateway (shared pool)
-  mcpGatewayStatus: () => fetch('/api/mcp-gateway/status').then(j) as Promise<{ enabled: boolean; running: boolean; ping_ok: boolean; supported: boolean }>,
+  mcpGatewayStatus: () => fetch('/api/mcp-gateway/status').then(j) as Promise<{ enabled: boolean; apps_enabled: boolean; running: boolean; ping_ok: boolean; supported: boolean }>,
   mcpGatewayEnable: (enabled: boolean) => post('/api/mcp-gateway/enable', { enabled }).then(j) as Promise<{ ok: boolean; enabled: boolean; running: boolean; ping_ok: boolean }>,
+  mcpGatewayAppsEnable: (enabled: boolean) => post('/api/mcp-gateway/apps-enable', { enabled }).then(j) as Promise<{ ok: boolean; enabled: boolean }>,
   mcpGatewayMetrics: () => fetch('/api/mcp-gateway/metrics').then(j) as Promise<{ running: boolean; size?: number; max_backends?: number; backends: { server: string; agent: string; pid: number | null; sessions: number; idle_s: number; rss_kb: number }[]; warm_pool_hits?: number; warm_pool_misses?: number; warm_pool_hit_rate_pct?: number }>,
   mcpGatewayServers: () => fetch('/api/mcp-gateway/servers').then(j) as Promise<{ servers: McpPoolableServer[] }>,
   mcpGatewaySetPoolable: (name: string, poolable: boolean) => post('/api/mcp-gateway/servers/poolable', { name, poolable }).then(j) as Promise<{ ok: boolean; name: string; poolable: boolean; enabled?: boolean; applied?: boolean; poolable_servers?: string[] }>,
+  // Batch form of the above — one config write + one pool re-apply for the whole
+  // set, so "toggle all" can't land the allowlist half-flipped.
+  mcpGatewaySetPoolableMany: (names: string[], poolable: boolean) => post('/api/mcp-gateway/servers/poolable', { names, poolable }).then(j) as Promise<{ ok: boolean; names: string[]; poolable: boolean; enabled?: boolean; applied?: boolean; poolable_servers?: string[] }>,
   // Agent config
   agentConfig: () => fetch('/api/agent/config').then(j),
   saveAgentConfig: (config: object) => put('/api/agent/config', { config }).then(j),
@@ -1554,13 +1599,21 @@ export const api = {
   stopChatSlotForce: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/stop?force=true').then(j),
   cancelQueuedMessage: (slot: string, queueId: string) => del('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/' + encodeURIComponent(queueId)).then(j),
   editQueuedMessage: (slot: string, queueId: string, content: string) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/' + encodeURIComponent(queueId), { content }).then(j),
+  reorderQueuedMessages: (slot: string, order: string[]) => put('/api/chat/slots/' + encodeURIComponent(slot) + '/queue/order', { order }).then(j),
   interruptSlot: (slot: string, queueId?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/interrupt', queueId ? { queue_id: queueId } : {}).then(j),
+  /** Ask the sleeping `wait` tool to return early. Cooperative, not a stop:
+   *  the turn continues with a normal tool result. `waitId` must name the sleep
+   *  currently in flight — the backend answers 409 for a stale one, which is how
+   *  a click on a leftover countdown is rejected rather than ending a later wait. */
+  endWait: (slot: string, waitId: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/end-wait', { wait_id: waitId }).then(j),
   approveChatSlot: (slot: string, action: string, extra?: Record<string, string>) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/approve', { action, ...extra }).then(j),
   planAction: (slot: string, action: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/plan-action', { action }).then(j),
   resumeChatSlot: (key: string, title?: string) => post('/api/chat/slots/' + encodeURIComponent(key) + '/resume', { name: key, key, title: title || key }).then(j),
   forkChatSlot: (slot: string, atIndex?: number, prompt?: string, mode?: string, direction?: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/fork', { ...(atIndex !== undefined ? { at_message_index: atIndex } : {}), ...(prompt ? { prompt } : {}), ...(mode ? { mode } : {}), ...(direction ? { direction } : {}) }).then(j),
   sideOpen: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/open', {}).then(j) as Promise<{ ok: boolean; open: boolean; messages: number; last_run_id: string; created_at: string }>,
-  sideTurn: (slot: string, question: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/turn', { question }).then(j) as Promise<{ ok: boolean; run_id: string; messages: number }>,
+  sideTurn: (slot: string, question: string, opts?: { steer?: boolean }) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/turn', { question, ...(opts?.steer ? { steer: true } : {}) }).then(j) as Promise<{ ok: boolean; run_id?: string; messages?: number; steered?: boolean; pending?: boolean; queued?: boolean; demoted?: boolean; queue_id?: string; still_queued?: boolean; depth?: number; steer_id?: string }>,
+  sideQueueCancel: (slot: string, queueId: string) => del('/api/chat/slots/' + encodeURIComponent(slot) + '/side/queue/' + encodeURIComponent(queueId), { client: TAB_ID }).then(j) as Promise<{ ok: boolean; content: string; depth: number }>,
+  sideQueueEdit: (slot: string, queueId: string, content: string) => patch('/api/chat/slots/' + encodeURIComponent(slot) + '/side/queue/' + encodeURIComponent(queueId), { content }).then(j) as Promise<{ ok: boolean; depth: number }>,
   sideClose: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/side/close', {}).then(j) as Promise<{ ok: boolean; was_open: boolean }>,
   chatMode: (mode: string, slot?: string) => post('/api/chat/mode', { mode, slot: slot || '' }).then(j),
   generateTitle: (slot: string) => post('/api/chat/slots/' + encodeURIComponent(slot) + '/generate-title').then(j),
@@ -1606,7 +1659,7 @@ export const api = {
   updateTagColumn: (id: string, body: { name?: string; tag_ids?: string[]; mode?: 'any' | 'all' | 'none'; order?: number; include_untagged?: boolean }) => patch('/api/chat/tag-columns/' + encodeURIComponent(id), body).then(j),
   deleteTagColumn: (id: string) => del('/api/chat/tag-columns/' + encodeURIComponent(id)).then(j),
   reorderTagColumns: (ids: string[]) => fetch('/api/chat/tag-columns/order', { method: 'PUT', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ ids }) }).then(j),
-  sendChat: (message: string, slot?: string, colorTheme?: string, signal?: AbortSignal, meta?: Record<string, unknown>) => {
+  sendChat: (message: string, slot?: string, colorTheme?: string, signal?: AbortSignal, meta?: Record<string, unknown>, steer?: boolean) => {
     // theme_consent_sha is the WIRE TOKEN (two-tier consent). The client just
     // TRANSMITS the raw stored grant (see themeConsentSha) — the server verifies
     // content-binding, injecting the persona only when this token equals sha256
@@ -1617,8 +1670,14 @@ export const api = {
     // Browse mode is no longer sent per message: it is default-on server-side
     // whenever Browser Mode is enabled in Settings (a durable capability),
     // gated there rather than per turn.
+    //
+    // `steer` carries the user's "act on this now" intent into a send that
+    // starts its OWN turn. The slot is idle, so there is no running turn to
+    // inject into; the flag's only effect server-side is to skip the hold that
+    // parks a user message behind still-running sub-agents. Sent through this
+    // endpoint rather than steerChat because a new turn needs `ws=1` to stream.
     const themeConsent = themeConsentSha(colorTheme)
-    return fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, ...(colorTheme ? { color_theme: colorTheme } : {}), ...(themeConsent ? { theme_consent_sha: themeConsent } : {}), ...(meta ? { meta } : {}) }), signal })
+    return fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, ...(colorTheme ? { color_theme: colorTheme } : {}), ...(themeConsent ? { theme_consent_sha: themeConsent } : {}), ...(meta ? { meta } : {}), ...(steer ? { steer: true } : {}) }), signal })
   },
   // Mid-turn steer: inject into the RUNNING turn instead of queueing. Fire-and-forget
   // JSON response ({ok, steered}); the backend falls back to queue if steer is
@@ -1680,7 +1739,12 @@ export const api = {
   renameTaskRun: (taskId: string, name: string) => fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/name', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(j),
   updateTask: (taskId: string, index: number, updates: { title?: string; description?: string; depends_on?: number[]; requires_approval?: boolean; force_approval?: boolean }) => fetch('/api/taskrunner/' + encodeURIComponent(taskId) + '/tasks/' + index, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }).then(j),
   taskRunToChat: (taskId: string) => post('/api/taskrunner/' + encodeURIComponent(taskId) + '/to-chat').then(j),
-  revealPath: (path: string) => post('/api/reveal', { path }).then(j).then((r: { copy?: string }) => {
+  // `action` mirrors the backend's own two modes: 'reveal' selects the path in
+  // the OS file manager (the default every existing caller relies on), 'open'
+  // hands a regular file to its default application. Headless hosts have
+  // neither, so the backend answers with `copy` and the path goes to the
+  // clipboard instead of the call silently doing nothing.
+  revealPath: (path: string, action: 'open' | 'reveal' = 'reveal') => post('/api/reveal', { path, action }).then(j).then((r: { copy?: string }) => {
     if (r.copy) copyToClipboard(r.copy)
     return r
   }),
@@ -1734,17 +1798,18 @@ export const api = {
   // Update
   checkUpdate: () => fetch('/api/update/check').then(j),
   changelog: () => fetch('/api/changelog').then(j),
+  releases: () => fetch('/api/releases').then(j),
   applyUpdate: () => post('/api/update').then(j),
   setAutoUpdate: (enabled: boolean) => post('/api/update/auto', { enabled }).then(j),
   cancelUpdate: () => post('/api/update/cancel').then(j),
   simulateUpdate: (opts?: { delay?: number; fail_at?: string }) => post('/api/update/simulate', opts || {}).then(j),
   pickFiles: () => post('/api/upload').then(j) as Promise<{ paths: string[] }>,
   fileDiff: (path: string) => fetch('/api/file-diff?path=' + encodeURIComponent(path)).then(j) as Promise<{ diff: string; original: string; status?: 'clean' | 'modified' | 'untracked' | 'not_git' }>,
-  /** Fuzzy file search for @-mention picker */
+  /** Fuzzy file search for @-mention picker. `kind` distinguishes folder hits from files. */
   fileSearch: (q: string, project?: string, signal?: AbortSignal) => {
     const p = new URLSearchParams({ q })
     if (project) p.set('project', project)
-    return fetch(`/api/file-search?${p}`, signal ? { signal } : undefined).then(j) as Promise<{ results: Array<{ path: string; name: string; size: number; mtime: number }>; root: string }>
+    return fetch(`/api/file-search?${p}`, signal ? { signal } : undefined).then(j) as Promise<{ results: Array<{ path: string; name: string; size: number; mtime: number; kind?: 'file' | 'dir' }>; root: string }>
   },
   /** Upload files via browser File API (cross-platform) */
   uploadFiles: async (files: File[]) => {

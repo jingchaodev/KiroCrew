@@ -21,6 +21,7 @@ from aiohttp.client_exceptions import ClientConnectionResetError
 
 from kiro_crew import model_registry
 from kiro_crew.acp.client import AcpModelUnavailable
+from kiro_crew.agent_discovery import cached_project_agent_names, warm_project_agent_names
 from kiro_crew.config.loader import (
     KiroCrewConfig,
     _workspace_name_for_dir,
@@ -29,10 +30,13 @@ from kiro_crew.config.loader import (
     resolve_agent_bindings,
 )
 from kiro_crew.dashboard.channel_slots import channel_slot_name, note_slot_closed
+from kiro_crew.dashboard.chat_auto_tag import maybe_auto_tag
 from kiro_crew.dashboard.chat_folders import _unhide_folder
 from kiro_crew.dashboard.chat_orchestrator import _stage_loop
 from kiro_crew.dashboard.chat_persistence import (
     _attach_variants,
+    _rehydrate_title_origin,
+    _rehydrate_title_refresh_mark,
     get_reasoning_effort_values,
     save_slot_off_loop,
 )
@@ -40,6 +44,7 @@ from kiro_crew.dashboard.chat_runner import (
     _context_usage_payload,
     _run_chat,
     _start_next_queued_turn,
+    schedule_eager_spawn,
 )
 from kiro_crew.dashboard.chat_title import _maybe_auto_title
 from kiro_crew.dashboard.chat_utils import (
@@ -543,6 +548,13 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         state._background_tasks.add(_tt)
         _tt.add_done_callback(state._background_tasks.discard)
 
+    # Auto-tag: derive a tag from the session's project directory (deterministic,
+    # no LLM). Fire-and-forget, same pattern as auto-title.
+    if not getattr(slot, "_auto_tagged", False):
+        _at = asyncio.create_task(maybe_auto_tag(state, slot))
+        state._background_tasks.add(_at)
+        _at.add_done_callback(state._background_tasks.discard)
+
     # Edition message observer (CPP seam). Fire-and-forget, fail-safe: a
     # companion uses this to auto-ingest doc links pasted into chat. The public
     # Default is a no-op. Guarded so an observer error never blocks the turn;
@@ -643,9 +655,7 @@ def _finite_number(value: Any) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def _context_reading(
-    pct: Any, used: Any, window: Any, *, stale: bool
-) -> dict[str, Any]:
+def _context_reading(pct: Any, used: Any, window: Any, *, stale: bool) -> dict[str, Any]:
     """Assemble the context fields from a (pct, used, window) triple.
 
     ``pct`` is the PRIMARY signal and the only one the bar needs: kiro-cli
@@ -721,16 +731,8 @@ async def _context_snapshot_fields_inner(
     if provider is not None:
         return _context_reading(
             provider.context_usage_pct(),
-            (
-                provider.context_used_tokens()
-                if hasattr(provider, "context_used_tokens")
-                else 0
-            ),
-            (
-                provider.context_window_tokens()
-                if hasattr(provider, "context_window_tokens")
-                else 0
-            ),
+            (provider.context_used_tokens() if hasattr(provider, "context_used_tokens") else 0),
+            (provider.context_window_tokens() if hasattr(provider, "context_window_tokens") else 0),
             stale=False,
         )
     # Readings from a previous process live in a file, so the first read is
@@ -951,9 +953,7 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             # One code for BOTH reasons on purpose: a distinct code per reason
             # would turn this 404 into an existence oracle for slots the caller
             # may not know about. The prose stays in `error` for logs.
-            return web.json_response(
-                {"error": "not found", "code": "slot_not_found"}, status=404
-            )
+            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
         # Pin title if explicitly provided (prevents auto-title from overwriting)
         title = (body.get("title") or "").strip()[:200] if isinstance(body, dict) else ""
         if title:
@@ -961,6 +961,13 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             title, _ = redact_credentials(title)
             slot.title = title
             slot._titled = True
+            # A pinned title is caller-explicit: record origin "user" so the
+            # background title refresh never rewrites it (this endpoint can
+            # address an ALREADY-auto-titled slot whose origin would otherwise
+            # stay "auto"), and bump the epoch so an in-flight background
+            # attempt stands down instead of clobbering the pin.
+            slot._title_origin = "user"
+            slot._title_epoch += 1
         # Bind to an artifact if provided (companion chat). Validate
         # against the artifact slug grammar so an injection-shaped value can never
         # land on the slot; anything invalid is silently dropped. Uniqueness (≤1
@@ -1012,8 +1019,14 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     # client's slot updates behind one session's file lock. The in-memory slot
     # is the source of truth and was already broadcast at block exit; a failed
     # write re-arms the periodic flush (best_effort).
-    if folder_id:
+    # A pinned title must persist too (not just a folder move): without the
+    # write, a restart rehydrates the previous title with a refreshable "auto"
+    # origin and the background refresh may rewrite the pin.
+    if folder_id or title:
         await save_slot_off_loop(state, slot, force=True)
+    # Speculative session creation: overlap the ACP handshake with the user's
+    # think-time before their first message. No-op unless session.eager_spawn.
+    schedule_eager_spawn(state, slot)
     return web.json_response(state.serialize_slot(slot))
 
 
@@ -1065,14 +1078,10 @@ def _unblock_pending_waits(state: DashboardState, slot: _ChatSlot) -> None:
     _reject_pending_approvals(slot)
     cancelled = state.cancel_questions_for_slot(slot.key)
     if cancelled:
-        logger.info(
-            "Stop: cancelled %d pending question(s) on slot %s", cancelled, slot.key
-        )
+        logger.info("Stop: cancelled %d pending question(s) on slot %s", cancelled, slot.key)
 
 
-async def _reset_slot_session(
-    state: DashboardState, slot: _ChatSlot, session_key: str
-) -> None:
+async def _reset_slot_session(state: DashboardState, slot: _ChatSlot, session_key: str) -> None:
     """Reset a slot's agent session, releasing anything blocked on the old one.
 
     The switch handlers (agent, model, bulk model, reasoning effort, workspace)
@@ -1410,7 +1419,8 @@ async def api_chat_slot_continue(request: web.Request) -> web.Response:
             source="app_isolation",
             resources=f"slot={slot.key}",
             error=(
-                "app cannot access unscoped slots" if not slot._app
+                "app cannot access unscoped slots"
+                if not slot._app
                 else "app does not own this slot"
             ),
         )
@@ -1624,6 +1634,60 @@ def _is_interrupted(slot: _ChatSlot) -> bool:
         if role == "error":
             saw_trailing_error = True
     return False
+
+
+async def api_chat_slot_end_wait(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/{slot}/end-wait — ask the sleeping `wait` tool to
+    return early. Body: ``{"wait_id": "..."}``.
+
+    Cooperative, and deliberately NOT a cancel. The tool sleeps in a separate
+    MCP subprocess that runs no listener, so there is nothing to signal: the
+    request is parked on the slot and collected by the tool on its next
+    keepalive poll (see WAIT_PING_SECS — bounded at 5s). The turn then continues
+    with a normal tool result, which is the whole point of not routing this
+    through /stop: /stop can only end a wait as collateral of killing the
+    session, losing in-flight results and paying a respawn.
+
+    ``wait_id`` is required and must match the sleep currently in flight. That
+    rejects the two races a slot-scoped flag would have accepted: a click landing
+    after the wait already elapsed, and a click from a stale tab still showing a
+    previous wait's countdown.
+    """
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    try:
+        body = await request.json() if request.content_length else {}
+    except Exception:
+        body = {}
+    # `request.json()` happily returns a list or a scalar for well-formed JSON
+    # that simply is not an object, and `.get` on one of those raises past the
+    # except above into a 500. Normalize the shape, not just the parse.
+    if not isinstance(body, dict):
+        body = {}
+    wait_id = str(body.get("wait_id") or "").strip()
+    if not wait_id:
+        return web.json_response(
+            {"error": "wait_id required", "code": "wait_id_required"}, status=400
+        )
+    current = slot._wait_state or {}
+    if current.get("wait_id") != wait_id:
+        return web.json_response(
+            {"error": "no such wait in flight", "code": "wait_not_in_flight"}, status=409
+        )
+    slot._end_wait_request = wait_id
+    sel().log_tool_invocation(
+        session_key=_history_key_for(name),
+        agent=getattr(slot, "agent", "") or "kirocrew",
+        source="dashboard",
+        tool_name="dashboard_end_wait",
+        tool_kind="command",
+        outcome="success",
+        metadata={"slot": name, "wait_id": wait_id},
+    )
+    return web.json_response({"ok": True})
 
 
 async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
@@ -1920,6 +1984,13 @@ async def api_chat_slot_delete(request: web.Request) -> web.Response:
     # ask_question holds an MCP worker on a blocked HTTP request, and the slot
     # is going away, so nobody will ever answer its card.
     _unblock_pending_waits(state, slot)
+    # Cancel any pending speculative session creation. Without this, an
+    # eager task mid-debounce or mid-handshake outlives the slot; combined
+    # with the task's own post-create liveness re-check this closes both
+    # halves of the delete/recreate race.
+    _eager = getattr(slot, "_eager_spawn_task", None)
+    if _eager is not None and not _eager.done():
+        _eager.cancel()
     if slot.running and slot.task is not None:
         slot.task.cancel()
         try:
@@ -1927,9 +1998,7 @@ async def api_chat_slot_delete(request: web.Request) -> web.Response:
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
     try:
-        await save_slot_off_loop(
-            state, slot, closed=True, closed_at=closed_at, best_effort=False
-        )
+        await save_slot_off_loop(state, slot, closed=True, closed_at=closed_at, best_effort=False)
     except Exception:
         # Save failed — restore slot so data isn't lost
         logger.error("Failed to save slot %s to history, restoring", name, exc_info=True)
@@ -2112,17 +2181,34 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
             # the slot had recorded the alias's workspace. A materialized agent
             # previously matched nothing here at all, so the slot kept the
             # PREVIOUS agent's project — latent until app agents could dispatch.
-            bindings = resolve_agent_bindings(cfg, agent_name)
+            # Resolve WITH the slot's project scope (warmed off-loop first) so a
+            # project agent counts as resolved rather than falling back.
+            await warm_project_agent_names(slot.project or None)
+            bindings = resolve_agent_bindings(cfg, agent_name, slot.project or None)
             ws_name = _workspace_name_for_dir(cfg, bindings.workspace_dir)
             slot.workspace = ws_name
             workspace = ws_name
-            slot.project = default_project_dir(workspace)
+            # A project-scope agent exists only inside slot.project: kiro-cli
+            # resolves --agent against $PWD/.kiro/agents, so resetting the
+            # project here would make the very agent just selected unresolvable
+            # on the next turn (slot advertises it, default answers — the
+            # silent-substitution bug #1684 exists to remove). Aliases keep the
+            # reset: their project comes from their own workspace bindings.
+            is_project_agent = agent_name not in cfg.agents and agent_name in (
+                cached_project_agent_names(slot.project or None) or frozenset()
+            )
+            if not is_project_agent:
+                slot.project = default_project_dir(workspace)
     except Exception:
         logger.warning("Failed to resolve agent bindings for %r", agent_name, exc_info=True)
 
     # Reset session so next message uses the new agent
     logger.info("Slot %s agent switched to %r, resetting session", name, agent_name or "kirocrew")
     await _reset_slot_session(state, slot, _history_key_for(name))
+    # The reset destroyed any eagerly created session; picking an agent is
+    # itself a strong first-message intent signal (it also resets the
+    # project), so re-arm the speculative spawn for the new bindings.
+    schedule_eager_spawn(state, slot)
     # Persist the new agent so the session resumes under the correct agent
     # after a gateway restart.  Written after reset succeeds so we never
     # advertise an agent we couldn't actually switch to.
@@ -2355,9 +2441,7 @@ async def api_chat_slot_model(request: web.Request) -> web.Response:
         # to make this call, so there is no pre-emptive gate here to go stale.
         slot.model = prior_model
         logger.warning("Slot %s model rejected: %s", name, exc)
-        return web.json_response(
-            {"error": str(exc), "code": "model_unavailable"}, status=400
-        )
+        return web.json_response({"error": str(exc), "code": "model_unavailable"}, status=400)
     if went_live:
         _broadcast_context_reset(state, slot.key, provider)
     else:
@@ -2621,6 +2705,11 @@ async def api_chat_slot_project(request: web.Request) -> web.Response:
     # inline reset would killpg() the caller. Consumed in chat_runner.
     if project != old_project:
         slot._pending_reset_history_key = _history_key_for(name)
+        # Speculatively re-create the session rooted at the new project so the
+        # cwd change is paid during think-time. The eager task consumes the
+        # deferred reset itself, but only when no turn is running — the
+        # same killpg constraint that deferred the reset applies to it.
+        schedule_eager_spawn(state, slot)
     state.push_slots_update()
     return web.json_response({"ok": True, "project": project})
 
@@ -2947,19 +3036,44 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
         # map can no longer name its session.
         channel_origin=is_channel_session_key(history_key),
     )
+    # PERSISTED METADATA IS AUTHORITATIVE for the title. The sidebar's resume
+    # call always sends a ``title`` (see website/src/api/client.ts
+    # resumeChatSlot: ``title: title || key``), and that value is client
+    # chrome — often a STALE echo of an older name (a notification deep link,
+    # a sidebar row rendered before a background refresh landed). Classifying
+    # request titles (echo vs override) is unwinnable against staleness: a
+    # stale echo is indistinguishable from a deliberate override. So the
+    # request title is used ONLY when no persisted title exists; otherwise the
+    # persisted title and its provenance are restored exactly like the
+    # chat_persistence loaders (resume is the THIRD hydration path).
+    meta = state.conversation_log.get_metadata(history_key)
+    raw_persisted_title = meta.get("title")
+    # Accept the persisted title only when it is a string: a legacy or
+    # hand-corrupted JSONL could carry a non-string here, and redacting it
+    # would raise TypeError and 500 the resume. Non-string == absent.
+    persisted_title = raw_persisted_title if isinstance(raw_persisted_title, str) else ""
     title = body.get("title", "")
-    if title:
+    if persisted_title:
+        safe_title, _ = redact_exfiltration_urls(persisted_title)
+        safe_title, _ = redact_credentials(safe_title)
+        slot.title = safe_title
+        slot._titled = True
+        slot._title_origin = _rehydrate_title_origin(True, meta.get("title_origin"))
+        slot._title_refresh_mark = _rehydrate_title_refresh_mark(
+            meta.get("title_refresh_mark")
+        )
+    elif title:
+        # Never-titled session with a caller-supplied name: apply it, with
+        # conservative "user" provenance (unknown origin — the background
+        # refresh must never rewrite it) and an epoch bump so any in-flight
+        # background attempt stands down.
         slot.title = title
         slot._titled = True
-    else:
-        sessions = state.conversation_log.list_sessions()
-        for s in sessions:
-            if s.get("key") == history_key:
-                slot.title = s.get("title", history_key)
-                slot._titled = True
-                break
-    # Restore original created_at from history metadata
-    meta = state.conversation_log.get_metadata(history_key)
+        slot._title_origin = "user"
+        slot._title_epoch += 1
+    # else: untitled on disk and no caller name — leave the slot untitled
+    # (mirrors _rehydrate_slot_from_history: ``_titled = bool(meta title)``),
+    # so the auto-titler can still name it on the next turn.
     if meta.get("created_at"):
         slot.created_at = meta["created_at"]
     if meta.get("agent"):
@@ -2986,6 +3100,22 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
         # so a tampered/legacy JSONL can't seed a malformed sha that later
         # crashes the compare.
         slot.theme_consent_sha = normalize_theme_consent_sha(meta.get("theme_consent_sha"))
+    # Restore tags + the auto-tag once-flag (mirrors the persistence loaders).
+    # Without the flag, resuming a session whose auto-tag the user removed
+    # would re-run maybe_auto_tag on the next message and silently re-add it.
+    raw_tags = meta.get("tags")
+    if isinstance(raw_tags, list):
+        slot.tags = [str(t) for t in raw_tags if isinstance(t, str) and t]
+        # Prune ids missing from the vocabulary (crash-atomic delete leaves
+        # dangling ids on disk; see api_chat_tag_delete). FAIL-OPEN only when
+        # the vocabulary is UNKNOWN (tags.json parse/I/O failure) — pruning
+        # then would wipe every assignment. A legitimately-empty vocabulary
+        # is authoritative and must prune dangling ids.
+        if getattr(state, "_tags_authoritative", True):
+            known = {t.get("id") for t in state._tags}
+            slot.tags = [t for t in slot.tags if t in known]
+    if meta.get("auto_tagged"):
+        slot._auto_tagged = True
     mm = meta.get("memory_mode", "persistent")
     slot.memory_mode = mm
     if mm != "persistent":

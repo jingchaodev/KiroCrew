@@ -41,6 +41,7 @@ from kiro_crew.acp._dispatch import (
 from kiro_crew.acp.client import (
     AcpProcessDied,
     AcpTimeoutError,
+    _consume_future_exception,
     _is_safe_oauth_url,
     _is_tool_interrupted_marker,
     _raise_acp_error,
@@ -91,6 +92,7 @@ from kiro_crew.acp.types import (
     TurnUsage,
 )
 from kiro_crew.config.paths import kiro_sessions_dir
+from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -107,14 +109,79 @@ class WatchdogSettings:
     """Resolved ``watchdog.*`` config values, read ONCE at handle construction
     (never inside the dispatch loop). Defaults mirror ``WatchdogConfig`` in
     ``config/loader.py`` so a config-less context (tests, early bootstrap)
-    behaves identically to a default config."""
+    behaves identically to a default config.
+
+    Every idle window must stay strictly inside the turn's own wall-clock
+    ceiling — see :func:`_clamp_to_turn_ceiling` for why and
+    :data:`_TURN_CEILING_WINDOW_FRACTION` for the enforced headroom."""
 
     check_after_secs: float = 60.0
     stale_window_secs: float = 300.0
-    tool_stall_suspect_secs: float = 10800.0
-    tool_stall_hard_cap_secs: float = 10800.0
+    tool_stall_suspect_secs: float = 3600.0
+    tool_stall_hard_cap_secs: float = 3600.0
     model_silent_probe_secs: float = 900.0
     wellness_sample_secs: float = 3.0
+
+
+# Fraction of a turn's deadline that a watchdog idle window may occupy. A window
+# at or past the deadline is unreachable: the turn's own timeout fires first, so
+# the UNKNOWN-verdict branch never runs and the user gets the generic "turn hit
+# the limit" card instead of tool-stall recovery (which cancels non-lethally and
+# re-drives with a continue-nudge naming the tool and any redirect log). The
+# headroom covers the cancel + ack grace so recovery lands inside the same turn.
+_TURN_CEILING_WINDOW_FRACTION = 0.9
+# watchdog.* keys bounded by the prompt timeout: each is an idle-seconds window
+# the dispatch loop compares elapsed idle against. wellness_sample_secs is a
+# sampling interval, not a window, so it is not bounded here.
+_TURN_BOUNDED_WINDOWS = (
+    "check_after_secs",
+    "stale_window_secs",
+    "tool_stall_suspect_secs",
+    "tool_stall_hard_cap_secs",
+    "model_silent_probe_secs",
+)
+
+
+def _clamp_to_prompt_ceiling(key: str, value: float) -> float:
+    """Bound one watchdog window to the transport's own per-prompt timeout.
+
+    :data:`_DEFAULT_PROMPT_TIMEOUT` is the one deadline EVERY caller shares —
+    the dispatch loop stops the turn there — so it is the only safe bound for a
+    snapshot that is taken once per handle and reused across prompts.
+
+    Mirrors the shape of ``turn_dispatch.chat_turn_timeout_secs``'s clamp
+    against the same timeout: an out-of-range value is honoured as far as the
+    system can honour it, and the clamp is logged at warning level so the
+    misconfiguration is visible instead of silently ignored.
+    """
+    budget = _DEFAULT_PROMPT_TIMEOUT * _TURN_CEILING_WINDOW_FRACTION
+    if value <= budget:
+        return value
+    logger.warning(
+        "watchdog.%s=%.0fs leaves no room inside the %.0fs prompt timeout; "
+        "clamping to %.0fs. The turn's own timeout would fire first, so the "
+        "larger window cannot take effect.",
+        key, value, _DEFAULT_PROMPT_TIMEOUT, budget,
+    )
+    return budget
+
+
+def _warn_if_above_chat_ceiling(key: str, value: float, chat_ceiling: float) -> None:
+    """Advisory: a DASHBOARD turn ends at ``agent.chat_turn_timeout_secs``, so a
+    window above that can never act there.
+
+    Deliberately not clamped. The same handle also serves callers that pass
+    their own, larger prompt timeout (a review run, a cron turn), and shrinking
+    every window to the dashboard's ceiling would cancel their live work. So the
+    mismatch is reported and left to the operator.
+    """
+    if 0 < chat_ceiling < value:
+        logger.warning(
+            "watchdog.%s=%.0fs exceeds agent.chat_turn_timeout_secs=%.0fs — a "
+            "dashboard turn ends before this window can act, so a stall there "
+            "surfaces as the turn-limit card instead of stall recovery.",
+            key, value, chat_ceiling,
+        )
 
 
 def _load_watchdog_settings() -> WatchdogSettings:
@@ -125,14 +192,17 @@ def _load_watchdog_settings() -> WatchdogSettings:
         # circular import: config.loader -> dashboard -> session -> acp
         from kiro_crew.config.loader import KiroCrewConfig
 
-        w = KiroCrewConfig.load().watchdog
+        cfg = KiroCrewConfig.load()
+        w = cfg.watchdog
+        chat_ceiling = float(cfg.agent.chat_turn_timeout_secs)
+        bounded = {}
+        for key in _TURN_BOUNDED_WINDOWS:
+            value = _clamp_to_prompt_ceiling(key, float(getattr(w, key)))
+            _warn_if_above_chat_ceiling(key, value, chat_ceiling)
+            bounded[key] = value
         return WatchdogSettings(
-            check_after_secs=float(w.check_after_secs),
-            stale_window_secs=float(w.stale_window_secs),
-            tool_stall_suspect_secs=float(w.tool_stall_suspect_secs),
-            tool_stall_hard_cap_secs=float(w.tool_stall_hard_cap_secs),
-            model_silent_probe_secs=float(w.model_silent_probe_secs),
             wellness_sample_secs=float(w.wellness_sample_secs),
+            **bounded,
         )
     except Exception:
         logger.debug("watchdog settings load failed — using defaults", exc_info=True)
@@ -141,6 +211,22 @@ def _load_watchdog_settings() -> WatchdogSettings:
 
 # How often a WORKING-verdict deferral is logged (evidence trail without spam).
 _WORKING_LOG_INTERVAL_SECS = 600.0
+# Idle ceiling past which a WORKING deferral stops being routine. Below it, a
+# deferral is the expected shape of a long build and logs at INFO. Past it the
+# deferral is on course to consume the whole turn budget, so it logs at WARNING
+# — the default ``agent.log_level``, without which the one decision that can
+# hold a turn silent until its ceiling leaves no trace in production logs. The
+# rate limit above still applies, so escalation does not become a spam source.
+_WORKING_WARN_AFTER_SECS = 1800.0
+# The same mark as a fraction of the turn's own deadline, so escalation still
+# happens with room to spare on a turn shorter than the default: the effective
+# threshold is whichever of the two is lower.
+_WORKING_WARN_DEADLINE_FRACTION = 0.25
+# "No deferral logged yet" marker for the rate-limit clock. It cannot be 0.0:
+# ``time.monotonic()`` counts from boot on Linux, so on a host up for less than
+# the interval above, 0.0 reads as "logged moments ago" and swallows the very
+# first deferral line — exactly the evidence a freshly restarted gateway needs.
+_WORKING_NEVER_LOGGED = float("-inf")
 # Unresponsive-cancel budget: after cancel() is sent, if kiro-cli does not
 # ack (via a cancelled stopReason on the prompt response) within this window,
 # the dispatch loop unblocks the caller with a terminal EVENT_COMPLETE. The
@@ -236,12 +322,18 @@ class AcpSessionHandle:
         # per-session evidence state (tracked child, counter samples).
         self._watchdog = watchdog if watchdog is not None else _load_watchdog_settings()
         self._oracle = LivenessOracle(sample_min_secs=self._watchdog.wellness_sample_secs)
+        # Keep the executor future, not an await-scoped flag: wait_for can time
+        # out while the underlying thread continues its /proc walk. A pending
+        # future makes the next watchdog tick answer UNKNOWN instead of
+        # submitting a second job, so a wedged walk cannot stack blocked workers
+        # in the shared subprocess_executor().
+        self._consult_future: asyncio.Future[tuple[str, str]] | None = None
         # Snapshot of the most recent EVENT_TOOL_CALL (title/redacted input/
         # dispatch time/shell flag) — the oracle's attribution key. Cleared on
         # EVENT_TOOL_RESULT alongside _tool_dispatched.
         self._inflight_tool: ToolCallState | None = None
         # Last monotonic ts a WORKING-verdict deferral was logged (rate limit).
-        self._working_logged_ts = 0.0
+        self._working_logged_ts = _WORKING_NEVER_LOGGED
         # Terminal compaction status captured by compact() while draining its
         # own prompt turn (kiro-cli may emit _kiro.dev/compaction/status
         # BEFORE end_turn). wait_for_compaction() consumes it first so the
@@ -387,8 +479,8 @@ class AcpSessionHandle:
         self._stale_probe = False
         self._tool_dispatched = False
         self._inflight_tool = None
-        self._oracle.reset()
-        self._working_logged_ts = 0.0
+        self._retire_liveness_state()
+        self._working_logged_ts = _WORKING_NEVER_LOGGED
         self._tool_call_inputs.clear()
         self._tool_call_is_shell.clear()
         self._tool_call_raw_params.clear()
@@ -686,7 +778,9 @@ class AcpSessionHandle:
                     "summary": event.title or "",
                 }
 
-    async def wait_for_compaction(self, timeout: float = 120.0) -> dict[str, str]:
+    async def wait_for_compaction(
+        self, timeout: float = COMPACT_WAIT_TIMEOUT_SECS
+    ) -> dict[str, str]:
         """Wait for compaction completed/failed event from the session queue.
 
         Returns {"type": "completed"|"failed"|"timeout", "summary": "..."}.
@@ -846,6 +940,19 @@ class AcpSessionHandle:
     def model(self) -> str:
         """Current model name for this session."""
         return self._model
+
+    @property
+    def served_model(self) -> str:
+        """Backend-resolved model id serving this session (``""`` until known).
+
+        Prefers the explicit ``set_model`` assignment (``_model``), falling
+        back to the ``session/new|load`` response's ``currentModelId``
+        (``_resolved_model_id``) so a session running on the backend-selected
+        DEFAULT is still readable — ``_model`` stays ``""`` on that path.
+        Both sources are backend-confirmed; the requested alias is never
+        reported here. May be a profile-form id, which is a valid wire id.
+        """
+        return self._model or self._resolved_model_id
 
     @property
     def config_options(self) -> list[dict[str, Any]]:
@@ -1143,7 +1250,7 @@ class AcpSessionHandle:
                             continue
                         verdict, evidence = await self._consult_oracle_offloaded(model_wait=False)
                         if verdict == VERDICT_WORKING:
-                            self._log_working_deferral(_tool_idle, evidence)
+                            self._log_working_deferral(_tool_idle, evidence, timeout)
                             continue
                         # UNKNOWN acts at the suspect window; the hard cap governs
                         # only the stale/model-wait branch below (it bounds the
@@ -1164,7 +1271,7 @@ class AcpSessionHandle:
                             continue
                         verdict, evidence = await self._consult_oracle_offloaded(model_wait=True)
                         if verdict == VERDICT_WORKING:
-                            self._log_working_deferral(_stale_idle, evidence)
+                            self._log_working_deferral(_stale_idle, evidence, timeout)
                             continue
                         if verdict != VERDICT_DEAD:
                             # UNKNOWN: probe only past the window. An established-
@@ -1414,6 +1521,53 @@ class AcpSessionHandle:
             for _m in _buffered:
                 self._queue.put_nowait(_m)
 
+    def _retire_liveness_state(self) -> None:
+        """Release the tracked consult and swap in a fresh, configured oracle.
+
+        Both boundaries that drop the evidence baseline — turn start in
+        ``prompt()`` and each new tool dispatch — retire rather than
+        ``reset()``, because ``_consult_oracle_offloaded`` submits a BOUND oracle
+        method to ``subprocess_executor()``: a walk whose await already timed out
+        keeps running and keeps a reference to the instance it was handed. Samples
+        are keyed ``"io"``/``"cpu"`` with no PID, so clearing in place lets that
+        late writer repopulate the baseline the next generation reads, and since
+        any nonzero delta counts as movement a flat tick then reads WORKING.
+
+        The tool path has a second, sharper version of the same hazard that the
+        capture path does not: ``_check_shell_child`` matches a descendant against
+        the *dispatched* command and stores it as ``_tracked_child`` for exact
+        exit detection on later ticks. A walk carrying the PREVIOUS tool's
+        ``ToolCallState`` therefore writes a child of the previous command into
+        the live oracle, and the new tool's next tick reports
+        ``WORKING "shell child N alive"`` on a process that has nothing to do with
+        it. Retiring confines both writes to an instance nobody reads.
+
+        Retirement is not a semantic change for the cross-tick tracked-child
+        contract itself: ``fresh()`` starts with exactly the state ``reset()``
+        produced (no tracked child, no grace timestamp, no samples), and the
+        consult resolves ``self._oracle`` at submission, so every tick after the
+        boundary binds and accumulates on the new instance the way it did before.
+
+        The future must be retired TOGETHER with the oracle. Replacing only the
+        oracle would leave a walk wedged in the previous generation answering
+        every later tick "prior consult still in flight", so the new generation
+        would never sample its own process — the tool branch would then run on
+        UNKNOWN and end a healthy tool call at the suspect window.
+
+        Releasing the future costs at most one abandoned worker per boundary
+        instead of one per tick. ``fresh()`` rather than a default construction so
+        the per-session ``wellness_sample_secs`` (and an injected /proc root or
+        clock in tests) survives the swap.
+        """
+        prior_consult = self._consult_future
+        self._consult_future = None
+        if prior_consult is not None:
+            if prior_consult.done():
+                _consume_future_exception(prior_consult)
+            else:
+                prior_consult.add_done_callback(_consume_future_exception)
+        self._oracle = self._oracle.fresh()
+
     async def _consult_oracle_offloaded(self, *, model_wait: bool) -> tuple[str, str]:
         """Oracle verdict, offloaded off the event loop.
 
@@ -1423,6 +1577,13 @@ class AcpSessionHandle:
         ``subprocess_executor()`` — same treatment as the runtime's RSS probe —
         bounded so a hung /proc read can't wedge the watchdog itself. Any
         failure degrades to UNKNOWN, never to a kill.
+
+        A timed-out await does not stop its executor thread. The submitted future
+        is tracked and intervening ticks answer UNKNOWN without submitting again,
+        bounding this handle to one outstanding walk per liveness generation
+        instead of one per tick — otherwise a permanently wedged /proc read grows
+        a new blocked worker every ``check_after_secs`` and starves the shared
+        pool that teardown's ``_get_child_pids`` also draws from.
         """
         pid = getattr(self._runtime, "pid", None)
         call: Callable[..., tuple[str, str]]
@@ -1432,27 +1593,61 @@ class AcpSessionHandle:
         else:
             tool = self._inflight_tool
             if tool is None:
+                # Resolved before the in-flight guard on purpose: this answer is
+                # pure handle state and needs no worker, so a wedged walk must
+                # not mask why the tool branch has nothing to check.
                 return VERDICT_UNKNOWN, "no in-flight tool state"
             call = self._oracle.check_tool
             args = (pid, tool)
+
+        prior = self._consult_future
+        if prior is not None:
+            if not prior.done():
+                return VERDICT_UNKNOWN, "prior consult still in flight"
+            # wait_for cancels shield's outer future, and shield detaches its
+            # inner-done callback in exactly that case. The submission-time
+            # callback below covers that normal path; this consume additionally
+            # covers an already-completed future that never went through it.
+            _consume_future_exception(prior)
+
         try:
+            # Submission stays inside the guard: the caller is a watchdog tick, so
+            # a refused executor job (shut down during teardown, thread creation
+            # refused under load) must read as UNKNOWN rather than abort the turn.
             loop = asyncio.get_running_loop()
-            return await asyncio.wait_for(
-                loop.run_in_executor(subprocess_executor(), call, *args),
-                timeout=10.0,
-            )
+            future = loop.run_in_executor(subprocess_executor(), call, *args)
+            # Attach at SUBMISSION, not only where a later tick or a boundary
+            # observes it: a turn that ends on this verdict returns with the walk
+            # still running and may never be consulted again, and CancelledError
+            # is a BaseException so an `except Exception` arm would miss a turn
+            # cancelled mid-walk. Retrieval is not destructive, so the await
+            # below still sees the result.
+            future.add_done_callback(_consume_future_exception)
+            self._consult_future = future
+            return await asyncio.wait_for(asyncio.shield(future), timeout=10.0)
         except Exception:
             logger.debug("oracle consultation failed/timed out", exc_info=True)
             return VERDICT_UNKNOWN, "oracle offload error"
 
-    def _log_working_deferral(self, idle: float, evidence: str) -> None:
+    def _log_working_deferral(self, idle: float, evidence: str, turn_timeout: float) -> None:
         """Evidence trail for a WORKING deferral, rate-limited to one line per
-        interval so a 40-minute build doesn't spam the journal."""
+        interval so a 40-minute build doesn't spam the journal.
+
+        Escalates to WARNING once idle passes the lower of
+        :data:`_WORKING_WARN_AFTER_SECS` and
+        :data:`_WORKING_WARN_DEADLINE_FRACTION` of this turn's own deadline, so a
+        deferral long enough to matter is visible at the default log level on a
+        short turn as well as a default-length one.
+        """
         now = time.monotonic()
         if now - self._working_logged_ts < _WORKING_LOG_INTERVAL_SECS:
             return
         self._working_logged_ts = now
-        logger.info(
+        warn_after = min(
+            _WORKING_WARN_AFTER_SECS, turn_timeout * _WORKING_WARN_DEADLINE_FRACTION
+        )
+        logger.log(
+            logging.WARNING if idle >= warn_after else logging.INFO,
             "Watchdog deferral on session %s: idle %.0fs but verdict WORKING (%s)",
             self._session_id, idle, evidence,
         )
@@ -1761,15 +1956,16 @@ class AcpSessionHandle:
                 self._tool_dispatched = True
                 # Attribution snapshot for the liveness oracle: title + the
                 # already-redacted input + dispatch time + the trusted shell
-                # flag. A new dispatch resets the oracle's tracked child and
-                # counter samples so evidence never bleeds across tools.
+                # flag. A new dispatch retires the oracle so its tracked child
+                # and counter samples never bleed across tools — including from a
+                # walk still running against the previous tool's command.
                 self._inflight_tool = ToolCallState(
                     title=ev.title,
                     command=ev.tool_input,
                     dispatch_ts=time.monotonic(),
                     is_shell=ev.is_shell,
                 )
-                self._oracle.reset()
+                self._retire_liveness_state()
             elif ev.kind == EVENT_TOOL_RESULT:
                 self._tool_dispatched = False
                 self._inflight_tool = None

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -88,11 +89,24 @@ class TestEnsurePlaywrightInstalled:
         result = ensure_playwright_installed("netscape-navigator")
         assert result["engine"] == "chromium"
 
-    def test_happy_path_installs_package_and_browser(self, monkeypatch):
-        # Node resolves; no standalone launcher binary is present so the npm
-        # install runs, then the browser is installed through the bundled
-        # playwright-core. Both subprocesses are stubbed to succeed.
+    def test_no_launcher_and_no_npx_fails_soft_with_docker_hint(self, monkeypatch):
+        # Node present but neither a launcher binary nor npx resolves (an npm-free
+        # Node). Do NOT hard-fail with a bare npm error: report the package step
+        # with the two npm-free escape hatches (Docker image + KIROCREW_PLAYWRIGHT_CMD).
         monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: None)
+        result = ensure_playwright_installed("chromium")
+        assert result["ok"] is False
+        assert result["step"] == "package"
+        assert "Docker" in result["detail"] and "KIROCREW_PLAYWRIGHT_CMD" in result["detail"]
+
+    def test_never_runs_global_npm_install(self, monkeypatch):
+        # The ecosystem launches @playwright/mcp via npx; a machine-global
+        # `npm install -g` is neither needed nor run. Even on an npx-only host the
+        # package step must prime via npx, never `npm install -g`.
+        monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: "/usr/bin/npx")
+        monkeypatch.setattr(setup_mod, "_is_npx_launcher", lambda cmd: True)
         monkeypatch.setattr(setup_mod, "_playwright_binary_present", lambda base: False)
         monkeypatch.setattr(
             setup_mod, "find_node_tool", lambda name, path=None: f"/usr/bin/{name}"
@@ -107,38 +121,58 @@ class TestEnsurePlaywrightInstalled:
             stderr = ""
             stdout = ""
 
+        monkeypatch.setattr(
+            setup_mod.subprocess, "run", lambda argv, **k: calls.append(argv) or _Proc()
+        )
+        ensure_playwright_installed("chromium")
+        assert not any("-g" in c for c in calls), "must never `npm install -g`"
+
+    def test_npx_only_primes_cache_with_public_registry(self, monkeypatch):
+        # On an npx-only host the cache is primed with one pinned fetch so the
+        # first browse is not cold. The prime AND the browser install run with the
+        # public registry pinned in the child env, so a private/stale-token .npmrc
+        # can't 401 this public package.
+        monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: "/usr/bin/npx")
+        monkeypatch.setattr(setup_mod, "_is_npx_launcher", lambda cmd: True)
+        monkeypatch.setattr(setup_mod, "_playwright_binary_present", lambda base: False)
+        monkeypatch.setattr(
+            setup_mod, "find_node_tool", lambda name, path=None: f"/usr/bin/{name}"
+        )
+        monkeypatch.setattr(
+            setup_mod, "_resolve_playwright_core_cli", lambda node, env: "/core/cli.js"
+        )
+        calls: list[list[str]] = []
+        envs: list[dict] = []
+
+        class _Proc:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
         def _fake_run(argv, **kwargs):
             calls.append(argv)
+            envs.append(kwargs.get("env") or {})
             return _Proc()
 
         monkeypatch.setattr(setup_mod.subprocess, "run", _fake_run)
         result = ensure_playwright_installed("firefox")
-        assert result["ok"] is True
-        assert result["engine"] == "firefox"
-        # npm install of the package, then playwright-core install of the engine.
-        assert any("install" in c and "-g" in c for c in calls)
+        assert result["ok"] is True and result["engine"] == "firefox"
+        # A prime fetch of @playwright/mcp@latest ran through npx.
+        assert any(setup_mod._PLAYWRIGHT_MCP_NPM in c for c in calls if "/npx" in c[0])
+        # Browser install ran node <core cli.js> install firefox.
         assert ["/usr/bin/node", "/core/cli.js", "install", "firefox"] in calls
+        # Every child pinned the public registry.
+        assert all(e.get("npm_config_registry") == setup_mod.PUBLIC_NPM_REGISTRY for e in envs)
 
-    def test_browser_step_fails_when_core_unresolvable(self, monkeypatch):
-        # If the bundled playwright-core cannot be resolved, fail the browser step
-        # honestly rather than risk a version-mismatched npx install.
+    def test_already_launchable_binary_skips_all_fetching(self, monkeypatch):
+        # A standalone binary already resolves -> detect-first skips the prime
+        # fetch entirely; only the browser install runs through the bundled core.
         monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
-        monkeypatch.setattr(setup_mod, "_playwright_binary_present", lambda base: True)
         monkeypatch.setattr(
-            setup_mod, "find_node_tool", lambda name, path=None: f"/usr/bin/{name}"
+            setup_mod, "_resolve_playwright_cmd", lambda *a: "/usr/bin/mcp-server-playwright"
         )
-        monkeypatch.setattr(setup_mod, "_resolve_playwright_core_cli", lambda node, env: None)
-        result = ensure_playwright_installed("chromium")
-        assert result["ok"] is False
-        assert result["step"] == "browser"
-
-    def test_browser_install_uses_bundled_core_when_resolvable(self, monkeypatch):
-        # When the @playwright/mcp-bundled playwright-core CLI resolves, the
-        # browser is provisioned through it (revision-matched with the launcher),
-        # NOT a floating npx playwright@latest.
-        monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
-        # Launcher already present -> skip the npm install; assert only the
-        # browser-install path.
+        monkeypatch.setattr(setup_mod, "_is_npx_launcher", lambda cmd: False)
         monkeypatch.setattr(setup_mod, "_playwright_binary_present", lambda base: True)
         monkeypatch.setattr(
             setup_mod, "find_node_tool", lambda name, path=None: f"/usr/bin/{name}"
@@ -158,9 +192,286 @@ class TestEnsurePlaywrightInstalled:
         )
         result = ensure_playwright_installed("chromium")
         assert result["ok"] is True
-        # Browser install ran node <core cli.js> install chromium, not npx.
+        # No npx prime fetch; only the browser install through the bundled core.
+        assert not any("/npx" in c[0] for c in calls)
         assert ["/usr/bin/node", "/core/cli.js", "install", "chromium"] in calls
-        assert not any("npx" in c[0] for c in calls)
+
+    def test_browser_step_deferred_when_core_unresolvable(self, monkeypatch):
+        # Launcher resolves but its bundled core is not yet on disk (npx host where
+        # the prime was skipped/failed). Fail SOFT: @playwright/mcp downloads the
+        # browser on first use, so the mode is still usable — ok=True with an
+        # advisory browser-deferred step, NOT a hard failure.
+        monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: "/usr/bin/npx")
+        monkeypatch.setattr(setup_mod, "_is_npx_launcher", lambda cmd: True)
+        monkeypatch.setattr(setup_mod, "_playwright_binary_present", lambda base: False)
+        monkeypatch.setattr(
+            setup_mod, "find_node_tool", lambda name, path=None: f"/usr/bin/{name}"
+        )
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_core_cli", lambda node, env: None)
+
+        class _Proc:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", lambda argv, **k: _Proc())
+        result = ensure_playwright_installed("chromium")
+        assert result["ok"] is True
+        assert result["step"] == "browser-deferred"
+
+    def test_failed_browser_install_surfaces_cause_and_manual_command(self, monkeypatch):
+        # The browser install exits NONZERO (offline, unwritable/full cache). Since
+        # a headless browse then finds no executable, this is honestly ok=False. The
+        # operator gets: (1) the ACTUAL cause (the error CODE is surfaced, not just
+        # "it failed"), (2) a copy-pasteable manual command, and (3) sanitization —
+        # credentials and local paths in stderr are scrubbed, never shown.
+        monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: "/usr/bin/npx")
+        monkeypatch.setattr(setup_mod, "_is_npx_launcher", lambda cmd: True)
+        monkeypatch.setattr(setup_mod, "_playwright_binary_present", lambda base: False)
+        monkeypatch.setattr(
+            setup_mod, "find_node_tool", lambda name, path=None: f"/usr/bin/{name}"
+        )
+        monkeypatch.setattr(
+            setup_mod, "_resolve_playwright_core_cli", lambda node, env: "/core/cli.js"
+        )
+
+        class _Proc:
+            returncode = 1
+            # Stderr carrying a credential + local path alongside the E401 code. The
+            # allowlist maps E401 to a fixed label; the raw text is NEVER echoed, so
+            # the token/path/private-registry URL cannot leak regardless of line.
+            stderr = (
+                "npm verbose cwd /home/alice/proj\n"
+                "npm error _authToken=npm_SECRETTOKEN1234567890abcd\n"
+                "npm error https://user:pass@corp.jfrog.io/npm\n"
+                "npm error code E401 Unable to authenticate; token may be invalid"
+            )
+            stdout = ""
+
+        monkeypatch.setattr(setup_mod.subprocess, "run", lambda argv, **k: _Proc())
+        result = ensure_playwright_installed("chromium")
+        assert result["ok"] is False
+        assert result["step"] == "browser"
+        # (1) The actual cause is surfaced — the E401 code the operator must act on,
+        #     via the fixed allowlist label (not echoed stderr).
+        assert "E401" in result["detail"]
+        assert result["reason"] and "E401" in result["reason"]
+        # (2) The manual fallback command is offered as a structured field, with the
+        #     public-registry pin; the prose points at it. Assert the EXACT expected
+        #     command by equality — not a hostname/URL substring check, whose
+        #     `host in string` shape CodeQL flags as incomplete-URL-sanitization.
+        expected_cmd = (
+            "npm install -g @playwright/mcp@latest --registry=https://registry.npmjs.org/"
+        )
+        assert setup_mod.MANUAL_INSTALL_CMD == expected_cmd  # exact command pinned
+        assert result["manual_command"] == expected_cmd
+        # Cross-platform --registry= FLAG (not a POSIX-only VAR= env prefix), and no
+        # floating `playwright install` that could drift from the launcher's core.
+        assert "npm_config_registry=" not in expected_cmd
+        assert "playwright install" not in expected_cmd
+        assert "command below" in result["detail"]
+        # (3) NOTHING from raw stderr leaks: no token, no creds-URL, no local path.
+        #     (Checks are absence-of-secret, not URL validation — the raw stderr is
+        #     never echoed, so none of these fixture strings can appear.)
+        for surfaced in (result["detail"], result["reason"]):
+            assert "npm_SECRETTOKEN1234567890abcd" not in surfaced
+            assert "user:pass@corp" not in surfaced  # the private-registry creds URL
+            assert "/home/alice" not in surfaced
+
+    def test_degraded_paths_never_dump_raw_secrets(self, monkeypatch):
+        # No reachable install outcome dumps a raw secret/stacktrace. The no-Node /
+        # no-launcher paths carry calm guidance; none leaks a credential or path.
+        for setup_state in ("no_node", "no_launcher"):
+            if setup_state == "no_node":
+                monkeypatch.setattr(setup_mod, "ensure_node", lambda: None)
+            else:
+                monkeypatch.setattr(setup_mod, "ensure_node", lambda: "/usr/bin/node")
+                monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: None)
+            result = ensure_playwright_installed("chromium")
+            detail = result["detail"].lower()
+            assert "traceback" not in detail and "_authtoken" not in detail
+            assert "browser mode is on" in detail
+
+
+class TestNpxCachePlaywrightRoots:
+    """The core resolver must find an npx-primed @playwright/mcp, which lives under
+    ``<npm cache>/_npx/<hash>/node_modules`` — neither ``npm root -g`` nor cwd."""
+
+    def test_finds_primed_package_under_npx_cache(self, monkeypatch, tmp_path: Path):
+        # Lay out a realistic npx cache: one hash dir holds @playwright/mcp, another
+        # holds an unrelated package (must be ignored).
+        cache = tmp_path / "npm-cache"
+        good_nm = cache / "_npx" / "abc123" / "node_modules"
+        (good_nm / "@playwright" / "mcp").mkdir(parents=True)
+        (good_nm / "@playwright" / "mcp" / "package.json").write_text("{}")
+        other_nm = cache / "_npx" / "def456" / "node_modules"
+        (other_nm / "cowsay").mkdir(parents=True)
+
+        class _Proc:
+            returncode = 0
+            stdout = str(cache)
+            stderr = ""
+
+        monkeypatch.setattr(
+            setup_mod, "find_node_tool", lambda name, path=None: "/usr/bin/npm"
+        )
+        monkeypatch.setattr(setup_mod.subprocess, "run", lambda argv, **k: _Proc())
+        roots = setup_mod._npx_cache_playwright_roots({"PATH": "/usr/bin"})
+        assert roots == [str(good_nm)]
+
+    def test_returns_empty_when_no_npx_cache(self, monkeypatch, tmp_path: Path):
+        # No _npx dir under the cache -> empty, never raises.
+        class _Proc:
+            returncode = 0
+            stdout = str(tmp_path / "empty-cache")
+            stderr = ""
+
+        monkeypatch.setattr(
+            setup_mod, "find_node_tool", lambda name, path=None: "/usr/bin/npm"
+        )
+        monkeypatch.setattr(setup_mod.subprocess, "run", lambda argv, **k: _Proc())
+        assert setup_mod._npx_cache_playwright_roots({"PATH": "/usr/bin"}) == []
+
+    def test_orders_newest_cache_first(self, monkeypatch, tmp_path: Path):
+        # Two primed caches; the resolver takes the first match, so the most
+        # recently primed (newest package.json mtime) must sort first — else a
+        # stale old revision could win over the one the runtime @latest uses.
+        cache = tmp_path / "npm-cache"
+        import os as _os
+
+        def _prime(hash_name: str, mtime: float) -> str:
+            nm = cache / "_npx" / hash_name / "node_modules"
+            (nm / "@playwright" / "mcp").mkdir(parents=True)
+            pkg = nm / "@playwright" / "mcp" / "package.json"
+            pkg.write_text("{}")
+            _os.utime(pkg, (mtime, mtime))
+            return str(nm)
+
+        old_nm = _prime("old111", 1_000.0)
+        new_nm = _prime("new222", 2_000.0)
+
+        class _Proc:
+            returncode = 0
+            stdout = str(cache)
+            stderr = ""
+
+        monkeypatch.setattr(
+            setup_mod, "find_node_tool", lambda name, path=None: "/usr/bin/npm"
+        )
+        monkeypatch.setattr(setup_mod.subprocess, "run", lambda argv, **k: _Proc())
+        roots = setup_mod._npx_cache_playwright_roots({"PATH": "/usr/bin"})
+        assert roots == [new_nm, old_nm]
+
+
+class TestResolvePlaywrightCoreCli:
+    """Exercises the REAL Node ``require.resolve`` (not monkeypatched), because the
+    bug it guards — playwright-core's ``exports`` map omits ``./cli.js`` so a direct
+    subpath resolve throws ERR_PACKAGE_PATH_NOT_EXPORTED — is invisible to every
+    test that stubs the resolver."""
+
+    def test_resolves_core_cli_despite_exports_map(self, monkeypatch, tmp_path: Path):
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node not available")
+        if not IS_POSIX:
+            # Node's require.resolve over a SYNTHETIC scoped-package layout resolves
+            # differently on native Windows (this fixture returns None there). The
+            # production path is real npx/global caches that Node itself created,
+            # which resolve fine cross-platform; the exports-map regression this
+            # guards is OS-independent, so POSIX coverage is sufficient.
+            pytest.skip("synthetic require.resolve layout is POSIX-only")
+        # Synthetic node_modules mirroring the real hoisted npx layout: a
+        # playwright-core whose exports EXCLUDE ./cli.js (the exact shape that
+        # broke the old resolver), a sibling @playwright/mcp that depends on it.
+        nm = tmp_path / "node_modules"
+        core = nm / "playwright-core"
+        core.mkdir(parents=True)
+        (core / "package.json").write_text(
+            json.dumps({"name": "playwright-core", "version": "1.0.0",
+                        "exports": {"./package.json": "./package.json", ".": "./index.js"}})
+        )
+        (core / "cli.js").write_text("#!/usr/bin/env node\n")
+        (core / "index.js").write_text("")
+        mcp = nm / "@playwright" / "mcp"
+        mcp.mkdir(parents=True)
+        (mcp / "package.json").write_text(
+            json.dumps({"name": "@playwright/mcp", "version": "0.0.1",
+                        "exports": {"./package.json": "./package.json", ".": "./index.js"}})
+        )
+        (mcp / "index.js").write_text("")
+
+        monkeypatch.setattr(setup_mod, "find_node_tool", lambda name, path=None: None)
+        monkeypatch.setattr(setup_mod, "_npx_cache_playwright_roots", lambda env: [str(nm)])
+        resolved = setup_mod._resolve_playwright_core_cli(node, {"PATH": os.environ.get("PATH", "")})
+        # The old resolver returned None here (playwright-core's exports omit
+        # ./cli.js). The fix resolves via package.json + join, so a real path comes
+        # back. Compare by normalized identity, not raw string: Node emits native
+        # separators and may canonicalize (e.g. Windows short/long paths, symlinked
+        # temp dirs), so a byte compare is falsely brittle across platforms.
+        assert resolved is not None, "core cli.js must resolve despite the exports map"
+        assert os.path.samefile(resolved, str(core / "cli.js"))
+
+
+class TestPinnedPlaywrightVersion:
+    """The runtime proxy launches the version the prime recorded (not @latest), so
+    launches are offline-deterministic and cannot drift past the provisioned
+    browser revision."""
+
+    def test_record_then_read_round_trips(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setattr(setup_mod, "config_dir", lambda: tmp_path)
+        nm = tmp_path / "cache" / "_npx" / "h1" / "node_modules"
+        (nm / "@playwright" / "mcp").mkdir(parents=True)
+        (nm / "@playwright" / "mcp" / "package.json").write_text(
+            json.dumps({"name": "@playwright/mcp", "version": "0.0.78"})
+        )
+        monkeypatch.setattr(setup_mod, "_npx_cache_playwright_roots", lambda env: [str(nm)])
+        setup_mod._record_primed_playwright_version({"PATH": "/usr/bin"})
+        assert setup_mod.get_pinned_playwright_version() == "0.0.78"
+
+    def test_absent_pin_reads_none(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setattr(setup_mod, "config_dir", lambda: tmp_path)
+        assert setup_mod.get_pinned_playwright_version() is None
+
+    def test_tampered_version_is_rejected(self, monkeypatch, tmp_path: Path):
+        # A non-semver / injected value must never reach an npx argv — degrade to
+        # None (→ @latest) rather than launch attacker-controlled content.
+        monkeypatch.setattr(setup_mod, "config_dir", lambda: tmp_path)
+        monkeypatch.setattr(setup_mod, "_npx_cache_playwright_roots", lambda env: [])
+        (tmp_path / "playwright-mcp-version").write_text("latest; rm -rf /")
+        assert setup_mod.get_pinned_playwright_version() is None
+
+    def test_valid_but_uncached_version_is_rejected(self, monkeypatch, tmp_path: Path):
+        # The flag file is agent-writable, so a prompt-injected shell could write a
+        # valid-FORMAT but nonexistent semver (99.99.99). Launching it would fail to
+        # fetch and break browsing persistently — a DoS. The on-disk-presence gate
+        # rejects it (no cache holds that version) and falls back to @latest, so the
+        # feature keeps working. The agent cannot fabricate a real cache dir.
+        monkeypatch.setattr(setup_mod, "config_dir", lambda: tmp_path)
+        nm = tmp_path / "cache" / "_npx" / "h1" / "node_modules"
+        (nm / "@playwright" / "mcp").mkdir(parents=True)
+        (nm / "@playwright" / "mcp" / "package.json").write_text(
+            json.dumps({"name": "@playwright/mcp", "version": "0.0.78"})  # real cache = 0.0.78
+        )
+        monkeypatch.setattr(setup_mod, "_npx_cache_playwright_roots", lambda env: [str(nm)])
+        (tmp_path / "playwright-mcp-version").write_text("99.99.99")  # attacker-written
+        assert setup_mod.get_pinned_playwright_version() is None
+
+    def test_non_object_cached_package_json_does_not_crash(self, monkeypatch, tmp_path: Path):
+        # A cached package.json can be valid JSON that is NOT an object ([], "x", 12);
+        # ``.get`` on it raises AttributeError, which OSError/ValueError would not
+        # catch — crashing proxy startup. The type guard must degrade to None, not raise.
+        monkeypatch.setattr(setup_mod, "config_dir", lambda: tmp_path)
+        nm = tmp_path / "cache" / "_npx" / "h1" / "node_modules"
+        (nm / "@playwright" / "mcp").mkdir(parents=True)
+        (nm / "@playwright" / "mcp" / "package.json").write_text("[]")  # valid JSON, not a dict
+        monkeypatch.setattr(setup_mod, "_npx_cache_playwright_roots", lambda env: [str(nm)])
+        (tmp_path / "playwright-mcp-version").write_text("0.0.78")
+        # Must return None (no match), never raise.
+        assert setup_mod.get_pinned_playwright_version() is None
+        # The recorder walks the same untrusted package.json; it must not raise either.
+        setup_mod._record_primed_playwright_version({"PATH": "/usr/bin"})
 
 
 # ── TestBrowserModePersistence ───────────────────────────────────────────────
@@ -307,25 +618,52 @@ class TestGeneratePlaywrightConfig:
         assert not any("remote-debugging-port" in a for a in args)
 
     def test_config_has_correct_structure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config_path = generate_playwright_config()
         config = json.loads(config_path.read_text(encoding="utf-8"))
         assert "browser" in config
         assert "capabilities" in config
         assert config["browser"]["browserName"] == "chromium"
-        assert "storageState" in config["browser"]["contextOptions"]
+        # A fresh home has no storage-state file, so storageState is omitted:
+        # attaching a path to a missing file makes Playwright raise ENOENT at
+        # context creation. contextOptions is still present (as an empty dict).
+        # See #2209.
+        assert "contextOptions" in config["browser"]
+        assert "storageState" not in config["browser"]["contextOptions"]
 
-    def test_storage_state_path_is_absolute(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_storage_state_absolute_and_attached_when_file_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         # The config path now derives from config_dir(), which reads KIROCREW_HOME
         # first (the conftest autouse fixture pins it). Clear it so config_dir()
         # resolves from the patched Path.home -> ~/.kiro/crew under tmp_path.
         monkeypatch.delenv("KIROCREW_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # storageState is only attached when the file exists (#2209); seed it so
+        # this exercises the present-branch and the path is absolute.
+        state_file = config_dir() / "playwright-storage-state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
         config_path = generate_playwright_config()
         config = json.loads(config_path.read_text(encoding="utf-8"))
         storage_state = config["browser"]["contextOptions"]["storageState"]
         assert storage_state.startswith(str(tmp_path))
         assert "playwright-storage-state.json" in storage_state
+
+    def test_storage_state_omitted_when_file_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Regression for #2209: with no storage-state file on disk (the OSS
+        # default — refresh_storage_state() is a no-op), the generated config must
+        # NOT reference it. Playwright raises ENOENT at context creation for a
+        # storageState pointing at a missing file, which broke every browser_*
+        # call on a stock install.
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        assert not (config_dir() / "playwright-storage-state.json").exists()
+        config = json.loads(generate_playwright_config().read_text(encoding="utf-8"))
+        assert "storageState" not in config["browser"]["contextOptions"]
 
     def test_config_written_to_kirocrew_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         # Data home moved from top-level ~/.kirocrew to ~/.kiro/crew (config_dir()).
@@ -386,13 +724,13 @@ class TestCheckPlaywrightLaunchable:
     def test_ok_when_resolver_returns_cmd(self, monkeypatch: pytest.MonkeyPatch):
         # setup.py imports _resolve_playwright_cmd at module scope, so patch the
         # name where it is looked up (setup_mod), not on the origin module.
-        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda: "/usr/bin/npx")
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: "/usr/bin/npx")
         ok, detail = check_playwright_launchable()
         assert ok is True
         assert detail == "/usr/bin/npx"
 
     def test_not_ok_with_install_hint_when_unresolvable(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda: None)
+        monkeypatch.setattr(setup_mod, "_resolve_playwright_cmd", lambda *a: None)
         ok, detail = check_playwright_launchable()
         assert ok is False
         assert "@playwright/mcp" in detail

@@ -27,8 +27,10 @@ from kiro_crew.dashboard.chat_utils import (
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot, _normalize_slot_key
 from kiro_crew.effort import EFFORT_LEVELS, EFFORT_VALUES
 from kiro_crew.history import (
+    SLOT_OWNED_META_KEYS,
     _archive_lines,
     carry_provenance,
+    carry_unowned_metadata,
     latest_transcript_ts,
     transcript_sort_key,
     update_metadata_off_loop,
@@ -38,6 +40,36 @@ from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.validation import ARTIFACT_SLUG_RE
 
 logger = logging.getLogger(__name__)
+
+
+# Recognized title-origin values (mirrors chat_title._TITLE_ORIGINS; duplicated
+# here rather than imported to avoid dragging the chat_title import graph into
+# the persistence module's load path).
+_TITLE_ORIGINS = ("auto", "user")
+
+
+def _rehydrate_title_origin(titled: bool, stored: object) -> str:
+    """Resolve a rehydrated slot's title origin from persisted metadata.
+
+    Mirrors how ``_titled`` is derived from the presence of a persisted title,
+    so "a manual rename is final" survives a reload. A recognized stored
+    ``title_origin`` is used verbatim. A titled slot with NO stored origin is a
+    LEGACY session written before the field existed: treat it conservatively as
+    ``"user"`` so the background title refresh never rewrites what might be a
+    manual rename. An untitled slot has no origin.
+    """
+    if not titled:
+        return ""
+    if isinstance(stored, str) and stored in _TITLE_ORIGINS:
+        return stored
+    return "user"
+
+
+def _rehydrate_title_refresh_mark(stored: object) -> int:
+    """Resolve the persisted refresh mark; unknown/invalid values mean 0."""
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored > 0:
+        return stored
+    return 0
 
 
 _MAX_HISTORY_CHARS = 8000
@@ -200,6 +232,11 @@ def _restore_open_slots_steps(state: DashboardState) -> "Iterator[int]":
     if not isinstance(keys, list):
         return
     restored = 0
+    # Rebound each pass so it reflects only THIS restore: a key that becomes
+    # readable later must stop being carried, and a fresh set() keeps mutation
+    # off the class-level frozenset baseline.
+    unrestored: set[str] = set()
+    state.unrestored_slot_keys = unrestored
     # Built once and shared across every tab — it is identical per slot.
     kiro_model_map = _build_kiro_model_map()
     for raw in keys:
@@ -226,17 +263,46 @@ def _restore_open_slots_steps(state: DashboardState) -> "Iterator[int]":
         if raw in state._slots:
             continue
         try:
-            slot = _rehydrate_slot_from_history(state, raw, kiro_model_map=kiro_model_map)
+            # Ask whether the metadata READ succeeded, not just whether it came
+            # back empty. get_metadata() reports {} for both "never persisted"
+            # and "could not be read after retries", and treating the second as
+            # the first is what silently discards a live tab. Key it exactly as
+            # _rehydrate_slot_from_history does, so the prefetch below is a hit.
+            #
+            # This read MUST stay inside the per-tab guard. restore_open_slots_async
+            # has no except at its call site, so anything escaping here aborts
+            # dashboard startup and costs every LATER tab too, not just this one.
+            meta, readable = state.conversation_log.get_metadata_status(
+                slot_transcript_key(raw)
+            )
+            if readable:
+                slot = _rehydrate_slot_from_history(
+                    state, raw, kiro_model_map=kiro_model_map, _prefetched_meta=meta
+                )
+                if slot is not None:
+                    restored += 1
+            else:
+                unrestored.add(raw)
+                logger.warning(
+                    "restore_open_slots: metadata unreadable for %s; keeping it "
+                    "in the reopen seed for the next restore instead of "
+                    "dropping it",
+                    raw,
+                )
         except Exception:
             logger.debug("restore_open_slots: rehydrate failed for %s", raw, exc_info=True)
+            # Same epistemic position as an unreadable read: the session was not
+            # shown to be gone, so keep its key rather than erasing the seed.
+            unrestored.add(raw)
             # No rollback here: _rehydrate_slot_from_history undoes its own
             # partial slot and restricted key, so every caller gets it rather
             # than only the ones that remembered to compensate.
-            continue
-        if slot is not None:
-            restored += 1
-        # One yield point per tab. The async driver turns this into a real event-loop
-        # yield; the sync driver just spins through it.
+        # One yield point per tab, reached on EVERY outcome. A failing tab still
+        # costs real I/O (the metadata read retries, and _pause_for_transient_retry
+        # deliberately does not sleep while on the loop), so a run of failing tabs
+        # that skipped the yield would monopolise the loop and feed the stall
+        # watchdog. The async driver turns this into a real event-loop yield; the
+        # sync driver just spins through it.
         yield restored
     if restored:
         logger.info("Restored %d open tab(s) from open_slots.json", restored)
@@ -432,6 +498,8 @@ def _rehydrate_slot_from_history(
         raw_title, _ = redact_credentials(raw_title)
         slot.title = raw_title
         slot._titled = bool(meta.get("title"))
+        slot._title_origin = _rehydrate_title_origin(slot._titled, meta.get("title_origin"))
+        slot._title_refresh_mark = _rehydrate_title_refresh_mark(meta.get("title_refresh_mark"))
         if meta.get("created_at"):
             slot.created_at = meta["created_at"]
         if meta.get("agent"):
@@ -478,6 +546,20 @@ def _rehydrate_slot_from_history(
         raw_tags = meta.get("tags")
         if isinstance(raw_tags, list):
             slot.tags = [str(t) for t in raw_tags if isinstance(t, str) and t]
+            # Prune ids missing from the vocabulary: tag deletion commits the
+            # vocab write first (crash-atomic), so a crash mid-delete can
+            # leave dangling ids on the persisted slot line. load_tags() runs
+            # before any slot restore, so state._tags is authoritative here.
+            # FAIL-OPEN only when the vocabulary is UNKNOWN (tags.json parse
+            # or I/O failure): pruning then would wipe EVERY assignment and
+            # the next save persists the loss. A legitimately-empty vocabulary
+            # (user deleted the last tag) IS authoritative and must prune —
+            # otherwise a crash mid-delete resurrects the dangling id forever.
+            if getattr(state, "_tags_authoritative", True):
+                known = {t.get("id") for t in state._tags}
+                slot.tags = [t for t in slot.tags if t in known]
+        if meta.get("auto_tagged"):
+            slot._auto_tagged = True
         mm = meta.get("memory_mode", "persistent")
         slot.memory_mode = mm
         if mm != "persistent":
@@ -766,6 +848,8 @@ def _restore_recent_sessions_steps(
         raw_title, _ = redact_credentials(raw_title)
         slot.title = raw_title
         slot._titled = bool(s.get("title"))
+        slot._title_origin = _rehydrate_title_origin(slot._titled, meta.get("title_origin"))
+        slot._title_refresh_mark = _rehydrate_title_refresh_mark(meta.get("title_refresh_mark"))
         if meta.get("created_at"):
             slot.created_at = meta["created_at"]
         if meta.get("agent"):
@@ -814,6 +898,20 @@ def _restore_recent_sessions_steps(
         raw_tags = meta.get("tags")
         if isinstance(raw_tags, list):
             slot.tags = [str(t) for t in raw_tags if isinstance(t, str) and t]
+            # Prune ids missing from the vocabulary: tag deletion commits the
+            # vocab write first (crash-atomic), so a crash mid-delete can
+            # leave dangling ids on the persisted slot line. load_tags() runs
+            # before any slot restore, so state._tags is authoritative here.
+            # FAIL-OPEN only when the vocabulary is UNKNOWN (tags.json parse
+            # or I/O failure): pruning then would wipe EVERY assignment and
+            # the next save persists the loss. A legitimately-empty vocabulary
+            # (user deleted the last tag) IS authoritative and must prune —
+            # otherwise a crash mid-delete resurrects the dangling id forever.
+            if getattr(state, "_tags_authoritative", True):
+                known = {t.get("id") for t in state._tags}
+                slot.tags = [t for t in slot.tags if t in known]
+        if meta.get("auto_tagged"):
+            slot._auto_tagged = True
         mm = meta.get("memory_mode", "persistent")
         slot.memory_mode = mm
         if mm != "persistent":
@@ -1465,15 +1563,16 @@ def _save_slot_to_history(
                 "last_consolidated": existing_meta.get("last_consolidated", 0),
             }
             # Preserve history-layer-owned metadata this dashboard save does NOT
-            # manage. ``rotation_generation`` (bumped by ``_maybe_rotate``, with
-            # its ``rotated_at`` stamp) lets a concurrent consolidation detect a
-            # rotation and skip applying a stale offset. Reconstructing the
-            # metadata subset here would drop it, resetting the generation to 0
-            # and re-opening the exact consolidation race the rotation-generation
-            # fix closed. Carry these forward verbatim (absent field == no-op).
-            for _meta_key in ("rotation_generation", "rotated_at", "compacted_at"):
-                if _meta_key in existing_meta:
-                    meta_line[_meta_key] = existing_meta[_meta_key]
+            # manage. The save is authoritative only for the slot fields it writes
+            # (SLOT_OWNED_META_KEYS), where an absent field means "cleared"; every
+            # other key is another layer's durable state, and reconstructing the
+            # subset deletes it. That is not hypothetical: it erased the rotation
+            # generation (re-opening the consolidation race the generation check
+            # closed) and then the consolidation retry accounting (resetting the
+            # backoff so billed retries resumed). Carrying unowned keys through by
+            # default closes the class instead of enumerating one more field to
+            # rescue. Applied after the slot fields below so an inherited value can
+            # never shadow the slot's own state.
             if closed:
                 meta_line["closed"] = True
                 # Epoch stamp of WHEN the tab was closed. The channel-slot
@@ -1495,6 +1594,17 @@ def _save_slot_to_history(
             meta_line["memory_mode"] = slot.memory_mode
             if slot.title and slot.title != slot.key:
                 meta_line["title"] = slot.title
+                # Persist the title's provenance next to it (mirrors
+                # _persist_title): without this, the canonical full save would
+                # strip the field and rehydration would conservatively
+                # re-classify an auto title as "user" after restart —
+                # permanently locking the background refresh out.
+                _origin = getattr(slot, "_title_origin", "")
+                if _origin:
+                    meta_line["title_origin"] = _origin
+                _mark = getattr(slot, "_title_refresh_mark", 0)
+                if _mark:
+                    meta_line["title_refresh_mark"] = _mark
             if slot.agent:
                 meta_line["agent"] = slot.agent
             meta_line["model"] = slot.model
@@ -1523,6 +1633,11 @@ def _save_slot_to_history(
                 meta_line["color_theme"] = slot.color_theme
             if slot.tags:
                 meta_line["tags"] = list(slot.tags)
+            if getattr(slot, "_auto_tagged", False):
+                # Once-flag for project auto-tagging: without it a restart
+                # re-runs maybe_auto_tag and silently re-adds a tag the user
+                # removed (see chat_auto_tag.maybe_auto_tag).
+                meta_line["auto_tagged"] = True
             if slot.forked_from is not None:
                 meta_line["forked_from"] = slot.forked_from
             if slot.linked_session_key:
@@ -1541,6 +1656,38 @@ def _save_slot_to_history(
             tab_id = getattr(slot, "_tab_id", None) or existing_meta.get("tab_id")
             if tab_id:
                 meta_line["tab_id"] = tab_id
+            # ``rewrite`` is the structural signal for "this save EDITS the
+            # conversation": the regenerate / rewind / fork paths pass an explicit
+            # window snapshot (or leave ``_pending_rewrite`` set), while a steady
+            # flush re-serializes the same window it already persisted.
+            #
+            # An edit swaps the live window's tail for content no consolidation
+            # turn has read, so it advances the rotation generation — the
+            # session's content-identity counter. That single write covers both
+            # halves of the invariant that a consolidation marker and its retry
+            # budget are bound to the content they measured:
+            #
+            # * An attempt already IN FLIGHT snapshotted the pre-edit generation,
+            #   so its ``mark_consolidated`` write is rejected as stale
+            #   (``ConversationLog.mark_consolidated``) instead of marking the
+            #   REPLACEMENT tail consolidated without ever extracting it. A
+            #   regenerate lands at the same message count, the same generation
+            #   and the same marker, so nothing else about the save distinguishes
+            #   it and the completion write would otherwise apply.
+            # * A charged (or capped) budget stamped against the pre-edit
+            #   generation stops describing the current span, so the replacement
+            #   content earns a fresh budget rather than inheriting an exhausted
+            #   one (``ConversationLog._attempts_describe_current_span``).
+            #
+            # This is the same release a rotation gets, and deliberately the same
+            # in both directions: the armed backoff deadline survives, so a user
+            # repeatedly regenerating a reply cannot re-bill a failing
+            # consolidation turn on each gesture.
+            if rewrite:
+                meta_line["rotation_generation"] = (
+                    int(existing_meta.get("rotation_generation", 0) or 0) + 1
+                )
+            carry_unowned_metadata(meta_line, existing_meta, SLOT_OWNED_META_KEYS)
             meta_str = json.dumps(meta_line) + "\n"
 
             # ── Frozen prefix (never rewritten) + freshly serialized window ──

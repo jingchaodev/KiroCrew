@@ -50,6 +50,23 @@ class TestParseRepoUrl(unittest.TestCase):
         with self.assertRaises(adapters.AdapterParseError):
             adapters.parse_repo_url("https://github.com/../r")
 
+    def test_rejection_names_the_accepted_hosts(self):
+        # The error must say what IS accepted now that the set is configurable.
+        with self.assertRaises(adapters.UnsupportedPlatform) as ctx:
+            adapters.parse_repo_ref("https://evil.example/o/r", config={})
+        self.assertIn("github.com", str(ctx.exception))
+
+    def test_parse_repo_ref_accepts_configured_ghe_host(self):
+        cfg = {"github_hosts": ["github.com", "acme.ghe.com"]}
+        self.assertEqual(
+            adapters.parse_repo_ref("https://acme.ghe.com/octo/hello", config=cfg),
+            ("acme.ghe.com", "octo", "hello"))
+        # Spoofable shapes stay rejected (exact parsed-hostname match only).
+        for url in ("https://notacme.ghe.com/o/r",
+                    "https://acme.ghe.com.evil.example/o/r"):
+            with self.assertRaises(adapters.UnsupportedPlatform):
+                adapters.parse_repo_ref(url, config=cfg)
+
 
 class TestListOpenPrs(unittest.TestCase):
     def _cp(self, returncode=0, stdout="", stderr=""):
@@ -76,6 +93,28 @@ class TestListOpenPrs(unittest.TestCase):
         self.assertEqual(prs[1]["author"], "")
         self.assertFalse(prs[1]["draft"])
 
+    def test_spawn_carries_the_minimal_env(self):
+        """The bare-subprocess regression class this suite exists to keep out:
+        the spawn must hand the child the shared runner's minimal gh env, never
+        the gateway's full environment (AWS/Slack/SSH secrets included)."""
+        captured = {}
+
+        def fake_run(argv, **kw):
+            captured["kw"] = kw
+            return self._cp(stdout="")
+
+        with unittest.mock.patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "aws-secret",
+                                                   "GH_TOKEN": "gho_token"}), \
+                patch.object(pipeline.discovery, "gh_bin", return_value="/resolved-gh/gh"), \
+                patch.object(pipeline.subprocess, "run", side_effect=fake_run):
+            pipeline.list_open_prs("o", "r")
+        env = captured["kw"].get("env")
+        # A missing env= means the child inherits the FULL parent environment.
+        self.assertIsInstance(env, dict)
+        assert env is not None  # narrow for the type checker
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+        self.assertEqual(env.get("GH_TOKEN"), "gho_token")
+
     def test_uses_list_argv_no_shell(self):
         captured = {}
 
@@ -93,6 +132,22 @@ class TestListOpenPrs(unittest.TestCase):
         self.assertEqual(os.path.basename(captured["argv"][0]), "gh")
         self.assertEqual(captured["argv"][1:3],
                          ["api", "repos/o/r/pulls?state=open&per_page=100"])
+        # github.com is pinned EXPLICITLY too: omitting --hostname would let
+        # the gh CLI's configured default host (GH_HOST) decide the instance.
+        i = captured["argv"].index("--hostname")
+        self.assertEqual(captured["argv"][i + 1], "github.com")
+
+    def test_ghe_host_routes_to_that_instance(self):
+        captured = {}
+
+        def fake_run(argv, **kw):
+            captured["argv"] = argv
+            return self._cp(stdout="")
+        with patch.object(pipeline.subprocess, "run", side_effect=fake_run):
+            pipeline.list_open_prs("o", "r", host="acme.ghe.com")
+        # A GHE repo is enumerated against ITS instance's API, not api.github.com.
+        i = captured["argv"].index("--hostname")
+        self.assertEqual(captured["argv"][i + 1], "acme.ghe.com")
 
     def test_nonzero_exit_raises(self):
         with patch.object(pipeline.subprocess, "run",

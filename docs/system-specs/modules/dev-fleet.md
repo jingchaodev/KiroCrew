@@ -666,11 +666,18 @@ The app bundles two skills declared in `app.json`:
   so a killed run still yields a verdict.
 - `skills/feature-demo-recording` — headless Playwright video recording
 
-`kirocrew-worktree-dev` is deliberately NOT bundled: the canonical copy is
-owned by the `skills/kirocrew-dev/` development-skills folder (synced into
-every install via the project-dir mechanism), and the app-bridged duplicate
-was removed because two copies of the same skill drift and get loaded
-nondeterministically against each other (PR #353 arbiter finding).
+`kirocrew-worktree-dev` carries no app-bridged copy: the canonical copy is
+owned by the `kirocrew-dev` development-skills suite under
+`src/kiro_crew/builtin_skills/`, and the app-bridged duplicate was removed
+because two copies of the same skill drift and get loaded nondeterministically
+against each other (PR #353 arbiter finding). That single-copy rule is what
+matters here; where the one copy lives is a packaging question, and it lives in
+the packaged tree so `_ensure_builtin_skills` reaches every distribution. The
+project-dir mechanism reaches only some: `_project_skills_dir()` reads
+`KIROCREW_PROJECT_DIR`, which a repo checkout and the desktop bundle both
+provide (`packaging/kirocrew-backend.spec` ships the top-level `skills/` tree
+and `website/electron/main.js` sets the variable), but a `pip install` from the
+wheel or sdist provides neither.
 
 Skills are registered as symlinks into `~/.kiro/crew/skills/` via the app bridge at
 two lifecycle points:
@@ -705,3 +712,37 @@ the request is refused with a descriptive error — regardless of the `force` fl
 
 The check uses `_live_worktree_path()` which performs a fresh filesystem resolution
 (no caching) to avoid TOCTOU issues where a previously-cached path is stale.
+
+## Forced Removal Refusal Matrix
+
+The `_worktree_remove` decision surface evaluates `force × PR-merged × dirty`
+and emits one audit action per outcome. `--force` is NEVER passed to
+`git worktree remove`; every path either refuses or removes without `--force`
+so that git's own dirty check is the atomic last line of defence.
+
+| force | PR merged | dirty | Outcome | Audit action |
+|-------|-----------|-------|---------|--------------|
+| True | No | True | **Refuse** — uncommitted changes on unmerged branch | `refused_dirty_unmerged` |
+| True | No | None | **Refuse** — cannot verify cleanliness | `refused_unverifiable` |
+| True | No | False | **Remove** (no `--force`); git's own check guards the TOCTOU window | `unmerged_clean_no_git_force` |
+| True | Yes | True | **Refuse** — fresh-MERGED confirms merge but tree is dirty | `refused_dirty_merged` |
+| True | Yes | None | **Refuse** — fresh-MERGED confirms merge but tree is unverifiable | `refused_unverifiable_merged` |
+| True | Yes | False | **Remove** (no `--force`); mirrors unmerged-clean TOCTOU pattern | `merged_clean_no_git_force` |
+| False | Yes | * | Non-forced path (squash-safe OID race guard) | n/a (no force audit) |
+| False | No | * | Non-forced path | n/a (no force audit) |
+
+Additional pre-gates (evaluated before the matrix above):
+
+| Condition | Outcome | Audit action |
+|-----------|---------|--------------|
+| Branch OID unpinnable | **Refuse** | `refused_unpinnable` |
+| Cached MERGED but fresh verification fails | **Refuse** | `refused_stale_merged` |
+| Fresh-MERGED but branch OID not contained in PR head | **Refuse** | `refused_uncontained_fresh_head` |
+| Target is the live gateway worktree | **Refuse** | (live-worktree guard) |
+| Worktree inside another worktree (containment) | **Refuse** | `refused_containment` |
+
+**Invariant:** `git worktree remove --force` is unreachable from any code path.
+Both clean-removal branches (unmerged and merged) set `force_use_git_force = False`
+explicitly, and every non-clean state is a hard refusal. A late dirty edit in the
+check-to-removal window is caught by git's own atomic dirty check (exit code != 0),
+surfaced as `refused_dirty_at_removal`.

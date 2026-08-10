@@ -58,6 +58,31 @@ try:
 except ImportError:  # pragma: no cover - standalone fallback
     redact_credentials = redact_exfiltration_urls = None  # type: ignore
 
+# Every loopback call below carries X-Internal-Secret, and urlopen honours
+# HTTP_PROXY for loopback addresses, so a proxied environment would send the
+# secret to the proxy in cleartext. The fallback must therefore stay
+# proxy-disabled too -- degrading to a bare urlopen would leave the standalone
+# path (`python3 sage_lib/review_driver.py`) carrying the leak this closes.
+#
+# It must ALSO refuse redirects, for the same reason the real helper does. An
+# earlier version of this fallback omitted that on the grounds that "these
+# endpoints never return a redirect" -- wrong for `_probe`, whose entire job is
+# to dial candidate ports that may have something other than our gateway
+# listening. A 302 from one of those would replay the secret to whatever host
+# Location names.
+try:
+    from kiro_crew.loopback_http import loopback_urlopen  # type: ignore
+except ImportError:  # pragma: no cover - standalone fallback
+
+    class _FallbackNoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    def loopback_urlopen(req: urllib.request.Request | str, timeout: float):  # type: ignore
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _FallbackNoRedirect()
+        ).open(req, timeout=timeout)
+
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:  # allow `python3 sage_lib/review_driver.py` (run as script)
     sys.path.insert(0, _APP_ROOT)
@@ -102,7 +127,7 @@ def _api_request(method: str, path: str, body: dict | None = None, timeout: int 
         headers["Content-Type"] = "application/json"
     try:
         req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with loopback_urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else {}
     except Exception as e:
@@ -175,8 +200,8 @@ def _cid(link: str) -> str:
     file); otherwise a sanitized fallback (never a raw URL, which is not a valid
     filename)."""
     try:
-        owner, repo, number = pipeline.adapters.github_pr_parts(link)
-        return pipeline.adapters.github_change_id(owner, repo, number)
+        host, owner, repo, number = pipeline.adapters.github_pr_ref(link)
+        return pipeline.adapters.github_change_id(owner, repo, number, host=host)
     except pipeline.adapters.AdapterParseError:
         return results.safe_change_id(link)
 
@@ -202,19 +227,48 @@ def reviewed_key_for(link: str) -> str:
     the sanitized change-id for a non-PR link (defensive; repo-review only ever
     feeds real PR URLs from ``list_open_prs``)."""
     try:
-        owner, repo, number = pipeline.adapters.github_pr_parts(link)
-        return pipeline.adapters.github_review_key(owner, repo, number)
+        host, owner, repo, number = pipeline.adapters.github_pr_ref(link)
+        return pipeline.adapters.github_review_key(owner, repo, number, host=host)
     except pipeline.adapters.AdapterParseError:
         return results.safe_change_id(link)
 
 
+def _confirmed_host(link: str) -> str:
+    """The link's validated GitHub host, or ``""`` for a bare legacy change
+    token that names no host at all.
+
+    FAILS CLOSED: raises ``AdapterError`` when the link NAMES a host that does
+    not (re)validate against ``allowed_hosts()`` — e.g. a GitHub Enterprise
+    host removed from ``github_hosts`` between run start and prompt build, or
+    an unreadable config. Producing a prompt for such a link would let its
+    ``gh api`` calls default to PUBLIC github.com and cross GitHub instances
+    (fetching from — or posting an internal enterprise draft onto — a public
+    same-slug PR). A token that names no host (``CR-1``) has no instance to
+    cross to, so it keeps the legacy default-instructions path: ``""`` here
+    means "no host named", never "failed to resolve" — those two cases are
+    deliberately NOT allowed to look identical."""
+    try:
+        return pipeline.adapters.github_pr_ref(link)[0]
+    except pipeline.adapters.AdapterError:
+        if pipeline.adapters.link_names_a_host(link):
+            raise
+        return ""
+
+
 def _fetch_instruction(link: str) -> str:
-    """Platform-aware FETCH instruction for the gate/deep prompts (GitHub only)."""
+    """Platform-aware FETCH instruction for the gate/deep prompts (GitHub only),
+    carrying the link's confirmed host so the worker pulls the PR from ITS
+    instance's API. Fails closed via ``_confirmed_host`` — no prompt is built
+    for a link whose host cannot be revalidated."""
+    host = _confirmed_host(link)
     try:
         platform = pipeline.adapters.detect_platform(link)
-    except Exception:  # pragma: no cover - defensive (empty/odd link)
+    except Exception:  # a bare legacy token -> default GitHub instructions
         platform = "github"
-    return pipeline.fetch_spec(platform)
+    # An empty host means the token named NO host at all (legacy "CR-1" ids):
+    # those keep the CLI-default flow. A link that NAMES a host — including
+    # github.com — gets it pinned explicitly by fetch_spec.
+    return pipeline.fetch_spec(platform, host=host)
 
 
 def build_consolidation_task(namespace: str, live_path: str, candidate_path: str,
@@ -318,12 +372,18 @@ def build_review_task(change_link: str) -> str:
         "  7. RECORD ONLY — do NOT post any comments. Write data/results/<id>.json: "
         "phase1 (gate_verdict, design_risk, criticality, design_headline, problem, "
         "why_it_matters, solution_assessment) + blast_radius; `findings` (each with "
-        "file, line, severity 🔴/🟡, dimension, observation, consequence, suggestion, "
-        "snippet, lang); `counts` {red,yellow}; `ship_summary` (ONE straightforward "
+        "file, line, severity 🔴/🟡, dimension, headline, observation, consequence, "
+        "suggestion, snippet, lang); `counts` {red,yellow}; `ship_summary` (ONE straightforward "
         "line: good-to-ship + reason when there are no 🔴, or not-ready + the "
         "must-fix/design reason otherwise); `files_covered`; `coverage_complete`; "
         "deep_reviewed=true. The driver builds the redacted bodies and a separate "
         "poster publishes them — you MUST NOT call any comment tool.\n"
+        "     `headline` is the finding's CONCLUSION in ONE sentence under about 100 "
+        "characters: what is actually wrong, stated directly. It is the only line a "
+        "reader is guaranteed to see, so it must stand alone — no hedging, no leading "
+        "severity word, no file path or line number (those are separate fields), and "
+        "not merely the first sentence of `observation` restated. `observation` then "
+        "carries the evidence, `consequence` the chain of harm, `suggestion` the fix.\n"
         "  8. If this change is itself a FIX (is_fix), run INLINE miss-analysis "
         "(learn-from-sage): trace the introducing change, ask which dimension was "
         "blind, and STAGE the learning "
@@ -356,7 +416,11 @@ def build_review_followup_task(change_link: str) -> str:
         "severity (🔴/🟡, drop nice-to-haves) and the description<->diff fidelity + "
         "security threat-chain checks.\n"
         "  5. RECORD ONLY — APPEND only NET-NEW findings (do NOT repeat, reword, or "
-        "remove any already-recorded finding); recompute `counts` {red,yellow} over "
+        "remove any already-recorded finding); each carries the SAME fields as the "
+        "first pass (file, line, severity, dimension, headline, observation, "
+        "consequence, suggestion, snippet, lang), where `headline` is the finding's "
+        "conclusion in ONE sentence under about 100 characters; recompute `counts` "
+        "{red,yellow} over "
         "the FULL list; refresh `ship_summary`; extend `files_covered` to include "
         "every changed file and set `coverage_complete=true`; keep deep_reviewed=true "
         "and PRESERVE the phase1 block. You MUST NOT call any comment tool.\n"
@@ -377,6 +441,22 @@ def build_post_task(change_link: str) -> str:
         "and already redacted in Python — post each one VERBATIM. Do NOT compose, edit, "
         "summarize, truncate, translate, or add to any body.\n"
     )
+    # FAIL CLOSED on host resolution — the host decides which GitHub instance
+    # every `gh api` call in this prompt targets. `_confirmed_host` raises when
+    # the link names a host that no longer revalidates (a GHE host removed from
+    # `github_hosts` mid-run, an unreadable config); producing a prompt then
+    # would let every call default to PUBLIC github.com and post an internal
+    # enterprise draft onto a public same-slug PR. The raise is converted to a
+    # per-change post failure by `post_recorded`. An empty host means the token
+    # named NO host at all (legacy "CR-1" ids) — never a failed resolution.
+    host = _confirmed_host(change_link)
+    if host:
+        # ALWAYS name the host — including github.com — so the poster's gh
+        # calls can never drift to the CLI's configured default instance.
+        _preamble += (
+            f"This PR lives on the GitHub host `{host}`: add "
+            f"`--hostname {host}` to EVERY `gh api` call below.\n"
+        )
     # GitHub's draft is a PENDING review: ONE API call carrying all inline
     # comments + a body, created WITHOUT an `event` key so it is NOT submitted.
     # The envelope is pre-built + redacted in Python (`github_review_payload`);
@@ -447,11 +527,15 @@ def _candidate_ports() -> list[int]:
 
 def _probe(base: str, secret: str) -> bool:
     """True if a KiroCrew gateway is listening at base (any HTTP response, incl.
-    401/404, means it's there; only connection errors mean it isn't)."""
+    401/404, means it's there; only connection errors mean it isn't).
+
+    Proxy-disabled deliberately: ``_gateway_base`` calls this once per candidate
+    port, so a cold resolve that misses sends the secret up to len(candidates)
+    times -- this is the highest-multiplicity secret-bearing send in the app."""
     try:
         req = urllib.request.Request(base + "/api/spawn",
                                      headers={"X-Internal-Secret": secret} if secret else {})
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with loopback_urlopen(req, timeout=3) as resp:
             return resp.status < 500
     except urllib.error.HTTPError:
         return True   # a gateway responded (e.g. 401/404) — it's the right port
@@ -616,7 +700,22 @@ def post_recorded(change_id: str, link: str, *, dispatch, root: Path | None = No
         return {"post_ok": False, "post_error": staged, "posted_comments": 0,
                 "design_comment_posted": False, "pending": len(pending),
                 "expected_units": 0, "posted_keys": list(already)}
-    spawn = dispatch(build_post_task(link), timeout)
+    # The prompt builder FAILS CLOSED when the link's host no longer revalidates
+    # (see build_post_task): a prompt built with an unconfirmed host would let
+    # its `gh api` calls default to public github.com and land this draft on a
+    # public same-slug PR. Surface that as a per-change post failure — the
+    # record stays on disk for a retry once the host is configured again.
+    try:
+        post_prompt = build_post_task(link)
+    except pipeline.adapters.AdapterError as exc:
+        refused = f"refusing to post: {exc}"
+        cur["post_ok"] = False
+        cur["post_error"] = refused
+        results.write_result(cur, root, run_id)
+        return {"post_ok": False, "post_error": refused, "posted_comments": 0,
+                "design_comment_posted": False, "pending": len(pending),
+                "expected_units": 0, "posted_keys": list(already)}
+    spawn = dispatch(post_prompt, timeout)
     results.adopt_from_shared(change_id, root, run_id)
     after = results.read_result(change_id, root, run_id) or {}
     ok = bool(spawn.get("ok", False))
@@ -760,7 +859,7 @@ def _draft_confirmed(link: str, payload: dict) -> str:
     if not expected_commit:
         return ""
     try:
-        owner, repo, number = adapters.github_pr_parts(link)
+        host, owner, repo, number = adapters.github_pr_ref(link)
     except Exception:
         return ""        # not a GitHub pull request URL -> nothing to confirm
     try:
@@ -770,7 +869,8 @@ def _draft_confirmed(link: str, payload: dict) -> str:
             # when no jq is given, so page two onward makes the document invalid.
             # `.[]` streams the elements as JSONL instead. A parse failure here reads
             # as "unproven", so a busy pull request would silently never confirm.
-            f"repos/{owner}/{repo}/pulls/{number}/reviews", jq=".[]", paginate=True)
+            f"repos/{owner}/{repo}/pulls/{number}/reviews", jq=".[]", paginate=True,
+            host=host)
     except Exception:
         return ""        # gh unavailable / not authorized / timeout -> unproven
     for rev in reviews:
@@ -788,7 +888,7 @@ def _draft_confirmed(link: str, payload: dict) -> str:
         try:
             comments = discovery.run_gh_json(
                 f"repos/{owner}/{repo}/pulls/{number}/reviews/{rid}/comments",
-                jq=".[]", paginate=True)
+                jq=".[]", paginate=True, host=host)
         except Exception:
             return ""
         want = sorted(
@@ -941,12 +1041,31 @@ def run_review(changes: list[str], *, dispatch=None, archiver=_default_archiver,
         # beforehand is a leftover or another worker's plant, and adopting it would put
         # someone else's findings on this pull request. If the slot cannot be cleared, skip
         # adoption rather than trust it.
+        # Build the prompt BEFORE staking the shared slot: the builder FAILS
+        # CLOSED (raises) when the link's host no longer revalidates against
+        # `allowed_hosts()`, and a fetch instruction with an unconfirmed host
+        # would route the worker at public github.com — reviewing (and later
+        # posting about) a same-slug public PR instead of the intended one.
+        try:
+            review_prompt = build_review_task(link)
+        except pipeline.adapters.AdapterError as exc:
+            refused = f"refusing to review: {exc}"
+            progress(change_id, "failed", {"error": refused})
+            return {
+                "change": link, "change_id": change_id,
+                "gate_spawn_ok": False, "gate_error": refused,
+                "gate_verdict": "UNKNOWN", "phase2_ran": False,
+                "deep_spawn_ok": False, "deep_error": refused,
+                "deep_reviewed": False, "result_recorded": False,
+                "design_block": False, "deep_rounds": 0,
+                "skipped_reason": "review_failed",
+            }
         slot_clear = results.stake_shared(change_id, root)
         if _accepts_activity(dispatch):
-            review_spawn = dispatch(build_review_task(link), timeout,
+            review_spawn = dispatch(review_prompt, timeout,
                                     on_activity=report)
         else:
-            review_spawn = dispatch(build_review_task(link), timeout)
+            review_spawn = dispatch(review_prompt, timeout)
         # The worker writes the shared data/results/<id>.json its prompt names;
         # move it into this run's private dir before reading. Without this the
         # run's dir stays empty and a completed review reports no findings.
@@ -996,8 +1115,15 @@ def run_review(changes: list[str], *, dispatch=None, archiver=_default_archiver,
             # failed publish means the record there is not ours, and the follow-up
             # would adopt whatever replaced it -- skip the turn instead.
             published = results.publish_to_shared(change_id, root, run_id)
-            followup = (dispatch(build_review_followup_task(link), timeout)
-                        if published or not run_id else {"ok": False})
+            # Same fail-closed contract as the first pass: no confirmed host, no
+            # follow-up turn. A failed follow-up keeps the first pass's record.
+            try:
+                followup_prompt: str | None = build_review_followup_task(link)
+            except pipeline.adapters.AdapterError:
+                followup_prompt = None
+            followup = (dispatch(followup_prompt, timeout)
+                        if followup_prompt and (published or not run_id)
+                        else {"ok": False})
             if followup.get("ok", False):
                 results.adopt_from_shared(change_id, root, run_id)
                 rev_rec = results.read_result(change_id, root, run_id) or rev_rec

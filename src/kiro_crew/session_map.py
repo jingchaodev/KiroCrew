@@ -1,7 +1,8 @@
 """Persistent session-to-kiro-cli mapping.
 
 Stores ``session_map.json`` mapping session keys to kiro-cli session IDs,
-with Slack thread linkage for bidirectional sync.
+with channel thread linkage (Slack legacy fields; other channels use the
+generic ChannelLink mirror map) for bidirectional sync.
 """
 
 from __future__ import annotations
@@ -38,11 +39,33 @@ def _kiro_sessions_dir() -> Path:
     return _KIRO_SESSIONS_DIR if _KIRO_SESSIONS_DIR is not None else kiro_sessions_dir()
 
 
+class ConversationOwnershipConflict(RuntimeError):
+    """Raised when a second session tries to bind a conversation already held.
+
+    One conversation belongs to at most one session. That is not a policy
+    preference — it is what makes an inbound reply routable at all. The inbound
+    resolver (``find_mirror_sessions(link, inbound_only=True)`` behind
+    ``DiscordSessionResume.resumed_session``) refuses to choose between two
+    candidates and returns ``None``, and "no owner" and "two owners" land on the
+    same ``None``. So a duplicate binding does not send the reply to the wrong
+    session, it sends it to NO session: the message silently starts a fresh
+    conversation, which is the very bug an inbound binding exists to prevent.
+
+    Enforced on the WRITER, deliberately. Readers stay permissive and keep
+    reporting every owner they find, so a map written before this check existed
+    still makes the resolver fail closed and still lets in-channel conflict
+    detection see the duplicate. Callers translate this into their own surface's
+    refusal — an HTTP 409, or the channel's own "run `!unlink` first" — never a
+    500 or a generic failure, which would send the user off to retry a command
+    that is working exactly as intended.
+    """
+
+
 class SessionMap:
     """Persistent mapping of session_key → kiro-cli session ID.
 
     Stored as ``~/.kiro/crew/session_map.json``. Atomic write via tmp+rename.
-    Only used for long-lived conversational sessions (Slack DM, dashboard).
+    Only used for long-lived conversational sessions (channel DMs, dashboard).
     Stateless sessions (cron, subagent, taskrunner) are excluded.
 
     Each entry is a dict with keys: ``sid``, ``slack_thread_ts``, ``slack_channel_id``.
@@ -202,7 +225,7 @@ class SessionMap:
         # Fallback: dashboard history round-trip (dashboard:dashboard_X → dashboard:X)
         matched_key = key
         if not entry and key.startswith("dashboard:dashboard_"):
-            canonical = "dashboard:" + key[len("dashboard:dashboard_"):]
+            canonical = "dashboard:" + key[len("dashboard:dashboard_") :]
             entry = self._data.get(canonical)
             if entry:
                 matched_key = canonical
@@ -272,13 +295,24 @@ class SessionMap:
     def clear_sid(self, key: str) -> None:
         """Clear the stored session ID without removing the entry.
 
-        Used on provider switch: the SID is incompatible with the new
-        provider, but we keep the entry so Slack link and CWD persist.
+        Used on provider switch (the SID is incompatible with the new
+        provider) and by the poisoned-conversation discard. The cleared sid
+        is stashed as ``discarded_sid`` so the operation is diagnosable and
+        manually reversible — the native conversation still exists on disk;
+        only the pointer to it is dropped.
         """
         entry = self._data.get(canonical_key(key))
         if entry and entry.get("sid"):
+            entry["discarded_sid"] = entry["sid"]
             entry["sid"] = ""
             self._save()
+
+    def get_discarded_sid(self, key: str) -> str:
+        """Return the last sid dropped by :meth:`clear_sid`, or ''."""
+        entry = self._data.get(canonical_key(key))
+        if not entry:
+            return ""
+        return entry.get("discarded_sid", "")
 
     def delete(self, key: str) -> None:
         """Remove mapping and persist."""
@@ -307,6 +341,22 @@ class SessionMap:
             self._save()
             logger.info("Pruned %d stale session map entries", len(stale))
         return len(stale)
+
+    def mapped_sids_by_key(self) -> dict[str, str]:
+        """Session key to kiro-cli session ID, for every entry that has one.
+
+        A session ID present here is one Kiro Crew can still resume. Callers that
+        account for or reclaim disk space need both halves of this relation: the
+        IDs to exclude from deletion, and the key each ID belongs to so a
+        session's transcript can be paired with its replay log. Returning the
+        mapping rather than only the ID set is what lets such a caller reclaim a
+        session whole instead of leaving one half behind.
+        """
+        return {
+            key: sid
+            for key, entry in self._data.items()
+            if isinstance(sid := entry.get("sid"), str) and sid
+        }
 
     def set_slack_link(self, key: str, thread_ts: str, channel_id: str | None) -> None:
         """Link a session to a Slack thread. Creates entry if needed."""
@@ -389,6 +439,13 @@ class SessionMap:
         messages arriving from that exact channel location may be routed back to
         *key*. Ordinary dashboard mirrors remain outbound-only. Slack keeps its
         dedicated reverse index and therefore ignores this flag.
+
+        Raises :class:`ConversationOwnershipConflict` when another session already
+        holds this exact location AND the conversation is inbound-committed —
+        either this claim is inbound-capable, or an occupant already is. See
+        :meth:`mirror_claim_blockers`: exclusivity exists to keep inbound routing
+        unambiguous, so it is scoped to that, and two outbound-only mirrors on one
+        conversation stay as permitted as they were before this rule.
         """
         if link is None:
             self.clear_mirror_link(key)
@@ -397,6 +454,12 @@ class SessionMap:
             self.set_slack_link(key, link.thread_id or "", link.channel_id)
             return
         key = canonical_key(key)
+        rivals = self.mirror_claim_blockers(key, link, accepts_inbound=accepts_inbound)
+        if rivals:
+            raise ConversationOwnershipConflict(
+                f"{link.channel_type} conversation is already held by "
+                f"{len(rivals)} other session(s)"
+            )
         entry = self._ensure_entry(key)
         entry["mirror"] = link.to_dict()
         if accepts_inbound:
@@ -404,6 +467,71 @@ class SessionMap:
         else:
             entry.pop("mirror_accepts_inbound", None)
         self._save()
+
+    def mirror_claim_blockers(
+        self,
+        key: str,
+        link: ChannelLink,
+        *,
+        accepts_inbound: bool = False,
+    ) -> list[str]:
+        """Sessions that must stop *key* from binding *link*, or ``[]`` if it is free.
+
+        The single definition of "this conversation is taken", shared by the
+        atomic check inside :meth:`set_mirror_link` and by the dashboard
+        endpoint's precheck. They must ask the same question with the same
+        arguments: a backstop whose idea of "occupied" differs from the precheck
+        it backs looks like coverage while diverging from it in exactly the cases
+        that matter.
+
+        Exclusivity is owed to INBOUND routing, so it is scoped to it. A
+        conversation is exclusive when it is inbound-committed — either this claim
+        is inbound-capable, or an existing occupant already is. That is precisely
+        when a second binding does harm: the inbound resolver refuses to choose
+        between two candidates and returns ``None``, and "no owner" and "two
+        owners" are the same ``None`` to it, so the reply silently starts a fresh
+        session instead of resuming.
+
+        Two outbound-only mirrors on one conversation are left alone. They are
+        merely noisy — both write out, nobody reads back — and refusing them
+        would reach transports that cannot resume at all, whose in-channel link
+        handlers do not translate this refusal because they can never provoke it.
+
+        The occupancy scan itself is UNFILTERED once the conversation is
+        inbound-committed: an outbound-only occupant counts. Narrowing that too
+        would let an in-channel ``!link`` land a second binding on a conversation
+        the dashboard is resuming through, which is the collision that strands the
+        reply.
+
+        A rebind by the SAME session is not a rivalry, and three spellings can all
+        mean "me": the canonical key, the row the binding actually lives on today
+        (a pre-unification ``dashboard:`` row, which only ``_mirror_key`` can
+        identify), and any other spelling that canonicalizes to this key. Deriving
+        the legacy name unconditionally instead of asking ``_mirror_key`` would
+        excuse a row that is NOT this session's binding, letting a genuine
+        duplicate persist.
+
+        CONTRACT FOR A NEW TRANSPORT: declaring
+        ``TransportCapabilities.supports_session_resume`` makes its conversations
+        inbound-committable, and therefore makes this refusal reachable from that
+        transport's own in-channel link handler. Translate it there into a
+        followable message, as ``discord/transport_dispatch.py`` does — an uncaught
+        raise inside a channel handler is a dropped task and a silent no-reply.
+        """
+        key = canonical_key(key)
+        selves = {key, self._mirror_key(key)}
+        rivals = [
+            other
+            for other in self.find_mirror_sessions(link)
+            if other not in selves and canonical_key(other) != key
+        ]
+        if not rivals:
+            return []
+        if accepts_inbound or any(
+            (self._data.get(other) or {}).get("mirror_accepts_inbound") for other in rivals
+        ):
+            return rivals
+        return []
 
     def _mirror_key(self, key: str) -> str:
         """The key a session's mirror binding is actually stored under.
@@ -556,7 +684,7 @@ class SessionMap:
         prefix = f"{bucket}:gen"
         for key in self._data:
             if key.startswith(prefix):
-                suffix = key[len(prefix):]
+                suffix = key[len(prefix) :]
                 if suffix.isdigit():
                     best = max(best, int(suffix))
         return best

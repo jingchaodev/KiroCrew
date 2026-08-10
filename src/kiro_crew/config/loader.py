@@ -480,6 +480,26 @@ def computer_use_state_path() -> Path:
     return config_dir() / "computer_use.json"
 
 
+def oauth_endpoints_path() -> Path:
+    """Return path to oauth_endpoints.json — the operator OAuth-endpoint extension.
+
+    Same KEYSTONE reasoning as :func:`denied_commands_path` and
+    :func:`computer_use_state_path`, and the leaf is on
+    ``security._CREW_SECRET_LEAVES`` for the same reason: each listed endpoint
+    widens the banner-only OAuth entropy carve-out (``security.py``'s
+    ``_OAUTH_AUTHORIZATION_ENDPOINTS``), so an agent that could write this file
+    could exempt an attacker-controlled host from the exfiltration heuristics —
+    it is a trust boundary, not a preference. ``is_sensitive_path`` blocks the
+    tool path and ``is_sensitive_bash_command`` blocks the shell forms.
+
+    Holds ``{"additional_authorization_endpoints": [{"host": …, "path": …}]}``;
+    every read fails soft to an EMPTY extension set (see
+    ``security._load_operator_oauth_endpoints``). There is no dashboard writer:
+    the operator hand-edits the file out-of-band. Respects ``KIROCREW_HOME``.
+    """
+    return config_dir() / "oauth_endpoints.json"
+
+
 def read_local_secret() -> str:
     """Read ``<config_dir>/.local_secret`` (the gateway IPC secret), or ``""``.
 
@@ -1051,6 +1071,18 @@ class AgentConfig:
             "clamped, because the transport bounds the turn first.",
         ),
     )
+    tool_approval_timeout_secs: int = field(
+        default=600,
+        metadata=_meta(
+            "Tool Approval Timeout (secs)",
+            "How long a chat turn waits for a human to answer a tool-approval "
+            "prompt before declining it and telling the user to resend. Kept "
+            "well below the chat-turn ceiling on purpose: a window at or above "
+            "it can never fire, so an unattended turn burns the whole ceiling "
+            "and is then misreported as a turn timeout. Clamped to 30s..7200s, "
+            "and additionally to 60s below the turn ceiling at load time.",
+        ),
+    )
     subagent_cost_gb: float = field(
         default=0.5,
         metadata=_meta(
@@ -1252,6 +1284,16 @@ class SessionConfig:
         metadata=_meta(
             "Warm Pool TTL",
             "Max age in seconds for pooled processes. Stale processes are discarded at claim time. 0 disables.",
+        ),
+    )
+    eager_spawn: bool = field(
+        default=True,
+        metadata=_meta(
+            "Eager Session Spawn",
+            "Speculatively create a chat slot's session when the slot is created, "
+            "its agent is switched, or its project directory changes, instead of "
+            "on first message. Hides the multi-second session handshake behind "
+            "user think-time.",
         ),
     )
     archive_retention_days: int = field(
@@ -1509,14 +1551,16 @@ class KnowledgeConfig:
     """
 
     auto_ingest_artifacts: bool = field(
-        default=True,
+        default=False,
         metadata=_meta(
             "Auto-Ingest Artifacts",
             "Automatically ingest content-bearing local artifacts (markdown/text "
             "documents you save and iterate) into the Knowledge Library so they "
             "become searchable, keep them in sync as the artifact changes, and "
             "remove them from the Library when the artifact is deleted. They "
-            "appear as a single aggregate 'Artifacts' source. On by default.",
+            "appear as a single aggregate 'Artifacts' source. Off by default: "
+            "every ingested chunk costs an LLM extraction call, so a library "
+            "grows and spends only once you ask for it.",
         ),
     )
     auto_ingest_artifact_kinds: list[str] = field(
@@ -1569,7 +1613,7 @@ class KnowledgeConfig:
         ),
     )
     auto_add_documents: bool = field(
-        default=True,
+        default=False,
         metadata=_meta(
             "Auto-Add Documents",
             "Let the agent add documents it comes across during normal work to the "
@@ -1577,12 +1621,13 @@ class KnowledgeConfig:
             "document with its own tools, under your approval, and hands over the "
             "text -- Kiro Crew fetches nothing itself, so the doc-ingest host "
             "allowlist below does not apply. Added documents appear in a single "
-            "aggregate 'Auto-added' source you can remove in one click. On by "
-            "default. Renamed from auto_ingest_doc_links, which is still accepted.",
+            "aggregate 'Auto-added' source you can remove in one click. Off by "
+            "default: the Library should only hold what you asked it to hold. "
+            "Renamed from auto_ingest_doc_links, which is still accepted.",
         ),
     )
     auto_register_project_docs: bool = field(
-        default=True,
+        default=False,
         metadata=_meta(
             "Auto-Register Project Documents",
             "Register the documents of each project you work in as a Knowledge "
@@ -1590,9 +1635,11 @@ class KnowledgeConfig:
             "become searchable without adding the folder by hand. Only documents "
             "are taken (.md/.pdf/.docx/.org above a small size floor, excluding "
             "agent instructions, generated files and repository boilerplate) -- "
-            "never source code. No confirmation step: the document filter and the "
-            "per-sweep chunk budget below bound the cost, and deleting the source "
-            "keeps it deleted. On by default.",
+            "never source code. There is no confirmation step once enabled: the "
+            "document filter and the per-sweep chunk budget below bound the cost, "
+            "and deleting the source keeps it deleted. Off by default, because "
+            "registering a repository is a decision to spend extraction calls on "
+            "it -- turning this on opts in every project you open.",
         ),
     )
     auto_ingest_chunk_budget: int = field(
@@ -1679,11 +1726,14 @@ def _read_auto_add_documents(knowledge_data: dict) -> bool:
     value carries over instead of silently reverting to the default on upgrade.
     Canonical spelling is ``auto_add_documents``, which is what ``save()`` writes,
     so a save/load round-trip settles on it.
+
+    Absent both keys the feature is OFF: auto-ingest is opt-in, so a config that
+    never mentioned it must not start adding documents.
     """
     for key in ("auto_add_documents", "auto_ingest_doc_links"):
         if key in knowledge_data:
             return bool(knowledge_data.get(key))
-    return True
+    return False
 
 
 @dataclass
@@ -2217,6 +2267,18 @@ class DashboardConfig:
             "reach that host, including hosts only resolvable on your network.",
         ),
     )
+    jira_hosts: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Self-Hosted Jira Hosts",
+            "Exact hostnames (optionally host:port) of self-managed Jira or "
+            "Jira Data Center instances whose issue URLs the Issues panel may "
+            "recognize. Atlassian Cloud instances (*.atlassian.net) are always "
+            "accepted without listing. Empty = Cloud-only (deny-by-default): a "
+            "Jira issue URL is only recognized if its host matches an entry "
+            "here. Suffixes and wildcards are not matched.",
+        ),
+    )
 
 
 @dataclass
@@ -2258,6 +2320,15 @@ class KiroCrewAgentConfig:
     source: str = field(
         default="kirocrew",
         metadata=_meta("Source", "Agent origin: kirocrew or builtin."),
+    )
+    telegram_account: str = field(
+        default="",
+        metadata=_meta(
+            "Telegram Account",
+            "Bind this agent to a named Telegram account from "
+            "telegram.accounts. Messages received by that bot are routed to "
+            "this agent. Empty means no binding (uses default agent routing).",
+        ),
     )
 
 
@@ -2670,6 +2741,28 @@ POOL_SIZE_MAX = 10  # session.pool_size — pre-warmed process pool
 CHAT_TURN_TIMEOUT_MIN = 300
 CHAT_TURN_TIMEOUT_MAX = 7200
 
+# agent.tool_approval_timeout_secs — how long a chat turn parks waiting for a
+# human to answer a tool-approval prompt. The floor keeps the window long enough
+# for a human who is actually present to reach the dashboard; the ceiling is the
+# turn ceiling, but the binding limit is the cross-field clamp in
+# ``_clamp_security_bounds``, which pulls the window APPROVAL_TURN_MARGIN_SECS
+# under the configured turn ceiling.
+TOOL_APPROVAL_TIMEOUT_MIN = 30
+TOOL_APPROVAL_TIMEOUT_MAX = CHAT_TURN_TIMEOUT_MAX
+
+# The turn ceiling assumed when config omits ``agent.chat_turn_timeout_secs``.
+# Read from the dataclass default so the two cannot drift apart.
+_DEFAULT_CHAT_TURN_TIMEOUT_SECS = int(
+    AgentConfig.__dataclass_fields__["chat_turn_timeout_secs"].default  # type: ignore[arg-type]
+)
+
+# Minimum slack between the approval window and the turn ceiling. Two things
+# need it: the approval deadline must land inside the turn so its own "nobody
+# approved, resend" card renders instead of the generic turn-timeout card, and a
+# late approval must leave the turn some time to actually run the tool. A window
+# flush against the ceiling satisfies neither.
+APPROVAL_TURN_MARGIN_SECS = 60
+
 # dashboard.loop_stall_exit_after_secs — event-loop silence tolerated before the
 # gateway dumps all thread stacks and hard-exits for systemd to restart. The
 # floor keeps a stall from being declared faster than ordinary GC/IO pauses; the
@@ -2700,11 +2793,12 @@ _SECURITY_BOUNDED_FIELDS: tuple[tuple[str, str, int, int], ...] = (
     ("agent", "subagent_max_turns", 1, SUBAGENT_MAX_TURNS_CEILING),
     ("agent", "chat_turn_timeout_secs", CHAT_TURN_TIMEOUT_MIN, CHAT_TURN_TIMEOUT_MAX),
     (
-        "dashboard",
-        "loop_stall_exit_after_secs",
-        LOOP_STALL_EXIT_AFTER_MIN,
-        LOOP_STALL_EXIT_AFTER_MAX,
+        "agent",
+        "tool_approval_timeout_secs",
+        TOOL_APPROVAL_TIMEOUT_MIN,
+        TOOL_APPROVAL_TIMEOUT_MAX,
     ),
+    ("dashboard", "loop_stall_exit_after_secs", LOOP_STALL_EXIT_AFTER_MIN, LOOP_STALL_EXIT_AFTER_MAX),
     ("session", "pool_size", 0, POOL_SIZE_MAX),
 )
 
@@ -2808,6 +2902,39 @@ def _clamp_security_bounds(data: dict) -> None:
                 MAX_SUBAGENTS_FIXED_FLOOR,
                 MAX_SUBAGENTS_FIXED_FLOOR,
                 SUBAGENT_AUTO_MAX_CEILING,
+            )
+
+    # tool_approval_timeout_secs cross-field case: the approval window must end
+    # inside the turn that opened it. At or above the turn ceiling it can never
+    # fire — the turn is cut first, so the user is told "this turn timed out"
+    # while the real cause (nobody answered the approval prompt) is never named,
+    # and an unattended run burns the entire ceiling on every prompt. Clamp to
+    # APPROVAL_TURN_MARGIN_SECS below the ceiling. Runs after the generic range
+    # clamp above, so both operands are already inside their declared bounds.
+    if isinstance(agent, dict):
+        window = agent.get("tool_approval_timeout_secs")
+        ceiling = agent.get("chat_turn_timeout_secs", _DEFAULT_CHAT_TURN_TIMEOUT_SECS)
+        if not isinstance(ceiling, int) or isinstance(ceiling, bool):
+            ceiling = _DEFAULT_CHAT_TURN_TIMEOUT_SECS
+        budget = max(TOOL_APPROVAL_TIMEOUT_MIN, ceiling - APPROVAL_TURN_MARGIN_SECS)
+        if isinstance(window, int) and not isinstance(window, bool) and window > budget:
+            agent["tool_approval_timeout_secs"] = budget
+            logger.warning(
+                "config agent.tool_approval_timeout_secs=%d leaves less than %ds "
+                "under the %ds turn ceiling; clamped to %d. A window that outlives "
+                "the turn can never fire: the turn is cut first and reports itself "
+                "as a turn timeout, hiding the unanswered approval.",
+                window,
+                APPROVAL_TURN_MARGIN_SECS,
+                ceiling,
+                budget,
+            )
+            _log_config_clamp_event(
+                "agent.tool_approval_timeout_secs",
+                window,
+                budget,
+                TOOL_APPROVAL_TIMEOUT_MIN,
+                budget,
             )
 
 
@@ -3257,6 +3384,17 @@ class McpGatewayConfig:
             "Route MCP traffic through the shared sidecar broker. Default False — opt-in.",
         ),
     )
+    apps_enabled: bool = field(
+        default=True,
+        metadata=_meta(
+            "MCP Apps",
+            "Render interactive HTML returned by an MCP server (the MCP Apps "
+            "extension) in chat, and accept callbacks from it. Requires the broker: "
+            "the render and callback paths live inside it, so this grants nothing "
+            "while Enabled is off. Default True — turning it off keeps pooling and "
+            "suppresses only server-authored UI.",
+        ),
+    )
     forward_declared_env: bool = field(
         default=False,
         metadata=_meta(
@@ -3524,24 +3662,28 @@ class WatchdogConfig:
         ),
     )
     tool_stall_suspect_secs: float = field(
-        default=10800.0,
+        default=3600.0,
         metadata=_meta(
             "Tool stall suspect (s)",
             "Idle seconds before an UNKNOWN-verdict in-flight tool is cancelled and "
             "the turn routed to tool-stall recovery (continue-nudge, no re-run of "
             "the original message). WORKING tools (e.g. a matched live build child) "
-            "are never cancelled regardless of duration. Default 3h to accommodate "
-            "long-running builds and MCP tools on macOS where the liveness oracle "
-            "degrades (no /proc) and cannot distinguish live builds from stalls.",
+            "are never cancelled regardless of duration. Default 1h: generous enough "
+            "for long builds and MCP tools on macOS, where the liveness oracle "
+            "degrades (no /proc) and cannot distinguish a live build from a stall, "
+            "while still landing inside the turn's own ceiling "
+            "(agent.chat_turn_timeout_secs) so recovery is reachable. A window at or "
+            "past that ceiling is clamped at load with a warning.",
         ),
     )
     tool_stall_hard_cap_secs: float = field(
-        default=10800.0,
+        default=3600.0,
         metadata=_meta(
             "Hard cap (s)",
             "Absolute ceiling for UNKNOWN-verdict forbearance (e.g. the extended "
             "probably-thinking window). Applies ONLY to UNKNOWN verdicts — never "
-            "to a WORKING session. Default 3h.",
+            "to a WORKING session. Default 1h, bounded by the turn ceiling like "
+            "the suspect window.",
         ),
     )
     model_silent_probe_secs: float = field(
@@ -3718,6 +3860,39 @@ def _coerce_str_ids(raw: object) -> list[str]:
 _GITLAB_HOST_NAME_RE = _re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 
 
+def _parse_telegram_accounts(raw: object) -> dict[str, "TelegramAccountConfig"]:
+    """Parse the ``telegram.accounts`` map from raw config JSON.
+
+    Each value is a dict with optional keys matching :class:`TelegramAccountConfig`.
+    Invalid entries (non-dict values, missing bot_token) are skipped so a
+    hand-edited config never crashes gateway startup.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, TelegramAccountConfig] = {}
+    for account_id, acct_data in raw.items():
+        if not isinstance(account_id, str) or not isinstance(acct_data, dict):
+            continue
+        # Account IDs become part of the session-key channel namespace
+        # (e.g. "telegram.finance"). Reject any that contain characters the
+        # session-key format reserves (colon, whitespace, dots) or are empty.
+        if not account_id or not account_id.replace("-", "").replace("_", "").isalnum():
+            continue
+        token = str(acct_data.get("bot_token", "")).strip()
+        if not token:
+            continue
+        out[account_id] = TelegramAccountConfig(
+            bot_token=token,
+            allowed_user_ids=_coerce_int_ids(acct_data.get("allowed_user_ids")),
+            allow_forum=_safe_bool(acct_data.get("allow_forum"), False),
+            allowed_forum_chat_ids=_coerce_int_ids(acct_data.get("allowed_forum_chat_ids")),
+            soft_threshold_pct=max(
+                1, min(100, _coerce_int(acct_data.get("soft_threshold_pct"), 80))
+            ),
+        )
+    return out
+
+
 def _coerce_gitlab_hosts(raw: object) -> list[str]:
     """Coerce the self-hosted GitLab allowlist to clean ``host[:port]`` entries.
 
@@ -3780,6 +3955,38 @@ def _coerce_gitlab_hosts(raw: object) -> list[str]:
     return out
 
 
+def _coerce_jira_hosts(raw: object) -> list[str]:
+    """Coerce the self-hosted Jira allowlist — identical rules to GitLab hosts."""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        host = entry.strip().lower()
+        if not host or len(host) > 255:
+            continue
+        name, sep, port_text = host.rpartition(":")
+        if not sep:
+            name, port_text = host, ""
+        name = name.rstrip(".")
+        if not name or not _GITLAB_HOST_NAME_RE.fullmatch(name):
+            continue
+        if sep:
+            if not (port_text.isascii() and port_text.isdigit()):
+                continue
+            port = int(port_text)
+            if not 0 < port < 65536:
+                continue
+            host = name if port == 443 else f"{name}:{port}"
+        else:
+            host = name
+        if host in out:
+            continue
+        out.append(host)
+    return out
+
+
 def _coerce_int(raw: object, default: int) -> int:
     """Return ``int(raw)`` or *default* if *raw* isn't a clean base-10 integer.
 
@@ -3790,6 +3997,58 @@ def _coerce_int(raw: object, default: int) -> int:
         return int(str(raw))
     except (TypeError, ValueError):
         return default
+
+
+@dataclass
+class TelegramAccountConfig:
+    """A single named Telegram bot account within a multi-account gateway.
+
+    Each account has its own bot token and allow-list, enabling one gateway
+    process to serve multiple Telegram bots simultaneously. The account binds
+    to an agent via the agents map (``telegram_account`` field).
+    """
+
+    bot_token: str = field(
+        default="",
+        metadata=_meta(
+            "Bot Token",
+            "Telegram Bot API token for this account.",
+            tags=["telegram"],
+            sensitive=True,
+        ),
+    )
+    allowed_user_ids: list[int] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed User IDs",
+            "Numeric Telegram user IDs permitted to DM this bot account.",
+            tags=["telegram"],
+        ),
+    )
+    allow_forum: bool = field(
+        default=False,
+        metadata=_meta(
+            "Allow Forum Topics",
+            "Serve forum Topics for this account.",
+            tags=["telegram"],
+        ),
+    )
+    allowed_forum_chat_ids: list[int] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed Forum Chat IDs",
+            "Supergroup chat_ids permitted for this account.",
+            tags=["telegram"],
+        ),
+    )
+    soft_threshold_pct: int = field(
+        default=80,
+        metadata=_meta(
+            "Soft Context Threshold %",
+            "Prompt threshold for this account.",
+            tags=["telegram"],
+        ),
+    )
 
 
 @dataclass
@@ -3849,6 +4108,40 @@ class TelegramConfig:
             tags=["telegram"],
         ),
     )
+    accounts: dict[str, TelegramAccountConfig] = field(
+        default_factory=dict,
+        metadata=_meta(
+            "Accounts",
+            "Named Telegram bot accounts for multi-bot operation. Each key is an "
+            "account ID (e.g. 'main', 'finance') mapping to its own bot_token and "
+            "allow-list. When present, takes precedence over the top-level "
+            "bot_token/allowed_user_ids. When absent, the top-level fields are "
+            "treated as a single 'default' account (backward compatible).",
+            tags=["telegram"],
+        ),
+    )
+
+    def resolved_accounts(self) -> dict[str, "TelegramAccountConfig"]:
+        """Return the effective account map.
+
+        If ``accounts`` is populated, return it directly. Otherwise synthesize a
+        single ``"default"`` account from the legacy top-level fields. This
+        provides full backward compatibility: existing single-token configs work
+        unchanged.
+        """
+        if self.accounts:
+            return self.accounts
+        if not self.bot_token:
+            return {}
+        return {
+            "default": TelegramAccountConfig(
+                bot_token=self.bot_token,
+                allowed_user_ids=list(self.allowed_user_ids),
+                allow_forum=self.allow_forum,
+                allowed_forum_chat_ids=list(self.allowed_forum_chat_ids),
+                soft_threshold_pct=self.soft_threshold_pct,
+            )
+        }
 
 
 @dataclass
@@ -4547,6 +4840,7 @@ class KiroCrewConfig:
                         description=entry.get("description", ""),
                         triggers=raw_triggers if isinstance(raw_triggers, str) else "",
                         source=entry.get("source", "kirocrew"),
+                        telegram_account=entry.get("telegram_account", ""),
                     )
 
         # Migrate workspaces from flat or structured format
@@ -4629,6 +4923,12 @@ class KiroCrewConfig:
                     CHAT_TURN_TIMEOUT_MIN,
                     CHAT_TURN_TIMEOUT_MAX,
                 ),
+                tool_approval_timeout_secs=_safe_int(
+                    agent_data.get("tool_approval_timeout_secs", 600),
+                    600,
+                    TOOL_APPROVAL_TIMEOUT_MIN,
+                    TOOL_APPROVAL_TIMEOUT_MAX,
+                ),
                 subagent_cost_gb=_safe_float(agent_data.get("subagent_cost_gb", 0.5), 0.5),
                 subagent_cpu_cost_cores=_safe_float(
                     agent_data.get("subagent_cpu_cost_cores", 1.0), 1.0
@@ -4682,6 +4982,7 @@ class KiroCrewConfig:
                 pool_size=_safe_int(session_data.get("pool_size", 2), 2),
                 pool_agent=str(session_data.get("pool_agent", "")),
                 pool_ttl_secs=_safe_int(session_data.get("pool_ttl_secs", 1800), 1800),
+                eager_spawn=bool(session_data.get("eager_spawn", True)),
                 archive_retention_days=_archive_retention_days(session_data),
                 watchdog_rss_max_mb=_safe_int(session_data.get("watchdog_rss_max_mb", 0), 0),
             ),
@@ -4722,10 +5023,10 @@ class KiroCrewConfig:
                 check_after_secs=_safe_float(watchdog_data.get("check_after_secs", 60.0), 60.0),
                 stale_window_secs=_safe_float(watchdog_data.get("stale_window_secs", 300.0), 300.0),
                 tool_stall_suspect_secs=_safe_float(
-                    watchdog_data.get("tool_stall_suspect_secs", 10800.0), 10800.0
+                    watchdog_data.get("tool_stall_suspect_secs", 3600.0), 3600.0
                 ),
                 tool_stall_hard_cap_secs=_safe_float(
-                    watchdog_data.get("tool_stall_hard_cap_secs", 10800.0), 10800.0
+                    watchdog_data.get("tool_stall_hard_cap_secs", 3600.0), 3600.0
                 ),
                 model_silent_probe_secs=_safe_float(
                     watchdog_data.get("model_silent_probe_secs", 900.0), 900.0
@@ -4766,7 +5067,7 @@ class KiroCrewConfig:
                 migrated=memory_data.get("migrated", False),
             ),
             knowledge=KnowledgeConfig(
-                auto_ingest_artifacts=bool(knowledge_data.get("auto_ingest_artifacts", True)),
+                auto_ingest_artifacts=bool(knowledge_data.get("auto_ingest_artifacts", False)),
                 auto_ingest_artifact_kinds=[
                     k
                     for k in knowledge_data.get(
@@ -4795,8 +5096,7 @@ class KiroCrewConfig:
                 ),
                 auto_add_documents=_read_auto_add_documents(knowledge_data),
                 auto_register_project_docs=bool(
-                    knowledge_data.get("auto_register_project_docs", True)
-                ),
+                    knowledge_data.get("auto_register_project_docs", False)),
                 auto_ingest_chunk_budget=_safe_nonnegative_int(
                     knowledge_data.get("auto_ingest_chunk_budget", 150), 150
                 ),
@@ -4825,6 +5125,7 @@ class KiroCrewConfig:
                 ),
                 allow_forum=bool(telegram_data.get("allow_forum", False)),
                 allowed_forum_chat_ids=_coerce_int_ids(telegram_data.get("allowed_forum_chat_ids")),
+                accounts=_parse_telegram_accounts(telegram_data.get("accounts")),
             ),
             weixin=WeixinConfig(
                 enabled=bool(weixin_data.get("enabled", False)),
@@ -5011,6 +5312,7 @@ class KiroCrewConfig:
                     dashboard_data.get("tips_explore_ratio", 0.2), 0.2, lo=0.0, hi=1.0
                 ),
                 gitlab_hosts=_coerce_gitlab_hosts(dashboard_data.get("gitlab_hosts")),
+                jira_hosts=_coerce_jira_hosts(dashboard_data.get("jira_hosts")),
             ),
             tunnel=TunnelConfig(
                 enabled=bool(tunnel_data.get("enabled", False)),
@@ -5130,6 +5432,17 @@ class KiroCrewConfig:
             ],
             mcp_gateway=McpGatewayConfig(
                 enabled=bool(mcp_gateway_data.get("enabled", False)),
+                # Absent -> True so installs that never configured this keep
+                # rendering. A malformed value cannot be distinguished here: the
+                # schema validator REMOVES an invalid value before the loader
+                # parses (see config/validation.py ``_apply_field_default``), so a
+                # hand-edited ``"false"`` arrives as absent and resolves to True,
+                # with a warning logged naming the field. ``_safe_bool`` is
+                # belt-and-braces for a schema gap, not the acting guard — the
+                # acting guard against a truthy string is the validator, since
+                # ``bool("false")`` is True. The write path is where an opt-out is
+                # actually enforced: the endpoint rejects any non-boolean body.
+                apps_enabled=_safe_bool(mcp_gateway_data.get("apps_enabled", True), True),
                 # Default False AND type-checked: ``bool("false")`` is True, so a
                 # hand-edited string would silently ENABLE forwarding. A
                 # malformed value must mean "do not apply declared env to a
@@ -5826,7 +6139,7 @@ def schedule_materialized_agents_refresh() -> None:
         logger.debug("Failed to schedule materialized agent refresh", exc_info=True)
 
 
-def _materialized_kiro_agent(agent_name: str | None) -> str:
+def _materialized_kiro_agent(agent_name: str | None, project_dir: str | None = None) -> str:
     """Return *agent_name* when a materialized kiro agent config declares it.
 
     An APP's agents are copied into ``~/.kiro/agents/`` by
@@ -5867,27 +6180,103 @@ def _materialized_kiro_agent(agent_name: str | None) -> str:
     unwarmed lookup falls back to the default rather than block. Returns ``""``
     for a blank name or when nothing declares it, so a genuinely unknown agent
     still falls back to the default.
+
+    *project_dir* adds the session's own ``<project>/.kiro/agents`` scope, which
+    kiro-cli searches BEFORE the user-level directory (it resolves ``--agent``
+    against its cwd, and Kiro Crew spawns it with the project dir as cwd). It
+    deliberately does NOT use the snapshot: that is one process-wide set, while the
+    project scope differs per session, so sharing it would leak one checkout's
+    agents into another's.
+
+    The project lookup reads the filesystem, so like the user-level scan it is
+    NEVER performed on the event loop — see :func:`_project_declares_agent`. Callers
+    that need a project agent resolved must therefore invoke this off the loop;
+    ``chat_runner`` and the side-turn handler do so through the discovery pool. An
+    on-loop call degrades to the default agent for that turn rather than stalling
+    the gateway, which is the same trade the user-level scope already makes.
     """
     if not agent_name:
         return ""
+    if _MATERIALIZED_AGENTS_READY and agent_name in _MATERIALIZED_AGENTS:
+        return agent_name
     if not _MATERIALIZED_AGENTS_READY:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             # No loop on this thread: scanning here blocks nothing.
             refresh_materialized_agents()
+            if agent_name in _MATERIALIZED_AGENTS:
+                return agent_name
         else:
             # On the event loop with a cold snapshot: never scan. The boot warm
             # normally precedes any turn; falling back for one turn is strictly
             # preferable to stalling the gateway.
             logger.debug("Materialized agent snapshot cold on the event loop; falling back")
-            return ""
-    return agent_name if agent_name in _MATERIALIZED_AGENTS else ""
+    if project_dir and _project_declares_agent(agent_name, project_dir):
+        return agent_name
+    return ""
+
+
+def _project_declares_agent(agent_name: str, project_dir: str) -> bool:
+    """Whether *project_dir* declares a dispatchable agent called *agent_name*.
+
+    Delegates to ``agent_discovery``, which owns the scan, its sensitive-path guards,
+    and the stat-signature cache.
+
+    Splits on whether an event loop is running, because that decides what is safe:
+
+    * **Off the loop** (the CLI, tests, and the discovery-pool thread the dashboard
+      call sites use) — scan and revalidate normally.
+    * **On the loop** — read the cache and nothing else, via a helper that makes no
+      syscalls whatsoever. Even one directory's worth of reads is unbounded in
+      LATENCY, and this runs on EVERY turn of a project-agent-bound session, so a
+      network or otherwise slow checkout would become a recurring gateway stall the
+      loop-stall watchdog blames on chat. A cold cache reports "not declared" and the
+      caller falls back, exactly as the user-level cold-snapshot path does.
+
+    The dashboard call sites warm the cache through the discovery pool immediately
+    before resolving, so the on-loop read is a hit rather than a fallback. Only the
+    WARM is offloaded, never ``resolve_agent_bindings`` itself: that function can
+    raise ``StopIteration`` on a malformed config, and ``StopIteration`` cannot be
+    delivered through a ``Future`` — asyncio rejects it, and the awaiting caller
+    hangs instead of seeing the error.
+
+    Deferred import so this module keeps its leaf-level import graph. Best-effort — a
+    lookup failure means "not declared here", never an exception into turn handling.
+    """
+    try:
+        # circular import: agent_discovery imports kiro_crew.hooks (the hardened
+        # file-read gate), whose import closure reaches back into config.loader —
+        # verified by importing agent_discovery in a fresh interpreter and finding
+        # kiro_crew.config.loader in sys.modules. A module-scope import here would
+        # therefore be a cycle; the deferral is load-bearing, not stylistic.
+        from kiro_crew.agent_discovery import (
+            cached_project_agent_names,
+            project_agent_names,
+        )
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return agent_name in project_agent_names(project_dir)
+        names = cached_project_agent_names(project_dir)
+        if names is None:
+            logger.debug(
+                "Project agent cache cold on the event loop for %r; falling back "
+                "(warm it off-loop before resolving to dispatch a project agent)",
+                agent_name,
+            )
+            return False
+        return agent_name in names
+    except Exception:  # noqa: BLE001 — a probe failure only costs a fallback
+        logger.debug("Project agent probe failed for %r", agent_name, exc_info=True)
+        return False
 
 
 def resolve_agent_bindings(
     config: KiroCrewConfig,
     agent_name: str | None = None,
+    project_dir: str | None = None,
 ) -> ResolvedBindings:
     """Resolve workspace, memory store, and kiro agent for a session.
 
@@ -5899,6 +6288,12 @@ def resolve_agent_bindings(
        registered in ``~/.kiro/agents/`` and never added to ``config.agents``, so
        this is the only thing that stops an app-bound session from silently
        running the default agent.
+
+    *project_dir* is the session's active project directory, which widens step 2 to
+    that project's own ``.kiro`` scope. It must be the same directory Kiro Crew
+    passes as the kiro-cli cwd, so an agent found through it is one the backend
+    will genuinely resolve; passing a directory the session does not run in would
+    reintroduce the silent-substitution bug this lookup exists to prevent.
     """
     import dataclasses as _dc
 
@@ -5907,7 +6302,7 @@ def resolve_agent_bindings(
     # ITSELF. Computed only when the name is not an alias — the lookup touches
     # the filesystem.
     alias_hit = bool(agent_name) and agent_name in config.agents
-    passthrough = "" if alias_hit else _materialized_kiro_agent(agent_name)
+    passthrough = "" if alias_hit else _materialized_kiro_agent(agent_name, project_dir)
     # A non-empty name that matched NEITHER an alias nor a materialized config is
     # about to be answered by the default agent. Reported so callers that store
     # the requested name never advertise a binding that is not running.

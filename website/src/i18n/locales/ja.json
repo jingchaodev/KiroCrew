@@ -227,6 +227,10 @@
         "cycles_2": "サイクル",
         "definition_of_done_optional": "完了の定義（オプション）",
         "delete": "削除",
+        "delete_campaign": "キャンペーンを削除しますか？",
+        "deleting": "削除中…",
+        "delete_campaign_button": "キャンペーンを削除",
+        "delete_failed": "削除に失敗しました。もう一度お試しください。",
         "delete_this_campaign_and_its_report_this_cannot": "このキャンペーンとそのレポートを削除しますか？この操作は取り消せません。",
         "done_when": "完了条件：",
         "dynamic_workflow": "ダイナミックワークフロー",
@@ -436,12 +440,18 @@
           "this_review_failed": "このレビューは失敗しました"
         },
         "findingCard": {
+          "consequence": "影響",
+          "evidence": "根拠",
+          "observation": "事象",
           "post_finding": "この指摘をプルリクエストに投稿する",
           "post_finding_on": "この指摘を {{target}} に投稿する",
           "post_this_comment": "このコメントを投稿する",
           "posted_to_the_pull_request": "プルリクエストに投稿済み",
           "posting": "投稿しています…",
+          "select_to_draft_together": "一括下書き用に選択",
           "select_to_post": "投稿する {{label}} を選択",
+          "severity_must_fix": "要修正",
+          "severity_should_fix": "修正推奨",
           "suggestion": "提案",
           "this_finding": "この指摘"
         },
@@ -2144,6 +2154,11 @@
       },
       "list": {
         "adHocTitle": "アドホック会議",
+        "deleteConfirm": "「{{title}}」と、そのすべてのノート、図、アクションアイテムを削除しますか？この操作は取り消せません。",
+        "deleteFailed": "この会議を削除できませんでした。",
+        "deleteMeeting": "{{title}}を削除",
+        "deleteUnavailable": "削除する前にこの会議を終了してください",
+        "deleted": "「{{title}}」を削除しました",
         "empty": "会議なし",
         "emptyHintNoCalendar": "設定でカレンダーを接続するか、アドホック会議を開始してください。",
         "emptyHintSynced": "カレンダーに何もなく、まだ作業した会議もありません。",
@@ -2484,13 +2499,16 @@
         "blurb": "Mochi は1つのペットであり、すべての Kiro Crew が独自に実行されます。その相手を選んでください — 現在接続されているインスタンスのみがリストされます。",
         "connecting": "接続中…",
         "current": "現在",
+        "desktop_only": "ペットがどのインスタンスを表示するかの選択にはデスクトップアプリが必要です。",
         "errored": "接続問題",
         "feature_off": "マルチインスタンスがオフです。Kiro Crew 設定で有効にしてリモートインスタンスを選択してください。",
+        "host_disable_note": "他のインスタンスで Mochi を無効にしても、そのインスタンス自身のバックグラウンド処理が止まるだけです。ペットはここで選んだインスタンスに残ります。",
         "list_failed": "インスタンスリストを読み込めませんでした。",
         "loading": "インスタンスを探しています…",
         "mochi_off": "そこで Mochi がオフです",
         "needs_restart": "マルチインスタンスが有効になったばかりです — ゲートウェイを再起動して有効にしてください。",
         "not_connected": "接続されていません",
+        "switch_failed": "今はインスタンスを切り替えられませんでした。選択は保存されているので、そのインスタンスが応答したら適用されます。",
         "switch_note": "切り替えると外観とチャット履歴も切り替わります — 各インスタンスが独自に保持されます。保存されたインスタンスが失われた場合はこのコンピューターにフォールバックします。",
         "this_computer": "このコンピューター"
       },
@@ -2715,6 +2733,7 @@
         "shortcut_one_key": "修飾キー以外のキーは1つだけ許可されます",
         "shortcut_taken": "別のアプリがこのキーを既に使用しています：{{actions}}。別の組み合わせを選んでください。",
         "shortcuts": "ショートカット",
+        "shortcuts_desktop_only": "グローバルショートカットの変更にはデスクトップアプリが必要です。",
         "silent_subagents": "サイレントバックグラウンドエージェント",
         "silent_subagents_desc": "バックグラウンドタスク完了時の通知を抑制（プラン、ウォッチ確認）。結果はチャットに表示されます。",
         "tier_active": "アクティブ",
@@ -4310,6 +4329,8 @@
       "search_everywhere": "すべてから検索",
       "search_for_anything": "何でも検索",
       "search_scope": "{{scope}}を検索…",
+      "retry": "再試行",
+      "search_failed": "検索に失敗しました",
       "searching": "検索中…",
       "tab": "tab"
     },
@@ -4529,10 +4550,13 @@
       "this_document_is_tracked_as_a_session_artifact_n": "このドキュメントはセッションアーティファクトとして追跡されており、ソースファイルの変更ではありません"
     },
     "filePickerMenu": {
+      "folder": "フォルダー",
+      "folder_kind": "フォルダー",
       "no_matches": "一致するものがありません",
       "open_in_viewer": "ビューアで開く",
+      "remove_folder": "フォルダーを削除",
       "searching": "検索中…",
-      "type_2_chars_to_search_files": "ファイルを検索するには 2 文字以上入力してください…"
+      "type_2_chars_to_search_files": "ファイルとフォルダーを検索するには 2 文字以上入力してください…"
     },
     "fileRenderers": {
       "empty_file": "空のファイル",
@@ -4710,7 +4734,9 @@
       "this_issue_is_locked": "このイシューはロックされています",
       "unknown_author": "不明な作成者",
       "untitled": "無題",
-      "updated_time": "{{time}}に更新"
+      "updated_time": "{{time}}に更新",
+      "jira_open_in_browser": "Jira issue — open in browser to view details.",
+      "open_in_jira": "Open in Jira"
     },
     "jobForm": {
       "a_short_label_for_this_job": "このジョブの短いラベル",
@@ -4918,6 +4944,8 @@
       "open_artifact": "アーティファクト {{name}} を開く",
       "open_as_artifact": "アーティファクトとして開く",
       "open_folder": "フォルダー {{path}} を開く",
+      "open_with_default_app": "デフォルトアプリで開く",
+      "path_copied_to_clipboard_no_desktop_available": "パスをクリップボードにコピーしました（デスクトップ環境がありません）",
       "preview": "プレビュー",
       "previous_match": "前の一致",
       "previous_shift_enter": "前へ (Shift+Enter)",
@@ -4930,6 +4958,7 @@
       "save_this_file_as_an_artifact_versioned_persiste": "このファイルをアーティファクトとして保存 (バージョン管理、永続化、コメント可能)",
       "saving": "保存中…",
       "select_any_text_to_add_inline_comments_then_subm": "任意のテキストを選択してインラインコメントを追加し、すべてをチャットに送信します。",
+      "show_in_file_manager": "ファイルマネージャーに表示",
       "snapshot_version": "スナップショットバージョン",
       "snapshotting": "スナップショット作成中…",
       "switch_to_split_view": "分割ビューに切り替え",
@@ -5313,6 +5342,8 @@
       "edit_queued_message": "キューに入っているメッセージを編集",
       "interrupt_current_turn_and_send_this_now": "現在のターンを中断して今すぐ送信",
       "queued": "キューに入っています",
+      "run_later": "後で実行",
+      "run_sooner": "先に実行",
       "ready_processing_after_the_current_turn": "準備完了 — 現在のターンの後で処理します",
       "save": "保存",
       "save_edit": "編集を保存",
@@ -5466,6 +5497,13 @@
       "undo_remove": "削除を取り消し",
       "will_be_removed_on_save": "保存時に削除されます。"
     },
+    "sendToInstanceSubmenu": {
+      "failed": "失敗",
+      "not_connected": "未接続",
+      "send_a_copy_to": "コピーを送信",
+      "sent": "送信しました",
+      "unknown_error": "不明なエラー"
+    },
     "sessionActionsMenu": {
       "bring_back_to_main": "メインに戻す",
       "close_session": "セッションを閉じる",
@@ -5500,6 +5538,11 @@
       "split_right": "右に分割",
       "split_right_d": "右に分割 (⌘D)",
       "terminal_pane_coming_in_phase_2": "ターミナルペイン — フェーズ 2 で提供予定"
+    },
+    "sessionRefStrip": {
+      "n_messages": "{{n}} 件",
+      "remove_reference": "参照を削除",
+      "remove_reference_to": "{{name}} への参照を削除"
     },
     "settings": {
       "click_to_reset": "クリックしてリセット",
@@ -5903,7 +5946,7 @@
       "suggestion_pipeline_status": "パイプラインステータスを確認",
       "suggestion_review_cr": "最新のCRをレビュー",
       "suggestion_search_code": "コード使用例を検索",
-      "suggestion_summarize_slack": "今週の Slack アクティビティを要約",
+      "suggestion_summarize_chat": "今週のチャットアクティビティを要約",
       "suggestion_triage_tickets": "オンコールチケットをトリアージ",
       "suggestion_write_design_doc": "設計ドキュメントの作成を支援",
       "switch_back_to_default_mode": "デフォルトモードに戻す",
@@ -5941,6 +5984,18 @@
       "select": "選択",
       "workspace_name": "ワークスペース名",
       "workspace_name_2": "workspace-name"
+    },
+    "settingRef": {
+      "envVarAriaLabel": "環境変数 {{key}}",
+      "envVarDescription": "Kiro Crew を起動する前にこの環境変数を設定してください。",
+      "envVarUnsetDescription": "Kiro Crew を起動する前にこの環境変数を解除してください。",
+      "fileOnlyDescription": "以下の CLI コマンドでこの値を設定してください。",
+      "copied": "コピーしました！",
+      "copyFailed": "コピーに失敗しました",
+      "copyCommand": "コマンドをコピー",
+      "orEditConfigJson": "または、~/.kiro/crew/config.json を直接編集してください。",
+      "openSettingsAriaLabel": "設定 → {{tab}} で {{key}} を開く",
+      "fileSettingAriaLabel": "ファイル専用設定 {{key}}"
     }
   },
   "hooks": {
@@ -6079,16 +6134,8 @@
     "webhooks": "Webhooks"
   },
   "pages": {
-    "terminalPopoutFrame": {
-      "return": "ドックに戻る",
-      "return_to_main_window_and_close_this_popout": "メインウィンドウに戻ってこのポップアウトを閉じる",
-      "terminal": "ターミナル",
-      "window_title": "{{label}} — Kiro Crew"
-    },
     "agentsPage": {
-      "active_sessions_and_subagent_tasks": "アクティブなセッションとサブエージェントタスク",
       "agent_templates": "エージェントテンプレート",
-      "agent_templates_grouped_by_package_update_and_un": "エージェントテンプレートはパッケージでグループ化されています。パッケージレベルで更新およびアンインストールできます。個別のエージェントは削除可能です（設定ファイルが削除されます）。",
       "auto_approved": "自動承認済み",
       "awaiting_first_prompt": "最初のプロンプトを待機中",
       "clear_completed": "完了を消去",
@@ -6098,8 +6145,6 @@
       "could_not_load_this_agent_s_configuration_skills": "このエージェントの設定を読み込めません。スキルは上書きを避けるため非表示になっています。\n                        エージェントを再度選択して再試行してください。",
       "critical": "重大",
       "default": "デフォルト",
-      "default_for_new_sessions": "新しいセッション用デフォルト",
-      "delete_agent": "{{name}}を削除",
       "delete_subagent": "サブエージェント {{id}} を削除",
       "denied_commands": "拒否されたコマンド",
       "done": "完了",
@@ -6116,17 +6161,12 @@
       "no_active_sessions": "アクティブなセッションなし",
       "no_subagents": "サブエージェントなし",
       "overage_credits": "超過クレジット:",
-      "patterns_blocked": "パターンブロック",
       "plan_credits": "プランクレジット",
       "prompt_other": "{{count}}個のプロンプト",
-      "remove_default_agent": "デフォルトエージェントを削除",
       "req": "/req",
       "resets": "リセット",
       "running": "実行中",
       "select_an_agent_to_view_details": "詳細を表示するエージェントを選択",
-      "sessions": "セッション",
-      "set_as_default": "デフォルトとして設定",
-      "set_as_default_agent": "デフォルトエージェントとして設定",
       "skills": "スキル",
       "spawn_tasks_from_chat_or_cli": "チャットまたはCLIからタスクを生成",
       "subagents": "サブエージェント",
@@ -6134,7 +6174,41 @@
       "tools": "ツール",
       "tools_2": "ツール",
       "type_to_filter": "フィルタリングに入力…",
-      "usage": "使用"
+      "usage": "使用",
+      "at_a_glance": "ひと目で",
+      "cancel": "キャンセル",
+      "cli_chat_chat_channel_threads_and_warm_pool_sessio": "CLI チャット、チャットチャンネルのスレッド、ウォームプールのセッションはこれにフォールバックします — クルーは独自に指定します",
+      "comes_with_the_template_read_only_here": "テンプレートに付属 — ここでは読み取り専用です",
+      "config_file": "設定ファイル",
+      "delete_template": "テンプレートを削除",
+      "delete_the_template_named_confirm": "テンプレート {{name}} を削除しますか？設定ファイルが削除され、元に戻せません。",
+      "editing_this_template_changes_how_they_behave_in_": "このテンプレートを編集すると、次のセッションでの動作が変わります",
+      "filter_templates": "テンプレートを絞り込む",
+      "from_package": "パッケージ由来",
+      "guardrails": "ガードレール",
+      "id": "ID",
+      "model": "モデル",
+      "no_agent_templates_yet": "エージェントテンプレートはまだありません",
+      "no_crews_use_this_template_yet": "このテンプレートを使用しているクルーはまだありません",
+      "no_default_template": "デフォルトテンプレートなし",
+      "no_model_pinned_here_a_crew_set_to_inherit_falls_": "ここではモデルが固定されていません — 継承に設定されたクルーはグローバルデフォルトにフォールバックします",
+      "no_templates_match_your_filter": "絞り込み条件に一致するテンプレートがありません",
+      "not_set_for_this_template": "このテンプレートでは設定されていません",
+      "overview": "概要",
+      "package": "パッケージ",
+      "pinned_here_a_crew_set_to_inherit_uses_this_model": "ここで固定 — 継承に設定されたクルーはこのモデルを使用します",
+      "source": "ソース",
+      "status": "ステータス",
+      "task": "タスク",
+      "templates_come_with_kirocrew_or_with_an_app_you_i": "テンプレートは Kiro Crew に付属するか、インストールしたアプリに付属します",
+      "this_is_the_fallback_template_point_the_picker_a": "フォールバックテンプレートは削除できません — 先に上のピッカーで別のテンプレートを指定してください",
+      "tools_and_mcp": "ツールと MCP",
+      "used_by": "使用元",
+      "used_by_crews_repoint_them_on_the_crews_tab_firs": "{{crews}} が使用しています — 削除する前にクルータブで参照先を変更してください",
+      "what_a_crew_starts_from_its_model_skills_tools_mc": "クルーの出発点 — モデル、スキル、ツール、MCP サーバー、ガードレール",
+      "when_nothing_names_a_template_use": "テンプレートが指定されていない場合に使用",
+      "where_it_comes_from": "提供元",
+      "yes_delete_it": "はい、削除します"
     },
     "aidlc": {
       "dagView": {
@@ -6628,6 +6702,7 @@
       "folder_actions": "フォルダーアクション",
       "folder_breadcrumb": "フォルダーブレッドクラム",
       "folder_color": "フォルダーの色",
+      "from_your_chats": "チャットから",
       "gallery": "ギャラリー",
       "import_from_a_file": "ファイルからインポート…",
       "kind": "種類",
@@ -6664,9 +6739,11 @@
       "slug": "スラッグ",
       "source": "ソース",
       "star_artifact": "アーティファクトに星を付ける",
+      "show_all_count": "すべてを表示（{{count}}）",
+      "show_less": "表示を減らす",
+      "star_a_document_in_from_your_chats_to_save_it_he": "保存済みのアーティファクトはまだありません。「チャットから」のドキュメントに星を付けると、ここに保存されます。",
       "star_creates_a_starred_artifact_from_this_docume": "星を付ける（このドキュメントから星付きアーティファクトを作成）",
       "star_document": "ドキュメントに星を付ける",
-      "star_save_to_library": "星を付ける（ライブラリに保存）",
       "starred": "星付き",
       "starred_click_to_unstar": "星付き — クリックして星を削除",
       "start_a_new_blank_document_in_the_library": "ライブラリで新しい空のドキュメントを開始",
@@ -6867,7 +6944,9 @@
         "turn_took_cost": "ターンに {{elapsed}} かかりました({{cost}} の API コスト)",
         "turn_took_credits": "ターンに {{elapsed}} かかり {{credits}} クレジットを使用しました",
         "turn_took_credits_cost": "ターンに {{elapsed}} かかり {{credits}} クレジットを使用しました({{cost}} の API コスト)",
-        "use_as_plan_count": "プランとして使用({{count}} ステップ)"
+        "use_as_plan_count": "プランとして使用({{count}} ステップ)",
+        "pin_message": "メッセージをピン留め",
+        "unpin_message": "メッセージのピン留めを解除"
       },
       "chatFooter": {
         "compacting": "コンパクト中…",
@@ -6968,6 +7047,7 @@
         "recovered_continuing": "復旧済み · 続行中",
         "resuming_the_interrupted_turn": "中断したターンを再開中",
         "safety_policy_continuing": "安全ポリシー · 自動で続行中",
+        "session_busy_continuing": "セッション使用中 · 自動的に続行中",
         "tool_call_blocked": "ツール呼び出しがブロックされました",
         "tool_stopped_responding": "ツールが応答しなくなりました",
         "turn_interrupted": "ターンが中断されました",
@@ -6993,8 +7073,14 @@
         "context_from": "コンテキスト元",
         "copied": "コピーしました！",
         "copy": "コピー",
+        "queue_cancel_failed": "キューに入っている質問をキャンセルできませんでした",
+        "queue_edit_failed": "キューに入っている質問を更新できませんでした",
         "refresh_context": "コンテキストを更新",
+        "refresh_blocked_queued": "Finish or cancel the queued questions first — refreshing would discard them",
+        "refresh_blocked_busy": "Wait for the current answer to finish — refreshing now would discard the pending question",
         "send": "送信",
+        "steer_demoted_to_queue": "ターンが終了したためキューに入れました",
+        "steered": "指示を追加",
         "thinking": "考え中…",
         "turn_other": "{{count}} ターン"
       },
@@ -7104,7 +7190,11 @@
         "aria_show_details": "ツールの詳細を表示: {{label}}",
         "blocked_by_security_policy": "セキュリティポリシーによりブロックされました",
         "open_in_side_panel": "{{path}} をサイドパネルで開く",
-        "opened_in_the_side_panel": "サイドパネルで開きました"
+        "opened_in_the_side_panel": "サイドパネルで開きました",
+        "wait_end_now": "待機を終了",
+        "wait_ending": "終了中…",
+        "wait_remaining": "残り {{time}}",
+        "wait_status": "待機中"
       },
       "toolDetails": {
         "auto": "自動",
@@ -7125,7 +7215,9 @@
         "edit_resend": "編集して再送信",
         "send": "送信",
         "send_enter": "送信 (Enter)",
-        "steered_into_the_running_turn": "実行中のターンに追加しました"
+        "steered_into_the_running_turn": "実行中のターンに追加しました",
+        "pin_message": "メッセージをピン留め",
+        "unpin_message": "メッセージのピン留めを解除"
       },
       "workflowCompletionCard": {
         "hide_result": "結果を非表示",
@@ -7143,6 +7235,26 @@
       "workflowSidebarRow": {
         "could_not_load_snapshot": "スナップショットを読み込めませんでした:",
         "events": "イベント"
+      },
+      "pins": {
+        "pinned_messages": "ピン留めされたメッセージ",
+        "close_panel": "ピン留めメッセージパネルを閉じる",
+        "loading": "読み込み中…",
+        "no_pinned_messages": "ピン留めされたメッセージはまだありません。重要なメッセージをピン留めしてすぐに見つけられるようにしましょう。",
+        "message_unavailable": "このピン留めメッセージは読み込まれた履歴では利用できなくなりました。",
+        "pin_failed": "メッセージをピン留めできませんでした。もう一度お試しください。",
+        "unpin_failed": "メッセージのピン留めを解除できませんでした。もう一度お試しください。",
+        "you": "あなた",
+        "assistant": "アシスタント",
+        "just_now": "たった今",
+        "minutes_ago": "{{count}}分前",
+        "hours_ago": "{{count}}時間前",
+        "days_ago": "{{count}}日前",
+        "copy_preview": "テキストをコピー",
+        "copy_link": "メッセージへのリンクをコピー",
+        "unpin": "ピン留めを解除",
+        "open_pinned_messages": "ピン留めされたメッセージを開く",
+        "jump_to_message": "メッセージに移動"
       }
     },
     "chatPage": {
@@ -7183,6 +7295,7 @@
       "no_tools": "ツールなし",
       "open_activity_panel": "アクティビティパネルを開く",
       "open_file": "ファイル {{path}} を開く",
+      "open_folder": "フォルダー {{path}} を開く",
       "plan_from_here_failed_error": "ここからの計画に失敗しました: {{error}}",
       "pop_out_session_to_its_own_window": "セッションを別ウィンドウに切り離す",
       "pop_out_to_window": "別ウィンドウに切り離す",
@@ -7277,6 +7390,7 @@
       "double_click_to_rename": "ダブルクリックして名前を変更",
       "drag_to_reorder": "ドラッグして並べ替え",
       "drop_here_to_remove_from_folder": "ここにドロップしてフォルダーから外す",
+      "drop_to_reference_session": "ここにドロップしてこのセッションを参照",
       "duplicate": "複製",
       "expand_folder_name": "フォルダー {{name}} を展開",
       "expand_group_results": "{{group}} の結果を展開",
@@ -7313,7 +7427,6 @@
       "incognito_no_memory_writes": "シークレット — メモリへの書き込みなし",
       "last_30_days": "過去 30 日",
       "last_7_days": "過去 7 日",
-      "linked_to_slack": "Slack と連携済み",
       "load_more": "さらに読み込む…",
       "loop": "ループ {{count}}/{{total}}",
       "loop_2": "ループ · {{count}}",
@@ -7329,6 +7442,7 @@
       "more_options": "その他のオプション",
       "more_pull_request_in_this_session_other": "このセッションにはほかに {{count}} 件のプルリクエストがあります",
       "more_pull_request_or_issue_in_this_session_other": "このセッションにはほかに {{count}} 件のプルリクエストまたは Issue があります",
+      "open_source_link_in_side_panel": "{{url}} をサイドパネルで開く ({{modifier}} するとブラウザーで開く)",
       "move_folder_to": "フォルダーの移動先",
       "needs_approval": "承認が必要です",
       "new": "新規",
@@ -7350,6 +7464,7 @@
       "pinned": "固定済み",
       "pinned_sessions_are_kept": "固定したセッションは保持されます。",
       "popped_out_to_a_separate_window": "別ウィンドウに切り離しました",
+      "private_session_cannot_be_referenced": "プライベートなセッションは参照できません",
       "rename": "名前を変更",
       "rename_flag_as_status_or_delete_tags_changes_app": "タグの名前変更、ステータス指定、削除ができます。変更はタグが表示されるすべての場所に適用されます。",
       "resets_its_conversation": "会話がリセットされます",
@@ -7682,6 +7797,15 @@
       "worktrees_count": "ワークツリー（{{count}}）",
       "worktrees_created_under_a_previous_repository_na": "以前のリポジトリ名の下で作成されたワークツリー。デフォルトでは非表示。マージ済み削除の対象です。"
     },
+    "developer": {
+      "previewSurfacesCard": {
+        "inbound_webhook_tokens_registered_contexts_and_r": "受信 Webhook のトークン、登録済みコンテキスト、実行履歴。API は動作しますが、ページは未完成です。",
+        "open_webhooks": "Webhooks を開く",
+        "preview_surfaces": "プレビューページ",
+        "unreleased_pages_hidden_from_the_sidebar_and_fro": "未リリースのページです。ここでオンにするまで、サイドバーと「すべてから検索」には表示されません。この設定はこのデバイスのみに適用され、ページは意図的に未完成のままです。",
+        "webhooks": "Webhooks"
+      }
+    },
     "developerPage": {
       "developer": "デベロッパー",
       "tabs": {
@@ -7690,7 +7814,7 @@
           "label": "アーカイブ"
         },
         "config": {
-          "description": "Kiro Crew とエージェント設定ビューア（読み取り専用）",
+          "description": "プレビューページの有効化と、Kiro Crew およびエージェント設定のビューア（読み取り専用）",
           "label": "設定"
         },
         "logs": {
@@ -8211,7 +8335,8 @@
         "reembedding": "メモリを再埋め込み中…",
         "subtitle": "ローカルで実行されます。変更するとバックグラウンドで保存されたメモリが再埋め込みされます。",
         "title": "埋め込みモデル",
-        "will_revert": "空です。バンドルされたモデルに戻ります。"
+        "will_revert": "空です。バンドルされたモデルに戻ります。",
+        "err_env_override_with_ref": "<settingRef/> が設定されており、この設定を上書きしています。ここでモデルを変更するには、設定を解除してください。"
       },
       "kiroCrewCfgTab": {
         "agent_for_pool_processes_empty_uses_default_agen": "プール処理用のエージェント。空の場合はデフォルトエージェントを使用します。再起動が必要です。",
@@ -8497,7 +8622,9 @@
         "this_skill_changed_after_this_update_was_written": "このスキルはこの更新が書かれた後に変更されたため、今すぐ適用するとそれより新しい変更が元に戻ります。承認がブロックされています — この候補を破棄するか、現在のバージョンに対して新しい更新が提案されます。",
         "update": "更新",
         "version_range": "(v{{from}} → v{{to}})",
-        "workspace": "ワークスペース"
+        "workspace": "ワークスペース",
+        "auto_create_hint": "Kiro Crewは完了したセッションからスキルを自動的に下書きすることもできます — デフォルトでオフ、<settingRef/>で制御されます。",
+        "approval_required_hint": "候補はあなたが承認するまでここで待機します — <settingRef/>で必須です。"
       },
       "steeringTab": {
         "always_on_markdown_conventions_injected_into_eve": "常にすべてのセッションに注入される Markdown 規約。グローバルファイルは ~/.kiro/steering にあり、すべての場所に適用されます; ワークスペースファイルは <project>/.kiro/steering にあり、そのプロジェクトにのみ適用されます。",
@@ -8702,6 +8829,9 @@
       "resource_nav": "リソース",
       "resource_network": "ネットワーク",
       "sandbox_procs": "サンドボックス",
+      "session_storage": "セッションストレージ",
+      "session_storage_detail": "{{sessions}} セッション · {{reclaimable}} 回収可能",
+      "session_storage_measuring": "計測中…",
       "threads": "スレッド",
       "total": "合計",
       "upload": "アップロード",
@@ -9006,11 +9136,49 @@
     "sessionArchive": {
       "fuzzy_filter_substring_match": "ファジィフィルタ（部分文字列マッチ）",
       "loading": "読み込み中…",
-      "no_archives_archives_are_created_when_session_fi": "アーカイブはありません。セッションファイルがローテーション（>2MB）またはコンパクト化されるときに作成されます。",
       "no_matches_for_query": "「{{query}}」に一致するものはありません。",
       "reload": "再読み込み",
       "select_an_archive_to_view_its_contents": "アーカイブを選択してその内容を表示",
-      "truncated_showing_first_200kb": "… 切り詰め（最初の 200KB を表示）…"
+      "truncated_showing_first_200kb": "… 切り詰め（最初の 200KB を表示）…",
+      "no_archives_with_compaction_hint": "アーカイブはありません。セッションファイルがローテーション（>2MB）またはコンパクト化されるときに作成されます。自動コンパクションは <settingRef/> で制御されます。"
+    },
+    "sessionStorage": {
+      "back_to_disk": "システム · パフォーマンス › ディスク",
+      "background_group": "バックグラウンドエージェント ({{count}})",
+      "bulk_selected": "{{count}}件選択中",
+      "cancel": "キャンセル",
+      "cannot_delete_resumable": "このセッションはまだ再開できるため保持されます。解放はまだ提供されていません。",
+      "cannot_delete_running": "このセッションでは現在ターンが実行中のため、ゴミ箱に移動できません。",
+      "clear_selection": "クリア",
+      "confirm_delete_forever": "完全に削除",
+      "delete_forever": "完全に削除",
+      "detail_images": "画像",
+      "detail_last_used": "最終使用",
+      "detail_size": "サイズ",
+      "detail_turns": "ターン数",
+      "heading": "セッションストレージ",
+      "in_use": "使用中",
+      "move_to_trash_bulk": "ゴミ箱に移動",
+      "move_to_trash_single": "ゴミ箱に移動",
+      "refused_heading": "{{count}}件のセッションを移動できませんでした",
+      "refused_in_use": "セッションは使用中です",
+      "refused_resumable": "まだ再開可能",
+      "refused_too_fresh": "セッションが新しすぎます",
+      "refused_unknown": "セッションが見つかりません",
+      "restore": "復元",
+      "resumable": "再開可能",
+      "search_placeholder": "セッションを検索",
+      "sort_largest": "大きい順",
+      "sort_name": "名前",
+      "sort_oldest": "古い順",
+      "subheading": "{{sessions}}セッション · ディスク使用量 {{total}} · {{reclaimable}} 回収可能",
+      "trash": "ゴミ箱",
+      "trash_batch_label": "{{sessions}}セッション · {{size}}",
+      "trash_batch_reason": "{{reason}}により移動",
+      "trash_empty": "空",
+      "trash_note": "空にするまでディスク容量を消費し続けます。自動的に削除されることはありません。",
+      "trash_summary": "{{sessions}}セッション · {{size}}",
+      "unknown_session": "一覧にないセッション"
     },
     "sessionsTab": {
       "agent": "エージェント",
@@ -9084,20 +9252,17 @@
         "copy_command": "コマンドをコピー",
         "couldn_t_check_for_updates": "更新を確認できませんでした",
         "couldn_t_check_for_updates_2": "更新を確認できませんでした。",
-        "couldn_t_load_the_changelog": "変更ログを読み込めませんでした。",
         "download_failed": "ダウンロード失敗",
         "download_install": "ダウンロードしてインストール",
         "download_the_latest_version": "最新版をダウンロード",
         "downloaded_and_verified_the_app_restarts_to_fini": "ダウンロードおよび検証完了。アプリは再起動してインストールを完了するか、後で終了するとインストールされます。",
         "downloading": "ダウンロード中…",
-        "hide_full_changelog": "▾ 完全な変更ログを非表示",
         "insider": "Insider",
         "install_failed": "更新をインストールできませんでした",
         "installing_quiet_note": "インストール中 — Kiro Crew は 1 ～ 2 分間沈黙してから自動的に再起動します。",
         "is_available": "が利用可能です。",
         "loading_changelog": "変更ログを読み込み中…",
         "manual_install_fallback": "更新がうまくいかない場合は、{{link}} をして、このコピーの上に再インストールできます。設定、チャット、ファイルは保持されます。",
-        "no_changelog_available": "利用可能な変更ログはありません。",
         "not_checked_yet": "まだ確認していません",
         "notify_when_an_update_is_available": "更新が利用可能になったら通知",
         "open_source_under_the_apache_2_0_license": "Apache 2.0 ライセンス下のオープンソース",
@@ -9138,7 +9303,7 @@
         "updating_gateway_restarting": "更新中 — ゲートウェイを再起動中…",
         "updating_restarts_the_gateway_active_sessions_wi": "更新はゲートウェイを再起動します — アクティブなセッションは一時的に切断されます。",
         "v": "v",
-        "view_full_changelog": "▸ 完全な変更ログを表示",
+        "view_all_releases": "すべてのリリースを表示",
         "view_this_commit_on_github": "GitHub でこのコミットを表示",
         "what_s_new": "新着情報",
         "you_are_on_the_latest_version": "最新版を使用しています。",
@@ -9297,7 +9462,7 @@
         "how_long_models_think_before_answering_by_defaul": "モデルがデフォルトで回答する前に考える時間。高いほど遅く、コストが高くなります。推論対応モデル（Opus、Sonnet、Fable、GPT-5.x）でのみ利用可能です。",
         "how_long_to_wait_for_the_agent_to_honor_a_stop_p": "エージェントが停止を実行するまで待つ時間。その後、セッションを強制的に終了します。予算が長いほどセッション状態がより保存されますが、エージェントが長いツール呼び出しに固まったときに停止が遅く感じられます。",
         "how_much_an_automatically_registered_source_may_i": "自動登録されたソースが 1 パスで取り込める量。ドキュメントの各部分は 1 つの抽出呼び出しかかるため、これはコストを制限するものです。最新のドキュメントが最初に登録され、残りは後のパスに続きます。0 で制限を削除します。デフォルト {{count}}。",
-        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "エージェントの文章の簡潔さを設定します。「極簡潔」は集中が途切れやすい読者向けで、結論を冒頭3文以内で示し、その後の詳細は文章でなく見出し付きの箇条書きにします。コード・コマンド・エラー文字列はそのまま維持され、セキュリティ警告と手順の説明はどのレベルでも完全な詳細を保ちます。",
+        "how_terse_the_agent_s_prose_is_ultra_concise_cap": "エージェントの文章の簡潔さを設定します。「極簡潔」は回答全体を短く保ちます。結論を先に示し、文章ではなく箇条書きを使い、前置きを省きます。コード・コマンド・エラー文字列はどのレベルでもそのまま維持され、セキュリティ警告と手順の説明は完全な詳細を保ちます。",
         "i_write_code": "コードを書きます",
         "immediate": "即座",
         "immediate_mode_shows_raw_chunks_as_they_arrive_s": "即座モードは到着時の生チャンクを表示します。スムーズモードはテキストをバッファリングして一定の速度でフェードインさせます。",
@@ -9375,7 +9540,7 @@
         "technical_comfort": "技術的快適度",
         "text_streaming_style": "テキストストリーミングスタイル",
         "time_window_for_session_restoration": "セッション復元のための時間ウィンドウ",
-        "ultra_concise_3_sentences": "極簡潔 — 約3文で結論、その後に見やすい詳細",
+        "ultra_concise_3_sentences": "極簡潔 — 結論を先に、文章は最小限",
         "ux_designer": "UX デザイナー",
         "when_enabled_inline_tool_pills_show_simplified_t": "有効にすると、インラインツールピルは実行されている正確なコマンドではなく簡略化されたツール使用目的を表示します",
         "which_model_new_sessions_start_with_pick_a_model": "エージェントがどれもピン留めしないときに新しいセッションが開始するモデル。Capabilities → Crews でエージェントごとにモデルを設定するか、セッション内でそれをオーバーライドするモデルを選択します。",
@@ -9530,7 +9695,6 @@
         "enabled": "有効",
         "enabled_but_not_active_yet_restart_the_gateway": "有効ですが、まだアクティブではありません。ゲートウェイを再起動してください（",
         "enabling": "有効化中…",
-        "equivalent_cli": "同等の CLI:",
         "failed_to_add_remote_crew": "リモートクルーの追加に失敗",
         "failed_to_load_remote_crews": "リモートクルーの読み込みに失敗",
         "home_you_local_bin_kirocrew_leave_blank_for_stan": "/home/you/.local/bin/kirocrew — 標準インストールの場合は空白のままにしてください",
@@ -9539,8 +9703,6 @@
         "is_already_used_by_another_instance_choose_a_dif": "は既に別のリモートクルーで使用されています。別のものを選択してください\n              （リモートホストでそのポートを設定します）。",
         "is_installed_somewhere_non_standard_on_the_remot": "はリモート上の非標準の場所にインストールされています。\n            通常の pip インストール on PATH の場合は空白のままにしてください。見つけるには、\n            リモートホストで実行してください：",
         "kirocrew": "kirocrew",
-        "kirocrew_config_set_instances_enabled_true": "kirocrew config set instances.enabled true",
-        "kirocrew_config_set_instances_warm_set_cap_n": "kirocrew config set instances.warm_set_cap N",
         "kirocrew_restart": "kirocrew restart",
         "loading": "読み込み中…",
         "local_bin_kirocrew": "~/.local/bin/kirocrew",
@@ -9568,7 +9730,6 @@
         "ssm_target_instance_id": "SSM ターゲット（インスタンス ID）",
         "the_gateway_opens_an_ssh_tunnel_and_mints_a_shor": "ゲートウェイはトンネル（SSH または AWS SSM）を開き、接続時に短命トークンを生成します。\n        ローカルフォワードポートはリモートポートをミラーするため、接続されたリモートクルーのそれぞれが\n        個別のリモートポートを使用する必要があります。",
         "the_user_the_remote_gateway_runs_as_sudo_u_for_s": "リモートゲートウェイが実行されるユーザー — SSM コマンドは sudo -u を経由して実行されます。Ubuntu AMI では ubuntu を使用してください。",
-        "then": "その後",
         "to_fully_tear_down_any_tunnels_still_running_fro": "以前から実行中のトンネルを完全に破棄するために。",
         "to_start_the_ssh_tunnel_manager_and_activate_ins": "SSH トンネルマネージャーを開始し、リモートクルー切り替えを有効化するために。",
         "token_left": "· トークン残り {{time}}",
@@ -9578,19 +9739,24 @@
         "unknown_error": "不明なエラー",
         "up_to": "最大",
         "update_setting_failed": "設定の更新に失敗しました: {{error}}",
-        "use_an_absolute_path_no": ")。\n            絶対パスを使用してください (相対パスではなく"
+        "use_an_absolute_path_no": ")。\n            絶対パスを使用してください (相対パスではなく",
+        "enable_via_setting": "または、<settingRef/> を設定してから、<restartCmd/> を実行してください。"
       },
       "mcpPoolableServers": {
         "blocked": "ブロック済み",
         "could_not_load_mcp_servers": "MCP サーバーを読み込めませんでした。",
+        "could_not_update_all_try_again": "サーバーを更新できませんでした。変更は反映されていません。もう一度お試しください。",
         "could_not_update_try_again": "{{name}} を更新できませんでした。もう一度お試しください。",
         "loading_mcp_servers": "MCP サーバーを読み込み中…",
+        "n_of_m_pooled": "プール可能な {{total}} 件中 {{on}} 件をプール",
+        "n_of_m_pooled_plus_agent": "プール可能な {{total}} 件中 {{on}} 件をプール、agent 設定によるものが {{extra}} 件",
         "no_mcp_servers_configured": "MCP サーバーが設定されていません。",
         "pool": "{{name}} をプール",
         "poolable_mcp_servers": "プール可能な MCP サーバー",
         "poolable_true": "poolable:true",
         "pooling_takes_effect_when_the_shared_mcp_gateway": "共有 MCP ゲートウェイが有効になるとプーリングが有効になります。ここで\n            プール可能なサーバーを事前に設定できます。",
         "shared": "· 共有",
+        "toggle_all": "すべて切り替え",
         "used_by": "使用者:"
       },
       "notificationsPanel": {
@@ -9625,6 +9791,7 @@
         "preset_ding": "Ding",
         "preset_none": "サイレント",
         "preset_pop": "Pop",
+        "preset_pulse": "Pulse",
         "priority_for": "{{name}} の優先度",
         "protected": "保護済み",
         "protected_channel": "保護されたチャネル",
@@ -9641,6 +9808,22 @@
         "no_matches_for_query": "「{{query}}」に一致するものはありません。",
         "show": "表示",
         "unavailable": "利用不可"
+      },
+      "releases": {
+        "badge_unreleased": "未リリース",
+        "detail_no_date": "日付不明",
+        "detail_on_prerelease": "プレリリース {{version}} を使用しています",
+        "detail_unreleased": "未リリース",
+        "empty_in_progress": "このバージョンのリリースノートはまだ書かれていません。",
+        "empty_released": "このバージョンはリリースノートなしで公開されました。",
+        "list_label": "バージョン",
+        "load_failed": "リリースノートを読み込めませんでした。",
+        "loading": "リリースを読み込み中…",
+        "row_current_no_notes": "お使いのバージョン · リリースノートなし",
+        "row_no_notes": "リリースノートなし",
+        "stale_note": "このリストはお使いのビルド（{{version}}）から取得されているため、新しいエントリが含まれていない可能性があります。",
+        "unavailable": "このビルドではリリースノートを利用できません。",
+        "view_commits": "GitHub でコミットを表示"
       },
       "reportProblemCard": {
         "blurb": "問題が発生していますか？診断レポートをお送りください。ログはまず秘密情報がスクラブされます。",
@@ -9662,6 +9845,7 @@
         "click_any_control_to_see_exactly_what_it_covers": "任意のコントロールをクリックして、その対象を正確に確認します。",
         "collapse_all": "すべて折りたたむ",
         "collapse_category_rules": "{{category}}ルールを折りたたむ",
+        "custom_deny_note": "カスタム拒否メモ",
         "custom_deny_pattern": "カスタム拒否パターン",
         "custom_patterns_counted_separately": "カスタムパターンは「拒否されたコマンド」で個別に集計されます。",
         "custom_patterns_hidden_by_filter": "現在のフィルターによってカスタムパターンが非表示になっています。",
@@ -9755,7 +9939,9 @@
         "not_restricted": "制限なし",
         "nothing_allowed": "許可されていません",
         "off": "オフ",
+        "optional_why_shown_to_the_agent_when_this_rule_fir": "任意: 理由。このルールが適用されたときにエージェントに表示されます",
         "other_surfaces_have_their_own_profiles": "独自のプロファイルを持つサーフェスは、ホストが許可しないものを許可できます：{{surfaces}}",
+        "enforced_by_floor": "Kiro Crew に組み込まれた常時有効な保護機能によって強制されています",
         "pinned_by_policy": "組織のセキュリティポリシーで強制されています",
         "pinned_for_the_host_surface": "ホストサーフェスプロファイルで設定されています。これはインプロセスホストアクション専用の上限です。他のサーフェスは独自のプロファイルを持っており、これを許可する場合があります。",
         "policy": "ポリシー",
@@ -9868,6 +10054,18 @@
         "enabling_shared_mcp_gateway": "共有 MCP ゲートウェイを有効にしています",
         "gateway_stuck_retry": "ゲートウェイが予想される状態に到達しませんでした。もう一度試してください。",
         "gateway_stuck_roll_back": "ゲートウェイが予想される状態に到達しませんでした。安全な（無効化）状態にロールバックするか、もう一度試してください。",
+        "mcp_apps": "MCP アプリ",
+        "mcp_apps_applies_to_new": "保存しました。新しい MCP 接続に適用されます。実行中の接続は再作成時に反映されます。",
+        "mcp_apps_gateway_started": "共有 MCP ゲートウェイを起動しました。アクティブセッションは MCP アプリを有効にした状態で再起動されました。",
+        "mcp_apps_no_poolable_servers": "プール可能な MCP サーバーがまだないため、何も描画されません。下の「プール可能な MCP サーバー」で少なくとも 1 つ有効にしてください。",
+        "mcp_apps_saved_unsupported": "保存しました。MCP アプリは共有 MCP ゲートウェイを必要としますが、このプラットフォームでは利用できません。",
+        "mcp_apps_retry_gateway": "ゲートウェイの起動を再試行",
+        "mcp_apps_capability": "MCP サーバーの対話型 UI をチャット内に表示します。",
+        "mcp_apps_failed": "適用できませんでした。設定は変更されていません。",
+        "mcp_apps_needs_gateway": "上の共有 MCP ゲートウェイを有効にすると適用されます。",
+        "mcp_apps_will_start_gateway": "これを有効にすると共有 MCP ゲートウェイも起動し、アクティブセッションが再起動されます。",
+        "mcp_apps_starting_gateway": "共有 MCP ゲートウェイを起動しています — アクティブセッションが再起動されます…",
+        "mcp_apps_gateway_follow_failed": "MCP アプリは保存されましたが、共有 MCP ゲートウェイが起動しませんでした。上の共有 MCP ゲートウェイをオフにしてから再度オンにしてください。",
         "not_available_on_windows": "Windows では利用できません。共有ゲートウェイは Unix ドメインソケットが必要です。macOS と Linux でサポートされています。",
         "roll_back_disable": "ロールバック（無効にする）",
         "shared_mcp_gateway": "共有 MCP ゲートウェイ",
@@ -10253,7 +10451,6 @@
       "daily_trend_point": "{{date}} · コールド {{cold}} · ウォーム {{warm}} · 起動 {{count}} 回",
       "days": "日",
       "distribution_col": "分布",
-      "enable_with": "有効にする",
       "fault_rate": "障害率",
       "group_by": "グループ化",
       "growth_col": "成長率",
@@ -10265,7 +10462,6 @@
       "mean_col": "平均",
       "mean_credits_by_occupancy": "ターンあたりの平均クレジット、コンテキスト使用率でグループ化",
       "measured_from_token_records": "ターンごとの使用記録から直近{{days}}日のローカル計測 — テレメトリスイッチに関係なく保持",
-      "metrics_stay_local": "。メトリクスはローカルに保持 (",
       "min_col": "min",
       "min_max": "最小{{min}} · 最大{{max}}",
       "model_col": "モデル",
@@ -10275,7 +10471,6 @@
       "no_startups_recorded": "このウィンドウでは記録されたスタートアップがありません",
       "no_telemetry_recorded_yet_in_the_last": "直近",
       "no_turns_yet": "まだターンがありません",
-      "nothing_leaves_this_machine": ") — 何もこのマシンを離れません。",
       "occupancy_p50": "コンテキスト使用率 (p50)",
       "occupancy_p90": "コンテキスト使用率 (p90)",
       "otel_has_no_per_conversation_split": "OTELヒストグラムはセッションIDを含まないため、これらはプロセス全体の数値です — ターンレイテンシはこのストアから単一の会話に帰属させることはできません。",
@@ -10308,7 +10503,6 @@
       "tab_latency": "レイテンシ",
       "tab_spend": "コスト",
       "tab_startup": "スタートアップ",
-      "telemetry_enabled_true": "telemetry.enabled = true",
       "telemetry_is_off": "テレメトリはオフです",
       "throughput": "スループット",
       "to_compaction_col": "90%まで",
@@ -10325,7 +10519,14 @@
       "warm_start_p50": "ウォームスタート (p50)",
       "was_value": "前回 {{value}}",
       "window_last": "OTELセクション · ウィンドウ: 直近",
-      "window_tokens_col": "ウィンドウ (トークン)"
+      "window_tokens_col": "ウィンドウ (トークン)",
+      "off_body": "<settingRef/> で有効にします。メトリクスはローカルに保存されます (<metricsDir/>) — このマシンの外には何も送信されません。"
+    },
+    "terminalPopoutFrame": {
+      "return": "ドックに戻る",
+      "return_to_main_window_and_close_this_popout": "メインウィンドウに戻ってこのポップアウトを閉じる",
+      "terminal": "ターミナル",
+      "window_title": "{{label}} — Kiro Crew"
     },
     "webhooksPage": {
       "0_b": "0 B",
@@ -10581,7 +10782,6 @@
     "controlsTitle": "テレメトリコントロール",
     "dataNeverSentBody": "プロンプト、レスポンス、ファイル、認証情報、ホスト名、ユーザー名、またはオペレーティングシステム。IPアドレスは保存されません。",
     "dataNeverSentTitle": "送信されません",
-    "envOverrideNote": "{{envVar}} がこの環境で設定されているため、ハートビートはオフです。テレメトリをここで管理するには設定を解除してください。",
     "governanceOverrideNote": "管理者のセキュリティポリシーがこれをオフにしています。ここで変更することはできません。",
     "installReceiptBody": "Kiro Crew の公式カタログから正常にインストールまたは更新された後、匿名レシートが1つ送信されます。外部レジストリ、ローカルアプリ、自己登録アプリは報告されません。",
     "installReceiptFields": "公式アプリスラッグ · アプリごとの匿名トークン (アプリ間でリンク不可) · 新規/更新フラグ · Kiro Crew バージョン",
@@ -10604,7 +10804,8 @@
     "shellWindowsCmdLabel": "Windows コマンドプロンプト",
     "toggleDescription": "今後の起動のために保存されます。",
     "toggleLabel": "匿名の使用状況ハートビートを送信",
-    "toggleSaveFailed": "テレメトリの選択を保存できませんでした。もう一度試してください。"
+    "toggleSaveFailed": "テレメトリの選択を保存できませんでした。もう一度試してください。",
+    "envOverrideWithSettingRef": "<settingRef/> がこの環境で設定されているため、ハートビートはオフです。ここでテレメトリを管理するには、設定を解除してください。"
   },
   "settings": {
     "display": {
@@ -10663,6 +10864,10 @@
       "overview": {
         "description": "システムの状態、アクティビティ、使用状況とメモリを一目で確認",
         "label": "概要"
+      },
+      "releases": {
+        "description": "各バージョンのリリースノート",
+        "label": "リリース"
       },
       "security": {
         "description": "セキュリティ体制、防御レイヤー、認定、データ分類",

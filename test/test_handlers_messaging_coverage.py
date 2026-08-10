@@ -115,6 +115,9 @@ def _info(**kw: Any) -> Any:
         "approval_mode": "",
         "silent": False,
         "_raw_task": "",
+        "include_memory": True,
+        "include_lessons": True,
+        "include_project": True,
     }
     base.update(kw)
     return SimpleNamespace(**base)
@@ -667,6 +670,23 @@ class TestApiSpawnRetry:
         _run(mod.api_spawn_retry, self._req(mgr))
         assert mgr.spawn.call_args.args[0] == "shown"
 
+    def test_retry_reuses_the_failed_run_context_scope(self) -> None:
+        """A retry must be the same experiment — not a wider-context rerun."""
+        mgr = _mgr()
+        mgr.get.return_value = _info(
+            done=True,
+            outcome="failed",
+            _raw_task="t",
+            include_memory=False,
+            include_project=False,
+        )
+        mgr.spawn.return_value = _info(id="new")
+        _run(mod.api_spawn_retry, self._req(mgr))
+        kwargs = mgr.spawn.call_args.kwargs
+        assert kwargs["include_memory"] is False
+        assert kwargs["include_lessons"] is True
+        assert kwargs["include_project"] is False
+
 
 class TestApiSpawnDelete:
     def test_404_for_unknown_native_card(self) -> None:
@@ -1214,6 +1234,27 @@ class TestBrowserConfig:
         payload = _payload(resp)
         assert payload["ok"] is True
         assert payload["mcp_status"] == "registration-failed"
+
+    def test_installer_exception_never_500s_defers_softly(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        # Enabling Browser Mode must NEVER 500 or surface a raw install error, even
+        # if the (contracted-non-raising) installer raises unexpectedly. The save
+        # returns 200 with a calm browser-deferred advisory; Browser Mode stays on.
+        monkeypatch.setattr(loader, "data_home", lambda: tmp_path)
+        monkeypatch.setattr(mod, "generate_playwright_config", lambda engine=None: None)
+        monkeypatch.setattr(mod, "register_playwright_proxy", lambda: (None, "registered"))
+
+        def _explode(engine: str) -> dict:
+            raise RuntimeError("unexpected boom deep in the installer")
+
+        monkeypatch.setattr(mod, "ensure_playwright_installed", _explode)
+        resp = _run(mod.api_browser_config_save, _Req(_state(), {"enabled": True, "extension_mode": False}))
+        assert resp.status == 200
+        payload = _payload(resp)
+        assert payload["ok"] is True and payload["enabled"] is True
+        assert payload["install"]["step"] == "browser-deferred"
+        assert "boom" not in payload["install"]["detail"]
 
     def test_app_token_cannot_enable_browser_mode(self, monkeypatch, tmp_path: Path) -> None:
         # Enabling Browser Mode is a keystone-level grant; an app token (truthy

@@ -4,6 +4,8 @@ import { Paperclip, X, Download, Plus, Minus, Search, Folder } from 'lucide-reac
 import ReactMarkdown from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkCjkFriendly from 'remark-cjk-friendly'
+import remarkCjkFriendlyGfmStrikethrough from 'remark-cjk-friendly-gfm-strikethrough'
 import remarkMath from 'remark-math'
 import rehypeRaw from 'rehype-raw'
 import rehypeKatex from 'rehype-katex'
@@ -32,6 +34,9 @@ import { urlTransform, ALLOWED_PROTOCOLS } from '../utils/urlTransform'
 import { safeHttpUrl } from '../lib/safeUrl'
 import { useLinkMeta } from '../lib/linkMeta'
 import { LinkChip, LinkCard } from './LinkPreview'
+import { parseSourceLinkUrl } from '../utils/pullRequestLinks'
+import { JiraHostsCtx } from '../lib/jiraHosts'
+import JiraLogo from './icons/JiraLogo'
 import DiffBlock from './DiffBlock'
 import MonacoCodeBlock from './MonacoCodeBlock'
 import { SmoothResize } from './SmoothResize'
@@ -151,6 +156,24 @@ export const BasePathCtx = createContext<string | null>(null)
  * images keep the full inline size. Default false = full size.
  */
 export const CompactImagesCtx = createContext<boolean>(false)
+
+/**
+ * A per-message token appended to local image URLs.
+ *
+ * `/api/file-raw?path=…` addresses a file by PATH, so every impression of a file
+ * an agent rewrites across turns resolves to one URL — and a browser treats one
+ * URL in one document as one resource. The second `<img>` is then served from the
+ * in-document memory cache with no network request at all, so the new message
+ * paints the OLD bytes. Measured in Chrome: without a distinct URL the edited
+ * file is never re-fetched, and no HTTP cache header changes that — `ETag`,
+ * `Cache-Control: no-cache` and even `no-store` are not consulted, because the
+ * request is never made.
+ *
+ * Making the URL per-message gives each impression its own cache entry, so a new
+ * message shows the current bytes while an earlier one keeps what it fetched.
+ * Stable within a message, so re-renders and streaming do not re-request.
+ */
+export const ImageVersionCtx = createContext<string | null>(null)
 
 /**
  * Per-consumer override for rendered markdown LINKS.
@@ -382,7 +405,34 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
   const claimed = href && override ? override({ href, children }) : null
   const target = useUnfurlHref(claimed ? null : href)
   const meta = useLinkMeta(target ?? undefined, target !== null)
+  // Jira issue URLs chip synchronously from the URL alone (icon + issue key) —
+  // no fetch, unlike the unfurl chip below. Jira instances sit behind auth, so
+  // an unfurl of one can never succeed; parsing the key out of the path is the
+  // only way these links ever get at-a-glance recognition. Self-hosted
+  // instances come through `JiraHostsCtx` from the operator allowlist.
+  const jiraHosts = useContext(JiraHostsCtx)
+  const jira = useMemo(() => {
+    if (!href || claimed) return null
+    const link = parseSourceLinkUrl(href, [], jiraHosts)
+    return link?.provider === 'jira' ? link : null
+  }, [href, claimed, jiraHosts])
   if (claimed) return <>{claimed}</>
+  if (jira) {
+    return (
+      <span className="group inline-flex max-w-full items-center gap-1 rounded-md border border-border/60 bg-accent/10 px-1.5 py-px align-baseline text-[13px] transition-colors hover:border-border hover:bg-accent/20 focus-within:border-border">
+        <a
+          href={jira.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={href}
+          className="inline-flex min-w-0 items-center gap-1.5 text-text no-underline focus-ring"
+        >
+          <JiraLogo size={12} className="shrink-0" />
+          <span className="truncate max-w-[24ch]">{`${jira.repo}-${jira.number}`}</span>
+        </a>
+      </span>
+    )
+  }
   if (target && meta) return <LinkChip meta={meta} href={target}>{children}</LinkChip>
   let ext = false
   try { ext = !!href && ALLOWED_PROTOCOLS.has(new URL(href, 'http://x').protocol) } catch { /* not a URL */ }
@@ -683,6 +733,7 @@ function ImgWithFallback({
   const [loaded, setLoaded] = useState(false)
   const basePath = useContext(BasePathCtx)
   const compact = useContext(CompactImagesCtx)
+  const version = useContext(ImageVersionCtx)
   if (!src) return null
   const isLocal = src.startsWith('/') || src.startsWith('~') || src.startsWith('.')
     || (basePath && !src.startsWith('http'))
@@ -694,6 +745,10 @@ function ImgWithFallback({
     } else {
       url = `/api/file-raw?path=${encodeURIComponent(src)}`
     }
+    // See ImageVersionCtx: without this every impression of a rewritten file
+    // shares one cache entry and a new message renders the previous bytes. The
+    // backend reads only `path`, so the extra parameter is inert server-side.
+    if (version) url += `&v=${encodeURIComponent(version)}`
   } else {
     url = src
   }
@@ -1001,7 +1056,23 @@ export function rehypeSanitize() {
   }
 }
 
-const REMARK_PLUGINS: PluggableList = [remarkGfm, [remarkMath, { singleDollarTextMath: false }]]
+// CommonMark has a known emphasis defect (commonmark/commonmark-spec#650): a
+// closing `**` is only right-flanking when it is NOT preceded by punctuation, or
+// IS followed by whitespace/punctuation. `**中文（带括号）。**这句` fails both —
+// preceded by `。`, followed by the letter `这` — so it renders as literal
+// asterisks. English prose sidesteps this by putting a space after the `**`; CJK
+// cannot, because a space there is visibly wrong.
+//
+// `remark-cjk-friendly` implements the CJK-friendly flanking amendment. ORDER IS
+// LOAD-BEARING: it must run BEFORE remark-gfm (it changes how emphasis
+// delimiters are classified), and the strikethrough companion AFTER, because it
+// extends gfm's own `~~` construct.
+const REMARK_PLUGINS: PluggableList = [
+  remarkCjkFriendly,
+  remarkGfm,
+  remarkCjkFriendlyGfmStrikethrough,
+  [remarkMath, { singleDollarTextMath: false }],
+]
 const REHYPE_PLUGINS: PluggableList = [[rehypeRaw, { passThrough: ['math', 'inlineMath'] }], rehypeSanitize, rehypeKatex]
 
 // Matches one source line break plus any leading tabs/spaces, so a trailing
@@ -1696,6 +1767,10 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
           lightbox scoping on the div above is unaffected) and lives in this module
           so a caller that mocks it in tests never needs to re-export the context. */}
       <CompactImagesCtx.Provider value={compactImages}>
+      {/* ImageVersionCtx: scopes local image URLs to this message so an agent
+          rewriting one file across turns is not served the previous bytes from
+          the in-document resource cache. */}
+      <ImageVersionCtx.Provider value={messageTs ?? null}>
         {blocks.map((block, i) => (
           // Key on startLine (stable across streaming) instead of block.type, so
           // a code -> diff reclassification mid-stream doesn't unmount the
@@ -1720,6 +1795,7 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
             softBreaks={softBreaks}
           />
         ))}
+      </ImageVersionCtx.Provider>
       </CompactImagesCtx.Provider>
       </PathActionCtx.Provider>
       </PathProbeCtx.Provider>

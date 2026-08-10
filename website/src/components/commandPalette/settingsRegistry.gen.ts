@@ -95,7 +95,8 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Context usage % at which auto-compaction triggers. Lower = more frequent compaction, longer sessions",
     "tab": "chat",
     "type": "select",
-    "occurrence": 1
+    "occurrence": 1,
+    "configKey": "session.autocompact_pct"
   },
   {
     "id": "chat.auto-ingest-limit-per-scan",
@@ -266,7 +267,8 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Keep your computer awake while a task is running",
     "tab": "chat",
     "type": "toggle",
-    "occurrence": 1
+    "occurrence": 1,
+    "configKey": "dashboard.prevent_sleep"
   },
   {
     "id": "chat.quick-send",
@@ -278,7 +280,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
   {
     "id": "chat.response-verbosity",
     "label": "Response Verbosity",
-    "description": "How terse the agent's prose is. Ultra-concise writes for an ADHD reader: the answer lands in an opening of at most three sentences, and any detail after it must be scannable bullets rather than prose. Code, commands, and error strings stay verbatim; security warnings and multi-step instructions keep full detail at every level.",
+    "description": "How terse the agent's prose is. Ultra-concise keeps the whole reply short: answer first, bullets over paragraphs, no filler. Code, commands, and error strings stay verbatim at every level, and security warnings and multi-step instructions keep full detail.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1
@@ -570,7 +572,8 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Analyze each completed session and draft a reusable SKILL.md when a non-trivial multi-step procedure is detected. Off by default. Drafts are staged to the pending queue on the Skills tab for review — nothing goes live without your approval (see below).",
     "tab": "skills",
     "type": "toggle",
-    "occurrence": 1
+    "occurrence": 1,
+    "configKey": "skills.auto_create_from_sessions"
   },
   {
     "id": "skills.require-approval-before-generated-skills-go-live",
@@ -578,7 +581,8 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Keep every auto-generated candidate in the pending queue until you approve it. Turning this off lets prose-only skills publish automatically; skills that bundle scripts always require approval regardless.",
     "tab": "skills",
     "type": "toggle",
-    "occurrence": 1
+    "occurrence": 1,
+    "configKey": "skills.approval_required"
   },
   {
     "id": "voice.auto-speak-responses",

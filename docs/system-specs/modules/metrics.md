@@ -80,10 +80,11 @@ second `PeriodicExportingMetricReader` alongside the local JSONL sink
 `pip install "kirocrew[otlp]"`. If the endpoint is set but the package extra is
 not installed, telemetry
 degrades to local-only with a warning instead of crashing. The OTLP exporter
-only ever sees the same redacted, low-cardinality data points as the local sink
-(the `MetricsRecorder` facade sanitises attributes before they reach ANY
-reader), so opting in cannot leak prompts, content, tokens, paths, user ids, or
-secrets.
+sees the same data points as the local sink: the `MetricsRecorder` facade
+sanitises attributes before they reach ANY reader, and call sites are required
+to pass low-cardinality constants rather than prompts, content, tokens, paths or
+user ids. That sanitisation is defence in depth over the requirement, not a
+substitute for it, so egress is only as safe as the call sites feeding it.
 
 **Bounded local retention (rec #14, explicit opt-in):** both destructive caps
 default to `0`, so upgrading cannot delete existing telemetry history. Operators
@@ -118,13 +119,19 @@ can opt in independently to age and/or size bounds:
   dates, symlinks, and the lock sidecar are excluded. It is fully best-effort —
   a rotation/prune failure is logged and swallowed, never breaking export.
 
-**Never recorded:** prompts, message/tool content, token counts, filesystem
-paths, user ids, and secrets. `telemetry.otlp_endpoint` is schema-sensitive so
-credential-bearing collector URLs are masked by config API/UI consumers as well
-as omitted from logs. Enforced structurally at the `MetricsRecorder`
-facade via the `schema.py` guardrails (see below) — call sites emit only
-low-cardinality enum-like attribute values, and any string that looks like a
-credential/PII is redacted to `"[REDACTED]"` before it reaches an instrument.
+**Must never be recorded:** prompts, message/tool content, token counts,
+filesystem paths, user ids, and secrets. `telemetry.otlp_endpoint` is
+schema-sensitive so credential-bearing collector URLs are masked by config
+API/UI consumers as well as omitted from logs.
+
+That is a contract on call sites — they emit only low-cardinality enum-like
+attribute values — backed at the `MetricsRecorder` facade by the `schema.py`
+guardrails (see below), which redact a string matching a known credential shape,
+or clearing the entropy backstop, to `"[REDACTED]"` before it reaches an
+instrument. Namespace validation is exhaustive; attribute redaction is defence
+in depth with a bounded reach (`schema.py` documents where the entropy backstop
+can and cannot fire), so it narrows the blast radius of a call site that breaks
+the contract rather than making one impossible.
 
 Tests: `test/metrics/test_local_exporter.py` (retention: direct age cap,
 oldest-first size cap, live-writer protection, live-shard rotation, non-blocking
@@ -357,14 +364,14 @@ Each row (`_build_token_record`) carries:
 | `ts` | str | ISO-8601 local timestamp of the turn |
 | `slot` | str | chat slot / session key |
 | `provider` | str | LLM backend (`acp` / `claude_code` / `bedrock` / …), `""` if unknown |
-| `model` | str | model id for the turn |
+| `model` | str | resolved model id for the turn; `"auto"` when the completed turn only exposes the Auto request; `""` if no model source is available |
 | `input` / `output` | int | prompt / completion tokens (structurally `0` on the ACP backend — kiro-cli bills credits only) |
 | `cache_create` / `cache_read` | int | cache-write / cache-read tokens |
 | `cost` | float | provider-reported USD cost (`0.0` on ACP) |
 | `credits` | float | kiro-cli per-turn credit spend (float-coerced) |
 | `turns` | int | provider `num_turns` |
 | `duration_ms` | int | provider-reported turn duration (`0` on ACP) |
-| `surface` | str | **(#647)** dispatch origin — `dashboard`, `cron`, `subagent`, `monitor`, `heartbeat`, `webhook`, `task_runner`, `workflow`; `""` if unset |
+| `surface` | str | **(#647, #1551)** canonical dispatch/session source. Dashboard-backed turns derive the source from the effective session key through `telemetry_channel_of` (so linked Slack/Telegram sessions retain their transport); Task Runner writes `taskrunner`; other writers use their dispatch origin (`cron`, `subagent`, `monitor`, `heartbeat`, `webhook`, `workflow`, …). `""` if unset |
 | `agent` | str | **(#647)** agent id resolved for the turn; `""` if unset |
 | `context_used` | int | **(#647)** context-window tokens occupied after the turn (int-coerced) |
 | `context_window` | int | **(#647)** served context-window size in tokens (int-coerced) |
@@ -383,10 +390,11 @@ are read from the provider at the persist call site via
 `acp/session_provider.py`) behind `getattr` guards and returns `(0, 0)` on any
 missing accessor or exception — so non-ACP providers and test doubles record
 zeros and the analytics helper never breaks the turn it measures. `surface`
-lets background turn-dispatch surfaces (cron/subagent/monitor/heartbeat/webhook/
-task_runner/workflow) attribute their spend; zero-token surfaces (cron
-`script=`/`command=` modes, heartbeat maintenance ticks) never call a model and
-must not write a row.
+lets channel-backed turns and background dispatch surfaces (cron/subagent/
+monitor/heartbeat/webhook/taskrunner/workflow) retain their canonical source;
+`context_occupancy` normalizes the historical `task_runner` spelling to
+`taskrunner` when rows are read. Zero-token surfaces (cron `script=`/`command=`
+modes, heartbeat maintenance ticks) never call a model and must not write a row.
 
 **Per-turn injection breakdown (`ctx_blocks` / `phase`).** `ctx_blocks` is
 produced by `context_blocks.split_blocks(prompt, user_chars=…)`, which attributes
@@ -514,13 +522,15 @@ from fields the row store already carries — no new instrumentation:
 | `conversations` | EVERY session in the window (not a top-N), each with its `category`, the unollapsed `channel` beneath it, peak occupancy, span, per-turn growth rate, and a projected turns-to-compaction. Named `conversations` for payload compatibility; the entity is a session |
 | `by_category` | same shape as `by_model`, keyed by `usage.session_category(slot)` — the taxonomy the panel groups by: `bg` for an unattended session (cron, heartbeat, task runner), otherwise the transport (`dashboard`, `telegram`, `slack`, …) |
 
-**Channel comes from the slot key, not from `surface`.** `surface` cannot
-separate transports: `chat_runner` stamps `surface="dashboard"` for every turn
-that flows through it regardless of where the message arrived from, so a
-Telegram turn is booked as dashboard spend (observable in the row store as a
-`telegram_*` slot carrying `surface="dashboard"`). The slot key is assigned by
-the transport that created the session and is therefore the only field that
-distinguishes them.
+**Channel comes from the slot key, not from `surface`.** New writes now derive
+`surface` from the effective session identity, but historical rows may contain a
+wrong, non-empty value (for example a Telegram turn stamped `dashboard`). The
+row format has no schema version or writer/trust marker that distinguishes those
+legacy values from corrected writes. Cost/category attribution therefore keeps
+the slot key authoritative; preferring a non-empty `surface` would silently
+misattribute existing history. The stored slot/session key remains stable across
+the write-side correction and is still the compatibility boundary for this
+reader.
 
 **A conversation's `title` is attached by the endpoint, from two sources in
 order.** `cost_breakdown` names nothing — slot keys are all the row store holds.
@@ -555,10 +565,14 @@ two or three points.
 Tests: `test/test_usage.py` (`TestReadContextTokens`,
 `TestBuildTokenRecordContextFields`, `TestBuildTokenRecordCtxBlocks`,
 `TestPersistTokenRecord*`), `test/metrics/test_context_occupancy.py`
-(aggregation, skips, latest-turn wins), `test/metrics/test_cost_breakdown.py`
+(aggregation, skips, latest-turn wins, historical Task Runner spelling),
+`test/metrics/test_cost_breakdown.py`
 (channel attribution incl. the bare dashboard slot form, no-truncation,
 prior-window deltas, band bucketing, post-compaction slope, growth
-withholding, non-finite rejection) and `test/metrics/test_telemetry_titles.py`
+withholding, non-finite rejection), `test/test_dashboard_chat.py` (effective
+session source at the dashboard write site),
+`test/test_turn_duration_task_runner.py` (canonical Task Runner writes), and
+`test/metrics/test_telemetry_titles.py`
 (title redaction + cache purity, and the closed-conversation fallback: the
 canonical transcript key, live-wins-over-persisted, one read per shared
 transcript, and no title where the metadata line names none), plus the
@@ -921,8 +935,11 @@ always matches and the suppression would never fire (a real bug caught by
 `TestDefaultHomeDetection`).
 
 `kirocrew telemetry status | disable | enable` — `status` prints the exact
-payload and never materializes an id (`install_id(create=False)`); `disable`
-persists to `config.json` so the choice survives a new shell.
+payload and never materializes an id (`install_id(create=False)`). Its numbered,
+choose-one opt-out list leads with `kirocrew telemetry disable` because that choice
+persists to `config.json` and survives a new shell. Each method is a separate visual
+block: the environment override groups separately labelled macOS/Linux, PowerShell,
+and Command Prompt syntax, followed by the equivalent config key.
 
 `beacon.is_env_opted_out()` is the public probe for "the env var pins this off".
 It exists so the dashboard can distinguish *off because the stored flag is false*
