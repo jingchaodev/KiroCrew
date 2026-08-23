@@ -242,7 +242,6 @@ src/kiro_crew/dashboard/handlers/mcp.py
 src/kiro_crew/dashboard/handlers/mcp_apps.py
 src/kiro_crew/dashboard/handlers/mcp_custom.py
 src/kiro_crew/dashboard/handlers/memory.py
-src/kiro_crew/dashboard/handlers/messaging.py
 src/kiro_crew/dashboard/handlers/notifications_push.py
 src/kiro_crew/dashboard/handlers/prompts.py
 src/kiro_crew/dashboard/handlers/security.py
@@ -375,7 +374,6 @@ src/kiro_crew/mcp_tools/browser.py
 src/kiro_crew/mcp_tools/control.py
 src/kiro_crew/mcp_tools/knowledge.py
 src/kiro_crew/mcp_tools/skills.py
-src/kiro_crew/mcp_tools/spawn.py
 src/kiro_crew/mcp_tools/workflows.py
 src/kiro_crew/mcp_utils.py
 src/kiro_crew/messaging/attachments.py
@@ -414,8 +412,6 @@ src/kiro_crew/service/apparmor.py
 src/kiro_crew/service/common.py
 src/kiro_crew/service/linux.py
 src/kiro_crew/service/macos.py
-src/kiro_crew/session.py
-src/kiro_crew/session_directive.py
 src/kiro_crew/session_pid_sig.py
 src/kiro_crew/session_workspace.py
 src/kiro_crew/skill_providers/skillsh.py
@@ -426,13 +422,10 @@ src/kiro_crew/skills_script_validator.py
 src/kiro_crew/slack/blocks.py
 src/kiro_crew/slack/client.py
 src/kiro_crew/slack/enterprise.py
-src/kiro_crew/slack/events.py
 src/kiro_crew/slack/gateway.py
-src/kiro_crew/slack/handler.py
 src/kiro_crew/slack/interactions.py
 src/kiro_crew/slack/renderer.py
 src/kiro_crew/slack/sessions_view.py
-src/kiro_crew/subagent.py
 src/kiro_crew/subagent_persistence.py
 src/kiro_crew/subagent_scale.py
 src/kiro_crew/suggestions.py
@@ -475,7 +468,6 @@ test/metrics/test_local_exporter.py
 test/metrics/test_mcp_gateway_metrics.py
 test/metrics/test_provider_bucket_views.py
 test/metrics/test_schema.py
-test/metrics/test_startup_channel_attrs.py
 test/metrics/test_telemetry_handler.py
 test/metrics/test_telemetry_titles.py
 test/metrics/test_turn_metric.py
@@ -1025,7 +1017,6 @@ test/test_memory_benchmark_workflow.py
 test/test_memory_selfheal.py
 test/test_merge_queued_messages.py
 test/test_message_provenance.py
-test/test_message_queue.py
 test/test_messaging_attachments.py
 test/test_messaging_driver.py
 test/test_messaging_link.py
@@ -1111,7 +1102,6 @@ test/test_project_git.py
 test/test_project_git_status_log.py
 test/test_prompt_timeout_follows_ceiling.py
 test/test_prompts.py
-test/test_provider_dispatch.py
 test/test_publish_feed_contract.py
 test/test_publish_providers.py
 test/test_publish_sync.py
@@ -1167,7 +1157,6 @@ test/test_sel_prune_streaming.py
 test/test_send_message_targeted.py
 test/test_service.py
 test/test_serving_loop_unified.py
-test/test_session.py
 test/test_session_cleanup.py
 test/test_session_core_audit.py
 test/test_session_coverage.py
@@ -1224,7 +1213,6 @@ test/test_slack_events_coverage.py
 test/test_slack_gateway.py
 test/test_slack_gateway_coverage.py
 test/test_slack_gateway_cron_exec_coverage.py
-test/test_slack_golden_transcript.py
 test/test_slack_handler_coverage.py
 test/test_slack_handler_coverage_branches.py
 test/test_slack_handler_more_coverage.py

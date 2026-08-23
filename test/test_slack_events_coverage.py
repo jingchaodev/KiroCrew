@@ -1761,6 +1761,7 @@ class TestRouteMessageQueueing:
     @pytest.mark.asyncio
     async def test_session_level_enqueue_short_circuits(self):
         orch = _make_orch()
+        orch.sessions.is_busy.return_value = True
         orch.sessions.enqueue = MagicMock(return_value=True)
         orch.slack.add_reaction = AsyncMock(side_effect=RuntimeError("rate limited"))
         with patch("kiro_crew.slack.events.is_allowed_user", return_value=True):

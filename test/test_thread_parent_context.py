@@ -101,6 +101,9 @@ class FakeSessionManager:
     def get_pid(self, key):
         return None
 
+    def is_busy(self, key):
+        return False
+
     def set_slack_link(self, key, thread_ts, channel_id):
         pass
 

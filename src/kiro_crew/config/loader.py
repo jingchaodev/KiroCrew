@@ -7527,6 +7527,7 @@ class KiroCrewConfig:
         from kiro_crew.providers.acp import AcpProvider
 
         factory_backend = self.agent.acp_backend or ""
+        acp_backends.descriptor_for(factory_backend)
         # Capability lookups follow the effective backend of each call. Dedicated
         # subagent children pass the live parent harness, which can differ from
         # this snapshot after a Settings switch.

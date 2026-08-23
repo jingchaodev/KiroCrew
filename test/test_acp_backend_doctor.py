@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from kiro_crew.acp import claude, client as acp_client, codex, doctor, goose, opencode, pi
+from kiro_crew.acp import claude
+from kiro_crew.acp import client as acp_client
+from kiro_crew.acp import codex, doctor, goose, opencode, pi
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,

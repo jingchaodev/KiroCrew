@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from kiro_crew.acp import spec_servers
+from kiro_crew.acp import claude, opencode, spec_servers
 from kiro_crew.acp._dispatch import parse_session_update
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
@@ -58,6 +58,7 @@ class TestRoutedAdaptersReceiveCoreTools:
         assert "kirocrew-cron" in names
 
     def test_claude_seeded_settings_deliver_core(self, tmp_path) -> None:
+        claude.ensure_routed_settings(tmp_path)
         names = {
             e["name"] for e in _client(ACP_BACKEND_CLAUDE, tmp_path)._spec_session_mcp_servers()
         }
@@ -72,6 +73,7 @@ class TestRoutedAdaptersReceiveCoreTools:
         assert "kirocrew-cron" in names
 
     def test_opencode_is_routed_and_receives_crew_servers(self, tmp_path) -> None:
+        opencode.ensure_routed_settings(tmp_path)
         names = {
             e["name"] for e in _client(ACP_BACKEND_OPENCODE, tmp_path)._spec_session_mcp_servers()
         }

@@ -266,6 +266,9 @@ class _FakeSessionManager:
     def get_provider(self, key):
         return None
 
+    def is_busy(self, key):
+        return False
+
     async def reset(self, key):
         pass
 

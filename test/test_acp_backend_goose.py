@@ -22,7 +22,6 @@ import pytest
 
 from kiro_crew.acp import backends, tool_gate
 from kiro_crew.acp.client import AcpClient
-from kiro_crew.acp.types import METHOD_SESSION_LOAD, METHOD_SESSION_NEW
 from kiro_crew.acp.codex import Verdict
 from kiro_crew.acp.types import (
     ACP_BACKEND_GOOSE,
@@ -31,6 +30,8 @@ from kiro_crew.acp.types import (
     ACP_BACKENDS_SELECTABLE,
     ACP_BACKENDS_SESSION_SHARING,
     ACP_BACKENDS_STEER,
+    METHOD_SESSION_LOAD,
+    METHOD_SESSION_NEW,
 )
 
 _SYNTHETIC_UNVERIFIED = "example-acp"
@@ -93,11 +94,11 @@ class TestGooseDescriptor:
         )
 
 
-class TestGooseIsRoutedViaPermissionRequest:
+class TestGooseIsRoutedViaSessionConfig:
     def test_verdict_is_routed(self, tmp_path: Path) -> None:
         verdict, reason = tool_gate.resolve_verdict(ACP_BACKEND_GOOSE, tmp_path)
         assert verdict is Verdict.ROUTED
-        assert "session/request_permission" in reason or "asks per privileged tool" in reason
+        assert "mode approve" in reason
 
     def test_enforce_succeeds_without_the_opt_out(self, tmp_path: Path) -> None:
         tool_gate.enforce(ACP_BACKEND_GOOSE, tmp_path, allow_ungated=False)

@@ -5847,7 +5847,7 @@ async def _run_chat(
                     # Forgery gate: record the directive-tool name ONLY from
                     # the trusted identity on the event (kiro ``_meta.kiro``,
                     # or a non-shell spec-adapter ``mcp__`` title) and ONLY
-                    # for a genuine call served by KiroCrew's OWN core MCP
+                    # for a genuine call served by Kiro Crew's own core MCP
                     # server — never a kiro-cli prose title, and never another
                     # (possibly third-party) MCP server that merely exposes a
                     # tool named e.g. "monitor_start". A shell tool has no

@@ -290,7 +290,7 @@ async def test_api_effort_levels_per_slot():
 
 
 @pytest.mark.asyncio
-async def test_api_effort_levels_slot_without_live_provider_falls_back():
+async def test_api_effort_levels_slot_without_live_provider_returns_empty():
     import kiro_crew.dashboard.chat_persistence as mod
     from kiro_crew.dashboard.handlers.agents import api_effort_levels
     orig_ordered = mod._reasoning_effort_ordered[:]
@@ -306,6 +306,6 @@ async def test_api_effort_levels_slot_without_live_provider_falls_back():
         resp = await api_effort_levels(request)
         assert resp.status == 200
         import json
-        assert json.loads(resp.body) == ["low", "medium", "high", "max"]
+        assert json.loads(resp.body) == []
     finally:
         mod._reasoning_effort_ordered = orig_ordered

@@ -155,7 +155,7 @@ cancelled caller still lets the worker settle).
 
 **Permission frames are bound to one handle.** A `session/request_permission` with a missing `sessionId` is answered once at connection level (`-32601`) and is never approved from a session handle. A frame whose `sessionId` belongs to a different registered handle is rejected on this one. A foreign id that is not another registered session is a routed backend-internal child and may be answered on the owner handle. Unknown `optionId` values fail closed (cancel / reject), never invent an answer.
 
-The host always sends one-shot approvals (`always=False`, the default). KiroCrew — not the agent — owns the trust scope (`slot._trust`, `slot._trust_reads`, `slot._trusted_patterns`, `safety_override`, `channel.trusted`, parent session `approval_policy`). Per-call `session/request_permission` is required so KiroCrew's PreToolUse hooks (`auto_deny_tools`, sensitive-path checks, credential redaction) fire on every tool invocation. The `always=True` argument is accepted for call-site compatibility and is treated as `allow_once`; it does not persist an adapter grant.
+The host always sends one-shot approvals (`always=False`, the default). Kiro Crew — not the agent — owns the trust scope (`slot._trust`, `slot._trust_reads`, `slot._trusted_patterns`, `safety_override`, `channel.trusted`, parent session `approval_policy`). Per-call `session/request_permission` is required so Kiro Crew's PreToolUse hooks (`auto_deny_tools`, sensitive-path checks, credential redaction) fire on every tool invocation. The `always=True` argument is accepted for call-site compatibility and is treated as `allow_once`; it does not persist an adapter grant.
 
 The handshake also branches on the backend:
 

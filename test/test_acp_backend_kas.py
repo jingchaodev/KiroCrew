@@ -84,6 +84,8 @@ class TestBackendPredicates:
             provider.is_kas_backend,
             provider.is_codex_backend,
             provider.is_goose_backend,
+            provider.is_opencode_backend,
+            provider.is_pi_backend,
         ]
         assert sum(held) == 1
 

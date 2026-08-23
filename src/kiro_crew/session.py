@@ -2978,8 +2978,8 @@ class SessionManager:
                         CAP_NATIVE_RESUME,
                         Level,
                         descriptor_for,
-                        level as cap_level,
                     )
+                    from kiro_crew.acp.backends import level as cap_level
 
                     backend = provider.client.backend
                     if cap_level(backend, CAP_NATIVE_RESUME) is Level.UNAVAILABLE:

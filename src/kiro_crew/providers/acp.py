@@ -29,6 +29,8 @@ from kiro_crew.acp.types import (
     ACP_BACKEND_GOOSE,
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
+    ACP_BACKEND_OPENCODE,
+    ACP_BACKEND_PI,
     ACP_BACKENDS_ACP_RUNTIME,
     ACP_BACKENDS_KIRO_IDENTITY_STORE,
     ACP_BACKENDS_SESSION_SHARING,
@@ -475,6 +477,16 @@ class AcpProvider(LLMProvider):
         terminal work back to the client instead of performing it in-process.
         """
         return self._client.backend == ACP_BACKEND_GOOSE
+
+    @property
+    def is_opencode_backend(self) -> bool:
+        """True when this ACP provider talks to OpenCode's ACP server."""
+        return self._client.backend == ACP_BACKEND_OPENCODE
+
+    @property
+    def is_pi_backend(self) -> bool:
+        """True when this ACP provider talks to the pi ACP adapter."""
+        return self._client.backend == ACP_BACKEND_PI
 
     @property
     def is_spec_adapter(self) -> bool:
