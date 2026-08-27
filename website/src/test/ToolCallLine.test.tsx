@@ -66,6 +66,55 @@ describe('ToolCallLine simplifiedToolNames', () => {
     renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
     expect(screen.getByText('Running: echo hello')).toBeTruthy()
   })
+
+  it('elides a multi-line raw label instead of rendering the whole command', () => {
+    // Raw mode: the exact command, clamped to one elided line.
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: false }))
+    const heredoc = "cat > /tmp/desc.md <<'EOF'\n### Notes\nbody line one\nbody line two\nEOF"
+    const msg = toolMsg({ content: `🔧 Running: ${heredoc}`, meta: { tool_call_id: 'tc_3' } })
+    const store = createTestStore({
+      chat: {
+        messages: [msg],
+        toolLog: [{ type: 'tool', text: heredoc, tool_call_id: 'tc_3', output: 'ok', ts: 1 }],
+        slotRunning: false,
+      } as unknown as ChatState,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    expect(screen.getByText("Running: cat > /tmp/desc.md <<'EOF'…")).toBeTruthy()
+    expect(screen.queryByText(/body line two/)).toBeNull()
+  })
+
+  it('derives a summary for a purpose-less flooding shell call in simplified mode', () => {
+    // The wild defect: no purpose, simplified ON. The label is summarized from
+    // the command itself instead of falling back to clipped raw code.
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: true }))
+    const heredoc = "cat > /tmp/desc.md <<'EOF'\n### Notes\nbody line one\nbody line two\nEOF"
+    const msg = toolMsg({ content: `🔧 Running: ${heredoc}`, meta: { tool_call_id: 'tc_4' } })
+    const store = createTestStore({
+      chat: {
+        messages: [msg],
+        toolLog: [{ type: 'tool', text: heredoc, tool_call_id: 'tc_4', output: 'ok', ts: 1 }],
+        slotRunning: false,
+      } as unknown as ChatState,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    expect(screen.getByText('Running: cat → /tmp/desc.md')).toBeTruthy()
+    expect(screen.queryByText(/body line two/)).toBeNull()
+  })
+
+  it('leaves a short raw shell label untouched in simplified mode', () => {
+    localStorage.setItem(LS_KEY, JSON.stringify({ simplifiedToolNames: true }))
+    const msg = toolMsg({ content: '🔧 Running: git status', meta: { tool_call_id: 'tc_5' } })
+    const store = createTestStore({
+      chat: {
+        messages: [msg],
+        toolLog: [{ type: 'tool', text: 'git status', tool_call_id: 'tc_5', output: 'clean', ts: 1 }],
+        slotRunning: false,
+      } as unknown as ChatState,
+    })
+    renderWithProviders(<ToolCallLine message={msg} running={false} />, { store })
+    expect(screen.getByText('Running: git status')).toBeTruthy()
+  })
 })
 
 describe('ToolCallLine inline expansion', () => {

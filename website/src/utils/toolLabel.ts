@@ -105,6 +105,123 @@ export function labelMatchesLanguage(text: string, lang: string): boolean {
   return true
 }
 
+/** Longest single line a tool pill will render before eliding. A pill is a
+ *  LABEL, not a viewport: the untruncated text stays reachable through the
+ *  row's `title` and the expanded detail panel, which receives the full input
+ *  independently of what the pill shows. */
+export const MAX_TOOL_LABEL_CHARS = 200
+
+/**
+ * Collapse a tool label to one elided line.
+ *
+ * `pickToolLabel` falls back to the RAW tool label whenever a call carries no
+ * purpose, and a raw shell label is the command verbatim — a heredoc body runs
+ * to thousands of characters across dozens of lines, which pushes the rest of
+ * the transcript off screen.
+ *
+ * The clamp is applied to the STRING rather than with `line-clamp` because the
+ * running pill paints its label through `background-clip: text`, and
+ * `line-clamp` would force `display: -webkit-box` underneath that gradient.
+ * Clamping the data also keeps the behaviour assertable in jsdom, which has no
+ * layout and therefore cannot observe a CSS clamp at all.
+ */
+export function clampToolLabel(label: string): string {
+  const newline = label.indexOf('\n')
+  const firstLine = newline === -1 ? label : label.slice(0, newline)
+  const hasMoreLines = newline !== -1 && label.slice(newline + 1).trim() !== ''
+  const clipped = firstLine.slice(0, MAX_TOOL_LABEL_CHARS)
+  const elided = clipped.length < firstLine.length || hasMoreLines
+  return elided ? `${clipped.trimEnd()}…` : firstLine
+}
+
+/** Shell titles arrive as ``Running: <command>``; MCP invocations as
+ *  ``Running: @server/tool``. Only the former is parseable as a command. */
+const RUNNING_PREFIX_RE = /^Running:\s+/
+/** ``VAR=value`` prefixes before the actual binary (``FOO=1 cmd …``). */
+const ENV_ASSIGN_RE = /^[A-Za-z_]\w*=/
+/** Pipeline/chain operators that separate command segments. Bare ``&`` is
+ *  excluded: redirects are masked first, and a lone ``&`` tail adds no name. */
+const SEGMENT_SPLIT_RE = /\|\|?|&&|;/
+/** First redirect target on the line (``> file`` / ``>> file``). */
+const REDIRECT_TARGET_RE = />>?\s*([^\s'"&|;]+)/
+
+/** Blank out quoted spans (keeping length) so operators inside quotes do not
+ *  split segments — ``grep -E 'foo|bar'`` is one command, not two. Display-only
+ *  port of the backend's ``_split_command_segments`` quote masking; escapes are
+ *  not interpreted because a wrong guess only degrades a label, never policy. */
+function maskQuotes(line: string): string {
+  let out = ''
+  let quote: string | null = null
+  for (const ch of line) {
+    if (quote) {
+      if (ch === quote) { quote = null; out += ch } else out += ' '
+    } else if (ch === "'" || ch === '"') { quote = ch; out += ch } else out += ch
+  }
+  return out
+}
+
+/**
+ * Derive a compact, language-neutral summary of a shell command label:
+ * the binaries it runs plus the first redirect target.
+ *
+ *   Running: cat > /tmp/desc.md <<'EOF' …   →  Running: cat → /tmp/desc.md
+ *   Running: export P=… cd … ls | grep -i x →  Running: export, ls, grep
+ *
+ * Returns null when the label is not a parseable shell command (MCP tools,
+ * file-edit titles), so the caller falls back to the clamped raw label. Built
+ * from command names and paths only — no prose — so it is script-neutral and
+ * needs no i18n catalog entry, and `labelMatchesLanguage` can never suppress it.
+ */
+/** Heredoc opener on a raw (unmasked) line — everything after it is data. */
+const HEREDOC_RE = /<<[-~]?\s*['"]?[A-Za-z_]/
+/** Shell bookkeeping that says nothing about what a command DOES. Dropped from
+ *  the summary when a more meaningful binary is present, kept when it is the
+ *  whole command (`cd /tmp` should still read `cd`). */
+const BOOKKEEPING = new Set(['export', 'cd', 'set', 'source', 'exec', 'unset'])
+
+export function deriveShellSummary(
+  label: string,
+  opts: { bareCommand?: boolean } = {},
+): string | null {
+  // Shell titles come in two shapes in the wild: ``Running: <command>`` and the
+  // bare ``<command>``. The bare shape is only safe to parse when the CALLER
+  // has established shell-ness (the tool log's ``is_shell``) — without that
+  // gate, ``Editing AGENTS.md`` would "derive" to the binary ``Editing``.
+  const prefix = label.match(RUNNING_PREFIX_RE)
+  if (!prefix && !opts.bareCommand) return null
+  const cmd = prefix ? label.slice(prefix[0].length) : label
+  if (cmd.startsWith('@')) return null
+  let names: string[] = []
+  let target = ''
+  // Parse every line until a heredoc opens: a multi-line script's real work is
+  // often not on line 1 (`export PATH=…` first, `brazil-build` second), while
+  // everything under a heredoc operator is document body, not commands.
+  for (const rawLine of cmd.split('\n')) {
+    const masked = maskQuotes(rawLine)
+    if (!target) target = masked.match(REDIRECT_TARGET_RE)?.[1] ?? ''
+    // Mask redirects AFTER capturing the target so 2>&1 / &> / << neither
+    // split segments nor contribute tokens.
+    const noRedirects = masked.replace(/\d*>&\d*|&>>?|>>?|<<?[-~]?/g, ' ')
+    for (const seg of noRedirects.split(SEGMENT_SPLIT_RE)) {
+      const tokens = seg.trim().split(/\s+/).filter(Boolean)
+      let i = 0
+      while (i < tokens.length && ENV_ASSIGN_RE.test(tokens[i])) i++
+      const head = tokens[i]
+      if (!head) continue
+      const base = head.split('/').pop() || head
+      if (/^[\w.@+-]+$/.test(base) && !names.includes(base)) names.push(base)
+    }
+    if (HEREDOC_RE.test(rawLine)) break
+  }
+  if (names.length > 1) {
+    const meaningful = names.filter(n => !BOOKKEEPING.has(n))
+    if (meaningful.length > 0) names = meaningful
+  }
+  if (names.length === 0) return null
+  const shown = names.length > 4 ? `${names.slice(0, 4).join(', ')} …` : names.join(', ')
+  return `${prefix ? prefix[0] : ''}${shown}${target ? ` → ${target}` : ''}`
+}
+
 /**
  * Choose the text a tool pill / session-row / approval bar should display.
  *

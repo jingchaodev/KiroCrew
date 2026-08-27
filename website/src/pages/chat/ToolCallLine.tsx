@@ -5,7 +5,7 @@ import { useAppSelector, useAppDispatch } from '../../store'
 import { clearFocusToolCallId, mcpAppKey } from '../../store/chatSlice'
 import { useSimplifiedToolNames } from '../../hooks/useSimplifiedToolNames'
 import { useLanguage } from '../../i18n/LanguageProvider'
-import { pickToolLabel } from '../../utils/toolLabel'
+import { clampToolLabel, deriveShellSummary, pickToolLabel } from '../../utils/toolLabel'
 import { LoaderCircle, CircleSlash, CircleAlert, CircleDot, Lock, PanelRight } from 'lucide-react'
 import { PanelRightSolid } from '../../components/icons/panels'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
@@ -616,6 +616,23 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
     const stripped = toolLabel.split(filePath).join('').replace(/\s+/g, ' ').trim()
     return stripped || toolLabel
   }, [showFileOpen, filePath, toolLabel])
+  // A label with no purpose behind it is the raw command, which for a heredoc
+  // runs to thousands of characters. Elide to one line and keep the full text on
+  // the row's title; the expanded panel already carries the untruncated input.
+  // Two-layer label: in simplified mode a label that would be elided anyway is
+  // first summarized from the command itself (binaries + redirect target), so a
+  // purpose-less shell call reads like a description instead of clipped code.
+  // Short labels never enter this path — `Running: git status` stays verbatim.
+  // Raw mode (`simplified` off) keeps the exact command, clamped to one line.
+  const pillLabelText = useMemo(() => {
+    const clamped = clampToolLabel(displayLabel)
+    if (simplified && clamped !== displayLabel) {
+      const derived = deriveShellSummary(displayLabel, { bareCommand: isShell })
+      if (derived) return clampToolLabel(derived)
+    }
+    return clamped
+  }, [displayLabel, simplified, isShell])
+  const pillLabelTitle = pillLabelText === displayLabel ? undefined : displayLabel
   // Both running and pending-approval pills shimmer — the highlight color
   // tracks the status so pending shimmers warn-yellow (matching the approval
   // bar) and running shimmers accent.
@@ -743,6 +760,7 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
         ref={pillButtonRef}
         className={`inline-flex ${ROW_PILL_BUTTON_CLASS} focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none ${hasPendingPerm ? 'cursor-default' : 'cursor-pointer hover:brightness-110'}`}
         aria-expanded={effectivelyExpanded}
+        title={pillLabelTitle}
         aria-label={hasPendingPerm
           ? i18nT('pages.chat.toolCallLine.aria_awaiting_approval', { label })
           : effectivelyExpanded
@@ -766,9 +784,9 @@ export default memo(function ToolCallLine({ message, running: _running, slot, on
             }}
             animate={{ backgroundPosition: ['100% 0%', '-50% 0%'] }}
             transition={{ duration: 2.4, repeat: Infinity, ease: 'linear' }}
-          >{displayLabel}</motion.span>
+          >{pillLabelText}</motion.span>
         ) : (
-          <span className="break-words min-w-0 leading-5 text-muted hover:text-text transition-colors">{displayLabel}</span>
+          <span className="break-words min-w-0 leading-5 text-muted hover:text-text transition-colors">{pillLabelText}</span>
         )}
       </button>
 
