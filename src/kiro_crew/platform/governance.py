@@ -1579,6 +1579,34 @@ def _parse_controls(data: Mapping[str, object], *, is_policy: bool) -> Dict[str,
 # ──────────────────────────────────────────────────────────────────────────
 # Loader
 # ──────────────────────────────────────────────────────────────────────────
+def _coerce_boot_flag(
+    boot_raw: Mapping[str, object], key: str, *, default: bool, closed: bool
+) -> bool:
+    """Read one ``boot`` gate flag strictly.
+
+    A real boolean is honoured; an absent key takes ``default``. Any other
+    present value — ``"false"``, ``"true"``, ``0``, ``1``, explicit ``null`` —
+    is NOT interpreted: the previous ``bool()`` read turned the string
+    ``"false"`` into ``True``, so a hand-edited or template-rendered policy
+    writing ``"allow_terminal": "false"`` switched the terminal ON while the
+    file read the opposite (#9176). Such a value is warned about and read as
+    ``closed``, that flag's fail-closed direction (``allow_terminal`` closes
+    to ``False``; ``require_sandbox`` and ``fail_closed`` close to ``True``).
+    """
+    if key not in boot_raw:
+        return default
+    value = boot_raw.get(key)
+    if isinstance(value, bool):
+        return value
+    logger.warning(
+        "security policy boot.%s is %r (not a boolean); reading it fail-closed as %r",
+        key,
+        value,
+        closed,
+    )
+    return closed
+
+
 def parse_policy(
     data: Mapping[str, object], *, signature_state: str = SIGNATURE_UNCHECKED
 ) -> GovernanceCeiling:
@@ -1602,9 +1630,9 @@ def parse_policy(
     if not isinstance(boot_raw, dict):
         raise PlatformCompositionError("security policy requires a 'boot' object")
     boot = BootControls(
-        require_sandbox=bool(boot_raw.get("require_sandbox", True)),
-        allow_terminal=bool(boot_raw.get("allow_terminal", False)),
-        fail_closed=bool(boot_raw.get("fail_closed", True)),
+        require_sandbox=_coerce_boot_flag(boot_raw, "require_sandbox", default=True, closed=True),
+        allow_terminal=_coerce_boot_flag(boot_raw, "allow_terminal", default=False, closed=False),
+        fail_closed=_coerce_boot_flag(boot_raw, "fail_closed", default=True, closed=True),
     )
     controls = _parse_controls(data, is_policy=True)
     identity = data.get("identity") or {}

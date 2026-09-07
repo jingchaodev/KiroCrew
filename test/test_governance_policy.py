@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 
 import pytest
 
@@ -59,6 +60,54 @@ def _policy_body(**overrides) -> dict:
     }
     body.update(overrides)
     return body
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Boot gate flags — strict coercion (#9176)
+# ──────────────────────────────────────────────────────────────────────────
+class TestBootFlagStrictness:
+    """``boot`` gate flags reject non-boolean JSON (#9176).
+
+    ``bool()`` on the raw value read the string ``"false"`` as ``True`` — the
+    fail-open direction for ``allow_terminal``.  A present-but-not-boolean
+    value must instead be read in that flag's fail-closed direction:
+    ``allow_terminal`` closes to ``False``; ``require_sandbox`` and
+    ``fail_closed`` close to ``True``.
+    """
+
+    # (flag, absent-default, fail-closed direction)
+    _FLAGS = (
+        ("require_sandbox", True, True),
+        ("allow_terminal", False, False),
+        ("fail_closed", True, True),
+    )
+
+    @pytest.mark.parametrize("flag,default,closed", _FLAGS)
+    @pytest.mark.parametrize("junk", ["false", "true", None, 0, 1])
+    def test_non_boolean_reads_fail_closed(self, flag, default, closed, junk):
+        policy = parse_policy({"version": 1, "boot": {flag: junk}})
+        assert (
+            getattr(policy.boot, flag) is closed
+        ), f"boot.{flag}={junk!r} must read fail-closed as {closed}"
+
+    @pytest.mark.parametrize("flag,default,closed", _FLAGS)
+    @pytest.mark.parametrize("real", [True, False])
+    def test_real_boolean_is_honoured(self, flag, default, closed, real):
+        policy = parse_policy({"version": 1, "boot": {flag: real}})
+        assert getattr(policy.boot, flag) is real
+
+    @pytest.mark.parametrize("flag,default,closed", _FLAGS)
+    def test_absent_key_takes_documented_default(self, flag, default, closed):
+        policy = parse_policy({"version": 1, "boot": {}})
+        assert getattr(policy.boot, flag) is default
+
+    def test_non_boolean_is_warned_about(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.platform.governance"):
+            parse_policy({"version": 1, "boot": {"allow_terminal": "false"}})
+        assert any(
+            "boot.allow_terminal" in rec.message and "fail-closed" in rec.message
+            for rec in caplog.records
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────

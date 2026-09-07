@@ -306,6 +306,15 @@ had ever established.
 
 ## Boot composition
 
+The three `boot` gate flags (`require_sandbox`, `allow_terminal`,
+`fail_closed`) are read strictly by `_coerce_boot_flag`: a real JSON boolean is
+honoured, an absent key takes the flag's documented default, and any other
+present value — `"false"`, `"true"`, `0`, `1`, explicit `null` — is warned
+about and read in that flag's **fail-closed direction** (`allow_terminal`
+closes to `False`; the other two close to `True`). `bool()` on the raw value
+used to read the string `"false"` as `True`, turning the terminal ON from a
+policy file that read as turning it off (#9176).
+
 `build_default_context` (the single chokepoint backing both a real boot and the
 lazy `current_context` default) calls `load_security_policy()` and stores the
 result in the frozen `PlatformContext.governance` field. `CONTRACT_VERSION`
