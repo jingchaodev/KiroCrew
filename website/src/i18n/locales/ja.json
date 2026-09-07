@@ -10629,7 +10629,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "エージェントがどれもピン留めしないときに新しいセッションが開始するモデル。エージェント機能 → エージェント でエージェントごとにモデルを設定するか、セッション内でそれをオーバーライドするモデルを選択します。",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "完了イベントを親セッションに注入するときにサブエージェントのストリームのどの部分を保持するか。「開始」はストリーム開始を保持します（デフォルト、レガシー動作と一致）。「終了」は最終要約を保持します。「両方」は各端からスライスを保持し、その間にマーカーがあります。",
         "widget_density": "ウィジェット密度",
-        "your_role": "あなたの役割"
+        "your_role": "あなたの役割",
+        "markdown_cards_open_in_raw_view": "Markdown cards open in Raw view",
+        "new_markdown_content_cards_show_source_text_inst": "New markdown content cards show source text instead of rendered formatting"
       },
       "computerUsePanel": {
         "accessibility": "アクセシビリティ",

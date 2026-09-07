@@ -49,6 +49,7 @@ import DiffBlock from './DiffBlock'
 import EditableCodeBlock from './EditableCodeBlock'
 import { SmoothResize } from './SmoothResize'
 import SegmentedControl from './SegmentedControl'
+import { loadChatConfig } from '../pages/chat/ChatSettings'
 import type { ContentBlock } from '../types'
 
 /** Fenced-markdown languages that get the Formatted/Raw card (#9196). */
@@ -67,7 +68,9 @@ function MarkdownContentCard({ code, lang, complete }: {
   lang: string
   complete: boolean
 }) {
-  const [mode, setMode] = useState<'formatted' | 'raw'>('formatted')
+  const [mode, setMode] = useState<'formatted' | 'raw'>(
+    () => (loadChatConfig().markdownCardDefaultRaw ? 'raw' : 'formatted'),
+  )
   const toggle = complete ? (
     <SegmentedControl<'formatted' | 'raw'>
       segments={[

@@ -10877,7 +10877,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Con quale modello si avviano le nuove sessioni quando il loro agente non ne specifica uno. Imposta un modello per ogni agente in Capacità dell'agente → Agenti, oppure scegline uno all'interno di una sessione per sostituirlo lì.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Quale parte del flusso di un subagente conservare quando il suo evento di completamento viene inserito nella sessione principale. \"Inizio\" conserva la parte iniziale (predefinito, corrisponde al comportamento legacy). \"Fine\" conserva il riepilogo finale. \"Entrambi\" conserva una porzione da ciascuna estremità con un indicatore tra le due.",
         "widget_density": "Densità dei widget",
-        "your_role": "Il tuo ruolo"
+        "your_role": "Il tuo ruolo",
+        "markdown_cards_open_in_raw_view": "Markdown cards open in Raw view",
+        "new_markdown_content_cards_show_source_text_inst": "New markdown content cards show source text instead of rendered formatting"
       },
       "computerUsePanel": {
         "accessibility": "Accessibilità",

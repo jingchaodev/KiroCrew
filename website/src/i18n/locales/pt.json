@@ -10877,7 +10877,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Com qual modelo as novas sessões começam quando o agente delas não fixa nenhum. Defina um modelo por agente em Recursos do agente → Agentes ou escolha um dentro de uma sessão para substituí-lo ali.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Qual parte do fluxo de um subagente manter ao injetar seu evento de conclusão na sessão pai. Início preserva o começo (padrão, corresponde ao comportamento antigo). Fim preserva o resumo final. Ambos mantém um trecho de cada extremidade com um marcador entre eles.",
         "widget_density": "Densidade de widgets",
-        "your_role": "Sua função"
+        "your_role": "Sua função",
+        "markdown_cards_open_in_raw_view": "Markdown cards open in Raw view",
+        "new_markdown_content_cards_show_source_text_inst": "New markdown content cards show source text instead of rendered formatting"
       },
       "computerUsePanel": {
         "accessibility": "Acessibilidade",

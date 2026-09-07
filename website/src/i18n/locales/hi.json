@@ -10754,7 +10754,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "जब किसी एजेंट का अपना कोई मॉडल तय न हो, तो नए सेशन किस मॉडल से शुरू होते हैं। हर एजेंट के लिए मॉडल क्षमताएँ → एजेंट में सेट करो, या किसी सेशन के भीतर मॉडल चुनकर वहाँ इसे बदल दो।",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "पैरेंट सेशन में सबएजेंट का कंप्लीशन इवेंट डालते समय उसकी स्ट्रीम का कौन-सा हिस्सा रखा जाए। Head शुरुआत को बनाए रखता है (डिफ़ॉल्ट, पुराने व्यवहार के अनुरूप)। Tail अंतिम सारांश को बनाए रखता है। Both दोनों सिरों से एक-एक हिस्सा रखता है और उनके बीच एक मार्कर लगाता है।",
         "widget_density": "विजेट घनत्व",
-        "your_role": "आपकी भूमिका"
+        "your_role": "आपकी भूमिका",
+        "markdown_cards_open_in_raw_view": "Markdown cards open in Raw view",
+        "new_markdown_content_cards_show_source_text_inst": "New markdown content cards show source text instead of rendered formatting"
       },
       "computerUsePanel": {
         "accessibility": "सुगम्यता",

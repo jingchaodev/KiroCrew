@@ -10753,7 +10753,9 @@
         "which_model_new_sessions_start_with_pick_a_model": "Mit welchem Modell neue Sitzungen starten, wenn ihr Agent keines festlegt. Lege pro Agent unter Agenten-Fähigkeiten → Agenten ein Modell fest oder wähle innerhalb einer Sitzung eines, um es dort zu übersteuern.",
         "which_part_of_a_subagent_s_stream_to_keep_when_i": "Welcher Teil des Streams eines Subagenten beim Einfügen seines Abschlussereignisses in die übergeordnete Sitzung erhalten bleibt. „Kopf“ bewahrt den Anfang (Standard, entspricht dem Legacy-Verhalten). „Ende“ bewahrt die abschließende Zusammenfassung. „Beides“ behält einen Abschnitt von jedem Ende mit einer Markierung dazwischen.",
         "widget_density": "Widget-Dichte",
-        "your_role": "Ihre Rolle"
+        "your_role": "Ihre Rolle",
+        "markdown_cards_open_in_raw_view": "Markdown cards open in Raw view",
+        "new_markdown_content_cards_show_source_text_inst": "New markdown content cards show source text instead of rendered formatting"
       },
       "computerUsePanel": {
         "accessibility": "Bedienungshilfen",
