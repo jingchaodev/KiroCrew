@@ -48,7 +48,52 @@ import GitlabLogo from './icons/GitlabLogo'
 import DiffBlock from './DiffBlock'
 import EditableCodeBlock from './EditableCodeBlock'
 import { SmoothResize } from './SmoothResize'
+import SegmentedControl from './SegmentedControl'
 import type { ContentBlock } from '../types'
+
+/** Fenced-markdown languages that get the Formatted/Raw card (#9196). */
+const MARKDOWN_CARD_LANGS = new Set(['markdown', 'md'])
+
+/** Markdown content card: a fenced ```markdown block with a Formatted/Raw
+ *  toggle in the header, matching the tool-detail cards' segmented control.
+ *  Formatted renders the content the way agent prose already renders (one
+ *  level of recursion — fenced blocks INSIDE the content render as plain code
+ *  blocks); Raw is the existing EditableCodeBlock, and the edit affordance
+ *  stays Raw-only (#9196 accepts that trade). Lives in this module rather
+ *  than EditableCodeBlock's because Formatted needs MarkdownRenderer, which
+ *  imports EditableCodeBlock — defining it there would cycle the imports. */
+function MarkdownContentCard({ code, lang, complete }: {
+  code: string
+  lang: string
+  complete: boolean
+}) {
+  const [mode, setMode] = useState<'formatted' | 'raw'>('formatted')
+  const toggle = complete ? (
+    <SegmentedControl<'formatted' | 'raw'>
+      segments={[
+        { key: 'formatted', label: i18nT('pages.chat.toolDetails.formatted') },
+        { key: 'raw', label: i18nT('pages.chat.toolDetails.raw') },
+      ]}
+      value={mode}
+      onChange={setMode}
+      collapse={false}
+    />
+  ) : null
+  if (!complete || mode === 'raw') {
+    return <EditableCodeBlock code={code} lang={lang} complete={complete} extraHeaderActions={toggle} />
+  }
+  return (
+    <div className="code-block rounded-xl border border-border bg-bg-elevated overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-1">
+        <span className="text-muted text-[13px] font-mono">{lang}</span>
+        <div className="flex items-center gap-1">{toggle}</div>
+      </div>
+      <div className="px-3 py-2">
+        <MarkdownRendererMemo content={code} />
+      </div>
+    </div>
+  )
+}
 
 /** Extract the artifact slug from an `/artifacts/<slug>` href. Returns null
  *  when the href isn't an artifact route. Handles a leading origin, a trailing
@@ -2877,7 +2922,9 @@ function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, wid
         <div className="my-2 p-3 bg-bg-elevated border border-border rounded-md text-muted text-[12px] italic animate-pulse">{i18nT('components.markdownRenderer.generating_diagram')}</div>
       )
     case 'code': {
-      const node = <EditableCodeBlock code={block.content} lang={block.language} complete={block.complete} />
+      const node = MARKDOWN_CARD_LANGS.has(block.language ?? '')
+        ? <MarkdownContentCard code={block.content} lang={block.language!} complete={block.complete} />
+        : <EditableCodeBlock code={block.content} lang={block.language} complete={block.complete} />
       // Height-grow only — streaming code renders as one plain <pre> text node
       // so per-line content animation isn't applied here.
       return smooth ? <SmoothResize enabled={!block.complete}>{node}</SmoothResize> : node
@@ -2894,7 +2941,7 @@ function BlockRenderer({ block, prevBlock, onFileOpen, sourcePos, messageTs, wid
   }
 }
 
-export default memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, onFolderOpen, onArtifactOpen, rawMode = false, sourcePos = false, messageTs, slotKey, glow = false, smooth, softBreaks = false, compactImages = false, linkPreviews = false }: { content: string; streaming?: boolean; onFileOpen?: (path: string, opts?: { line?: number; endLine?: number }) => void; onFolderOpen?: (path: string) => void; onArtifactOpen?: (slug: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; slotKey?: string; glow?: boolean; smooth?: boolean; softBreaks?: boolean; compactImages?: boolean; linkPreviews?: boolean }) {
+const MarkdownRendererMemo = memo(function MarkdownRenderer({ content, streaming = false, onFileOpen, onFolderOpen, onArtifactOpen, rawMode = false, sourcePos = false, messageTs, slotKey, glow = false, smooth, softBreaks = false, compactImages = false, linkPreviews = false }: { content: string; streaming?: boolean; onFileOpen?: (path: string, opts?: { line?: number; endLine?: number }) => void; onFolderOpen?: (path: string) => void; onArtifactOpen?: (slug: string) => void; rawMode?: boolean; sourcePos?: boolean; messageTs?: string; slotKey?: string; glow?: boolean; smooth?: boolean; softBreaks?: boolean; compactImages?: boolean; linkPreviews?: boolean }) {
   const blocks = useBlockAssembler(content, streaming)
 
   /** Chip activation lives on the chip itself (see InlineCode); this handler is
@@ -3048,6 +3095,8 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
     </div>
   )
 })
+
+export default MarkdownRendererMemo
 
 type LightboxImage = { src: string; alt: string }
 type LightboxDetail = { images: LightboxImage[]; index: number }

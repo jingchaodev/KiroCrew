@@ -22,7 +22,15 @@ function contentHash(text: string): string {
  *  is written back to the message), useful for tweaking a snippet before
  *  copying or running it. */
 const EditableCodeBlock = memo(function EditableCodeBlock(
-  { code, lang, complete }: { code: string; lang?: string; complete: boolean },
+  { code, lang, complete, extraHeaderActions }: {
+    code: string
+    lang?: string
+    complete: boolean
+    /** Extra controls appended to the non-editing header (e.g. the markdown
+     *  card's Formatted/Raw toggle, #9196). Hidden while editing: the editor
+     *  header owns its own close/copy pair. */
+    extraHeaderActions?: React.ReactNode
+  },
 ) {
   const [editing, setEditing] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -46,6 +54,7 @@ const EditableCodeBlock = memo(function EditableCodeBlock(
 
   const headerActions = complete ? (
     <>
+      {extraHeaderActions}
       {showRunBtn && <RunInTerminalBtn code={code} />}
       <button
         aria-label={i18nT('components.monacoCodeBlock.edit_code_block')}
