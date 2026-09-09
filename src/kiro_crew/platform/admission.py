@@ -136,10 +136,13 @@ def _coerce_signature_flag(d: dict, key: str) -> bool:
     value = d.get(key)
     if isinstance(value, bool):
         return value
+    # Log the TYPE, never the value: a mis-typed flag can carry a secret
+    # (a credential pasted into the policy), and this warning lands in the
+    # persistent gateway log.
     logger.warning(
-        "admission policy %s is %r (not a boolean); reading it fail-closed as True",
+        "admission policy %s must be a boolean, got %s; reading it fail-closed as True",
         key,
-        value,
+        type(value).__name__,
     )
     return True
 

@@ -199,10 +199,14 @@ class TestSignatureFlagStrictness:
     def test_non_boolean_is_warned_about(self, caplog):
         with caplog.at_level(logging.WARNING, logger="kiro_crew.platform.admission"):
             AdmissionPolicy.from_dict({"mode": "enforce", "require_signature": "false"})
-        assert any(
-            "require_signature" in rec.message and "fail-closed" in rec.message
+        matching = [
+            rec.message
             for rec in caplog.records
-        )
+            if "require_signature" in rec.message and "fail-closed" in rec.message
+        ]
+        assert matching
+        # Secret hygiene: the junk VALUE must not reach the persistent log.
+        assert not any("false" in m for m in matching)
 
 
 class TestAllowlist:
