@@ -705,6 +705,24 @@ def expand_skill_uri(uri: str, agent_path: Path) -> str | None:
     return str(agent_path.parent.parent.parent / raw)
 
 
+#: :func:`agent_skill_globs` result cache, mirroring ``_LIST_AGENTS_CACHE``:
+#: keyed by ``(agents_dir, agent)``, guarded by the same stat-only
+#: :func:`_dir_signature` (file count + newest mtime, ``DirEntry.stat``
+#: following symlinks), so adds, removals, and in-place edits invalidate
+#: without reading a file. Not-found results (``[]``) are cached too — an
+#: unmapped agent otherwise re-reads every spec on every session build.
+#: Same staleness trade the ``list_agents`` cache already accepts.
+#:
+#: Bounded: the agent half of the key is caller-influenced (a dashboard
+#: request can name arbitrary agents), so unlike the dir-keyed
+#: ``_LIST_AGENTS_CACHE`` this map could otherwise grow without limit.
+#: At the cap the whole map is dropped — the next call repopulates the
+#: handful of live agents; an LRU would spend list-moves on every hit to
+#: preserve entries a flood has already evicted.
+_SKILL_GLOBS_CACHE: dict[tuple[str, str], tuple[_ListAgentsSig, list[str]]] = {}
+_SKILL_GLOBS_CACHE_MAX = 512
+
+
 def agent_skill_globs(agent: str, agents_dir: Path | None = None) -> list[str]:
     """Return fnmatch globs for the skills mapped to *agent*, or ``[]``.
 
@@ -712,10 +730,30 @@ def agent_skill_globs(agent: str, agents_dir: Path | None = None) -> list[str]:
     treat that as the legacy all-or-nothing default rather than as "no skills".
     Best-effort and never raises: an unreadable, invalid, or sensitive-path
     agent file yields ``[]``.
+
+    Results are cached per ``(agents_dir, agent)`` against the directory
+    signature: the uncached scan reads and security-validates every spec file
+    (~130 ms on a 77-agent dir) and sits on the session-context build path —
+    every session start, subagent spawn, and full-context wake — so a hit
+    must not re-read anything.
     """
     d = agents_dir or _kiro_agents_dir()
     if not agent or not d.is_dir():
         return []
+    sig = _dir_signature(d)
+    cache_key = (str(d), agent)
+    cached = _SKILL_GLOBS_CACHE.get(cache_key)
+    if cached is not None and cached[0] == sig:
+        return list(cached[1])
+    globs = _agent_skill_globs_scan(agent, d)
+    if len(_SKILL_GLOBS_CACHE) >= _SKILL_GLOBS_CACHE_MAX:
+        _SKILL_GLOBS_CACHE.clear()
+    _SKILL_GLOBS_CACHE[cache_key] = (sig, list(globs))
+    return globs
+
+
+def _agent_skill_globs_scan(agent: str, d: Path) -> list[str]:
+    """The uncached scan behind :func:`agent_skill_globs`."""
     try:
         candidates = sorted(d.glob("*.json"))
     except OSError:
@@ -766,12 +804,14 @@ def _dir_signature(d: Path) -> _ListAgentsSig:
 
 
 def clear_list_agents_cache() -> None:
-    """Drop all cached :func:`list_agents` results (forces a fresh scan next call).
+    """Drop all cached :func:`list_agents` AND :func:`agent_skill_globs` results.
 
     Invalidation is normally automatic via the directory signature; call this
     only to force an immediate refresh (e.g. right after writing an agent file).
+    Both caches invalidate on the same trigger, so one clear covers them.
     """
     _LIST_AGENTS_CACHE.clear()
+    _SKILL_GLOBS_CACHE.clear()
 
 
 def _with_edition_agents(disk_agents: list[AgentInfo]) -> list[AgentInfo]:

@@ -22,6 +22,7 @@ from kiro_crew.agent_discovery import (
     SCOPE_GLOBAL,
     SCOPE_PROJECT,
     AgentInfo,
+    agent_skill_globs,
     clear_list_agents_cache,
     clear_project_agent_cache,
     list_agents,
@@ -857,6 +858,101 @@ def _discovery_warnings(caplog):
         and r.levelno >= logging.WARNING
         and "parsed 0" in r.getMessage()
     ]
+
+
+class TestSkillGlobsCache:
+    """agent_skill_globs caches per (dir, agent) against the same stat-only
+    directory signature the list_agents cache uses. The uncached scan reads and
+    security-validates every spec file and sits on the session-context build
+    path, so hits must not re-read, and edits/adds must invalidate."""
+
+    def _write(self, d: Path, name: str, skill: str) -> Path:
+        f = d / f"{name}.json"
+        f.write_text(
+            json.dumps({"name": name, "resources": [f"skill://~/{skill}/SKILL.md"]}),
+            encoding="utf-8",
+        )
+        return f
+
+    def test_cache_hit_skips_rescan(self, tmp_path: Path) -> None:
+        """An unchanged signature returns the cached globs without re-reading."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        f = self._write(d, "a1", "one")
+        file_stat = f.stat()
+
+        first = agent_skill_globs("a1", d)
+        assert first and "one" in first[0]
+
+        # Rewrite the content but restore the original mtime: a re-scan would
+        # yield "two"; a cache hit yields "one".
+        self._write(d, "a1", "two")
+        os.utime(f, ns=(file_stat.st_atime_ns, file_stat.st_mtime_ns))
+        assert (
+            agent_skill_globs("a1", d) == first
+        ), "unchanged signature must return the cached globs"
+
+    def test_cache_invalidates_on_edit(self, tmp_path: Path) -> None:
+        """An mtime-visible edit is reflected immediately."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        f = self._write(d, "a1", "one")
+        assert "one" in agent_skill_globs("a1", d)[0]
+        self._write(d, "a1", "two")
+        bumped = f.stat().st_mtime_ns + 2_000_000_000
+        os.utime(f, ns=(bumped, bumped))
+        assert "two" in agent_skill_globs("a1", d)[0]
+
+    def test_not_found_is_cached_and_invalidated_on_add(self, tmp_path: Path) -> None:
+        """A [] miss is cached, and adding the agent's file is seen at once."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        self._write(d, "other", "x")
+        assert agent_skill_globs("late", d) == []
+        self._write(d, "late", "arrived")
+        assert "arrived" in agent_skill_globs("late", d)[0]
+
+    def test_hit_returns_a_copy(self, tmp_path: Path) -> None:
+        """Mutating a returned list must not poison the cache."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        self._write(d, "a1", "one")
+        first = agent_skill_globs("a1", d)
+        first.append("mutation")
+        assert "mutation" not in agent_skill_globs("a1", d)
+
+    def test_cache_is_bounded(self, tmp_path: Path) -> None:
+        """Arbitrary agent names cannot grow the cache without limit."""
+        from kiro_crew import agent_discovery as ad
+
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        self._write(d, "real", "one")
+        for i in range(ad._SKILL_GLOBS_CACHE_MAX + 10):
+            agent_skill_globs(f"flood-{i}", d)
+        assert len(ad._SKILL_GLOBS_CACHE) <= ad._SKILL_GLOBS_CACHE_MAX
+        # Correctness survives the flood: the real agent still resolves.
+        assert "one" in agent_skill_globs("real", d)[0]
+
+    def test_clear_drops_the_globs_cache(self, tmp_path: Path) -> None:
+        """clear_list_agents_cache() also forces a fresh globs scan."""
+        clear_list_agents_cache()
+        d = tmp_path / "agents"
+        d.mkdir()
+        f = self._write(d, "a1", "one")
+        file_stat = f.stat()
+        agent_skill_globs("a1", d)
+        self._write(d, "a1", "two")
+        os.utime(f, ns=(file_stat.st_atime_ns, file_stat.st_mtime_ns))
+        clear_list_agents_cache()
+        assert (
+            "two" in agent_skill_globs("a1", d)[0]
+        ), "after clear(), the same signature must re-scan"
 
 
 class TestSystematicScanFailureWarning:
