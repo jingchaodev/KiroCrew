@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import RefMarkdown from './RefMarkdown'
+import DepsSection from './DepsSection'
 import { CommentCardSkeleton, HeaderSkeleton, TimelineSkeleton } from './DetailSkeleton'
 import { safeHttpUrl } from '../../../lib/safeUrl'
 import { copyToClipboard } from '../../../utils/clipboard'
@@ -38,7 +39,7 @@ import { DropdownMenuItem } from '../../../components/ui/dropdown-menu'
 import ListDetailBack from '../../../components/ListDetailBack'
 import { useIssueRadar } from '../context'
 import { useTitleScrolledOut } from '../lib/useTitleScrolledOut'
-import { relativeTimeOrDate, asArray, detailPollMs } from '../lib/format'
+import { relativeTimeOrDate, asArray, detailPollMs, resolveAiLanguage } from '../lib/format'
 import {
   issueRadarApi,
   type PullRequest, type TimelineEvent, type PrCheck, type DetailLabel,
@@ -49,6 +50,7 @@ import { commitUrlFor, userUrlFor, repoScopeKey } from '../lib/links'
 import { providerTerms } from '../lib/links'
 
 import { i18nT } from '../../../i18n/t'
+import ErrorNotice from '../../../components/ErrorNotice'
 import { fmtDateTime } from '../../../i18n/format'
 /** A relative timestamp that flips to the absolute local date-time on click
  * (and shows it on hover). Renders nothing for a missing/unparseable value. */
@@ -523,6 +525,7 @@ function AutoReviewChecks(
 export default function PrDetail({ pull }: { pull: PullRequest }) {
   const {
     active, colorByName, memberRoleByLogin, canWrite, refreshPrefs, listDetail, refStack,
+    aiLanguage,
   } = useIssueRadar()
   const scopeKey = repoScopeKey(active)
   // GitLab calls these merge requests; the whole pane's copy follows the ref.
@@ -659,12 +662,15 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
   // you ask (the card's regenerate button), with its age shown so you can tell
   // whether it predates the latest activity.
   const aiRefreshRef = useRef(false)
+  // The resolved AI-output language is part of the key: a summary fetched under
+  // one language must not be replayed from the client cache under another.
+  const aiLang = resolveAiLanguage(aiLanguage)
   const aiQuery = useQuery({
-    queryKey: ['issue-radar', 'pull-ai', scopeKey, pull.number],
+    queryKey: ['issue-radar', 'pull-ai', scopeKey, pull.number, aiLang],
     queryFn: () => {
       const useRefresh = aiRefreshRef.current
       aiRefreshRef.current = false
-      return issueRadarApi.pullAi(active, pull.number, { refresh: useRefresh })
+      return issueRadarApi.pullAi(active, pull.number, aiLang, { refresh: useRefresh })
     },
     enabled: Boolean(detail),
     // The server owns freshness (its input fingerprint decides whether a request
@@ -894,6 +900,9 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
                 )}
             </div>
 
+            {/* Dependency edges — blocked by / blocking (deps cache). */}
+            <DepsSection number={pull.number} />
+
             {/* Activity timeline — newest first, latest node pulsing. */}
             <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted mb-3 font-medium">
               <CircleDot size={12} /> {i18nT('apps.issueRadar.components.prDetail.timeline')}
@@ -944,11 +953,20 @@ export default function PrDetail({ pull }: { pull: PullRequest }) {
 
             {activityLoading && <TimelineSkeleton />}
             {activityError && (
-              <div className={`py-2 text-[12px] ${activityStale ? 'text-warn' : 'text-danger'}`}>
-                {activityStale
-                  ? i18nT('apps.issueRadar.components.prDetail.showing_the_last_successful_read', { error: activityError.message })
-                  : i18nT('apps.issueRadar.components.prDetail.couldnt_load_activity', { error: activityError.message })}
-              </div>
+              activityStale ? (
+                // Still showing the last successful read: a warning, not a failure.
+                <div className="py-2 text-[12px] text-warn">
+                  {i18nT('apps.issueRadar.components.prDetail.showing_the_last_successful_read', { error: activityError.message })}
+                </div>
+              ) : (
+                // A read of a persisted PR's timeline; nothing in this column is
+                // a draft (the actions bar's composer guards its own notice).
+                <ErrorNotice
+                  message={i18nT('apps.issueRadar.components.prDetail.couldnt_load_activity', { error: activityError.message })}
+                  askAgent
+                  className="my-2"
+                />
+              )
             )}
             {!activityLoading && !activityError && activityDesc.length === 0 && (
               <div className="py-2 text-[12px] text-muted">{i18nT('apps.issueRadar.components.prDetail.no_activity_yet')}</div>

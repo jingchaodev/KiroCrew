@@ -1,8 +1,8 @@
 import { LayoutDashboard, CircleDot, Settings, Radar, GitPullRequest, Users, ArrowUp, ArrowDown, ArrowUpDown, ListFilter, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
-import GithubLogo from '../../../components/icons/GithubLogo'
 import Clickable from '../../../components/Clickable'
 import { fmtNumber } from '../../../i18n/format'
 import { useIssueRadar } from '../context'
+import type { RepoRef } from '../api'
 import { APP_VERSION, CREW_SORT_FIELDS, DEFAULT_RAIL_WIDTH } from '../lib/format'
 import { CREW_FILTERS, type CrewFilter } from '../lib/types'
 import AccordionSection from './Accordion'
@@ -10,10 +10,11 @@ import { IconButton } from '../../../components/ui'
 import DashboardsSection from './DashboardsSection'
 import FiltersSection from './FiltersSection'
 import PrFiltersSection from './PrFiltersSection'
+import { ProviderLogo } from './ProviderBadge'
 import SettingsSection from './SettingsSection'
 import ReadOnlyTag, { isReadOnly } from './ReadOnlyTag'
 import RepoSwitcher from './RepoSwitcher'
-import { providerTerms } from '../lib/links'
+import { providerTerms, sameRepoRef } from '../lib/links'
 
 import { i18nT } from '../../../i18n/t'
 /** The left rail: a prominent repo switcher pinned at the top, then a
@@ -54,17 +55,16 @@ export default function LeftRail({
     // Matched on the FULL identity, not just owner/repo: on a mixed install the
     // same slug can exist on two providers, and a loose match would badge the
     // collapsed rail with the other repo's write access.
-    const activeEntry = repos.find(
-      (r) => r.owner === active.owner
-        && r.repo === active.repo
-        && (r.provider || 'github') === (active.provider || 'github')
-        && (r.host || 'github.com') === (active.host || 'github.com'),
-    )
+    const activeEntry = repos.find((r) => sameRepoRef(r, active))
     return (
       <CollapsedRail
         width={width}
         owner={active.owner}
         repo={active.repo}
+        // The mark has to say which provider this repo is on for the same reason
+        // the open rail's switcher does: `owner/repo` alone is identical across
+        // providers, so a hard-coded GitHub logo mislabels every other one.
+        repoRef={active}
         readOnly={isReadOnly(activeEntry?.permissions)}
         onExpand={onExpand}
         horizontal={horizontal}
@@ -114,7 +114,10 @@ export default function LeftRail({
       </AccordionSection>
 
       <AccordionSection
-        title={i18nT('apps.issueRadar.components.leftRail.issues')}
+        // The rail's own noun for the tracked item, which is not "Issues"
+        // everywhere: Azure DevOps tracks work items, and "Issue" is only one of
+        // the types some of its process templates even define.
+        title={i18nT(terms.trackedItemPluralTitleKey)}
         icon={CircleDot}
         expanded={expanded === 'filters'}
         onToggle={() => { openIssues(); onNavigate?.() }}
@@ -266,7 +269,7 @@ function CrewsSection({ onNavigate }: { onNavigate?: () => void }) {
  * card rotates the repo label clockwise (top-to-bottom reading) so it starts
  * next to the logo; the bar just truncates it. */
 function CollapsedRail({
-  width, owner, repo, readOnly, onExpand, horizontal = false,
+  width, owner, repo, repoRef, readOnly, onExpand, horizontal = false,
 }: {
   // Shares LeftRail's pass-through prop, so it takes the same CSS-length type.
   // In practice this is always the numeric strip width: the string form is only
@@ -274,6 +277,8 @@ function CollapsedRail({
   width: number | string
   owner: string
   repo: string
+  /** The active repo's identity — only its provider is read, to pick the mark. */
+  repoRef?: Pick<RepoRef, 'provider'>
   readOnly: boolean
   onExpand?: () => void
   /** Lay the collapsed rail across the TOP instead of down the left edge. Set
@@ -294,13 +299,13 @@ function CollapsedRail({
             aria-label={i18nT('apps.issueRadar.components.leftRail.expand_sidebar')}
             className="flex-1 min-w-0 flex items-center gap-2 px-3 py-2 cursor-pointer text-muted hover:text-text hover:bg-bg-hover transition-colors focus-ring"
           >
-            <GithubLogo size={16} className="flex-shrink-0 text-text" />
+            <ProviderLogo repoRef={repoRef} size={16} className="flex-shrink-0 text-text" />
             {/* Truncates from the tail: the repo half of `owner/repo` is what
                 tells two workspaces apart, and it survives longest that way. */}
             <span className="min-w-0 truncate text-[13px] font-medium tracking-[.02em] text-text">
               {full}
             </span>
-            {readOnly && <ReadOnlyTag />}
+            {readOnly && <ReadOnlyTag repoRef={repoRef} />}
             {/* Opens toward the reader, matching the expanded rail's
                 PanelLeftClose — the bar is horizontal but the panel it reveals
                 is still the left rail. */}
@@ -328,7 +333,7 @@ function CollapsedRail({
           aria-label={i18nT('apps.issueRadar.components.leftRail.expand_sidebar')}
           className="flex-1 min-h-0 w-full flex flex-col items-center gap-3 pt-3.5 pb-2 cursor-pointer text-muted hover:text-text hover:bg-bg-hover transition-colors focus-ring"
         >
-          <GithubLogo size={18} className="flex-shrink-0 text-text" />
+          <ProviderLogo repoRef={repoRef} size={18} className="flex-shrink-0 text-text" />
           <div className="min-h-0 flex flex-col items-center gap-2">
             {/* Rotated CLOCKWISE (writing-mode alone, no counter-rotation) so the
                 string reads top-to-bottom, starting right under the logo — the
@@ -344,7 +349,7 @@ function CollapsedRail({
             {/* Write access constrains what the workspace can do, so the flag
                 survives the collapse — trailing the repo name exactly as it does
                 in the open rail's switcher, just turned with it. */}
-            {readOnly && <ReadOnlyTag vertical />}
+            {readOnly && <ReadOnlyTag vertical repoRef={repoRef} />}
           </div>
         </button>
         {/* App mark only — the name doesn't earn its space at 48px, so it and

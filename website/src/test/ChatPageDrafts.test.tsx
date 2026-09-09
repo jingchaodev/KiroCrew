@@ -234,15 +234,22 @@ describe('ChatPage error handoff', { timeout: 15_000 }, () => {
       sendErrorToChat('second diagnostic')
     })
 
-    await waitFor(() => expect(api.createChatSlot).toHaveBeenCalledTimes(2))
-    await waitFor(() => expect(store.getState().chat.activeSlot).toBe('error-two'))
+    // The second handoff is not processed until the first has finished its
+    // seed confirmation: `processErrorHandoffs` polls up to 300 x 10ms for the
+    // composer to take the prompt (or the slot to move on), and only then
+    // schedules the next item on a 0ms timer. That is up to ~3s of legitimate
+    // internal waiting before `createChatSlot` can be called a second time, so
+    // `waitFor`'s 1000ms default was asserting on a moment the code had not
+    // reached yet. The widened ceilings name that boundary; nothing sleeps.
+    await waitFor(() => expect(api.createChatSlot).toHaveBeenCalledTimes(2), { timeout: 5000 })
+    await waitFor(() => expect(store.getState().chat.activeSlot).toBe('error-two'), { timeout: 5000 })
     await waitFor(() => {
       expect((screen.getByLabelText('Message input') as HTMLTextAreaElement).value).toBe('second diagnostic')
-    })
+    }, { timeout: 5000 })
     await waitFor(() => {
       const drafts = JSON.parse(localStorage.getItem('mc-chat-drafts') || '{}')
       expect(drafts['error-one']).toBe('first diagnostic')
-    })
+    }, { timeout: 5000 })
     expect(consumeChatHandoff()).toBeNull()
   })
 
@@ -713,7 +720,7 @@ describe('ChatPage draft persistence', { timeout: 15_000 }, () => {
     const { api } = await import('../api/client')
     let resolveCreate!: (v: { key: string; title: string; messages: number; running: boolean }) => void
     const deferred = new Promise<{ key: string; title: string; messages: number; running: boolean }>(r => { resolveCreate = r })
-    vi.mocked(api.createChatSlot).mockReturnValueOnce(deferred as any)
+    vi.mocked(api.createChatSlot).mockReturnValueOnce(deferred as ReturnType<typeof api.createChatSlot>)
 
     const store = makeStore('slot-a', [{ key: 'slot-a' }, { key: 'slot-b' }])
     await renderAndWaitForInput(store)

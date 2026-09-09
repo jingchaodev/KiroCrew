@@ -5,6 +5,53 @@
  * transform — see the note in `ui/dialog.tsx`.
  */
 import tailwindcssAnimate from 'tailwindcss-animate'
+import tailwindPlugin from 'tailwindcss/plugin.js'
+
+/* iOS safe-area utilities, emitted locally.
+ *
+ * The dashboard is a standalone-display PWA whose viewport declares
+ * viewport-fit=cover, so on a notched iPhone the web view spans the whole
+ * screen. The shell insets its in-flow chrome once with `p-safe`; every
+ * `fixed` surface escapes that padding and opts in on its own, which
+ * src/test/safeArea.guard.test.ts enforces.
+ *
+ * This was `tailwindcss-safe-area@0.8.0` and is now ~25 lines here instead.
+ * That package's current line is Tailwind v4-only, so a v3 project is pinned
+ * to a terminal 0.8.0 forever -- including its wrong-edge logical utilities
+ * (`me-safe`/`pe-safe`/`end-safe` read safe-area-inset-LEFT for an inline-END
+ * property), which then need their own test banning them. Emitting only the
+ * families this codebase actually uses removes the pin, the ban, and the
+ * dependency in one move; the utility names are identical either way.
+ *
+ * `offset` is env + n (keeps a surface's intended gap ABOVE the inset).
+ * `or` is max(env, n) (a minimum gutter that widens only when there is one).
+ * Both go through matchUtilities, which is what makes an arbitrary value like
+ * `top-safe-offset-[42px]` resolve as well as a spacing-scale step.
+ */
+const EDGES = ['top', 'right', 'bottom', 'left']
+const inset = edge => `env(safe-area-inset-${edge})`
+
+const safeArea = tailwindPlugin(({ addUtilities, matchUtilities, theme }) => {
+  addUtilities({
+    '.p-safe': {
+      paddingTop: inset('top'),
+      paddingRight: inset('right'),
+      paddingBottom: inset('bottom'),
+      paddingLeft: inset('left'),
+    },
+    ...Object.fromEntries(EDGES.map(e => [`.${e}-safe`, { [e]: inset(e) }])),
+  })
+  for (const edge of EDGES) {
+    matchUtilities(
+      { [`${edge}-safe-offset`]: v => ({ [edge]: `calc(${inset(edge)} + ${v})` }) },
+      { values: theme('spacing'), supportsNegativeValues: true },
+    )
+    matchUtilities(
+      { [`${edge}-safe-or`]: v => ({ [edge]: `max(${inset(edge)}, ${v})` }) },
+      { values: theme('spacing') },
+    )
+  }
+})
 
 /** Alpha-aware theme color backed by a CSS variable.
  *
@@ -141,16 +188,6 @@ export default {
         'gradient-shift': { '0%': { backgroundPosition: '0% 50%' }, '50%': { backgroundPosition: '100% 50%' }, '100%': { backgroundPosition: '0% 50%' } },
         'msg-highlight': { '0%': { boxShadow: 'inset 0 0 0 2px var(--accent)' }, '100%': { boxShadow: 'inset 0 0 0 0px transparent' } },
         float: { '0%,100%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-6px)' } },
-        /* margin-based (NOT transform): a transformed ancestor becomes a
-           backdrop root and breaks descendants' backdrop-filter blur.
-           Desktop is a fixed 400px sheet, so a px offset clears it. Mobile is
-           full-width up to the 767px breakpoint, where -420px would leave the
-           sheet half on screen — percentage margins resolve against the
-           containing block's width, so -100% always clears it exactly. */
-        'nc-slide-in': { from: { marginRight: '-420px' }, to: { marginRight: '0px' } },
-        'nc-slide-out': { from: { marginRight: '0px' }, to: { marginRight: '-420px' } },
-        'nc-slide-in-full': { from: { marginRight: '-100%' }, to: { marginRight: '0px' } },
-        'nc-slide-out-full': { from: { marginRight: '0px' }, to: { marginRight: '-100%' } },
       },
       animation: {
         'sage-sweep': 'sage-sweep 1.4s ease-in-out infinite',
@@ -172,12 +209,8 @@ export default {
         'gradient-shift': 'gradient-shift 20s ease infinite',
         'msg-highlight': 'msg-highlight 2s ease-out forwards',
         float: 'float 3s ease-in-out infinite',
-        'nc-slide-in': 'nc-slide-in .32s cubic-bezier(.16,1,.3,1) backwards',
-        'nc-slide-out': 'nc-slide-out .24s cubic-bezier(.3,0,.8,.15) forwards',
-        'nc-slide-in-full': 'nc-slide-in-full .32s cubic-bezier(.16,1,.3,1) backwards',
-        'nc-slide-out-full': 'nc-slide-out-full .24s cubic-bezier(.3,0,.8,.15) forwards',
       },
     },
   },
-  plugins: [tailwindcssAnimate],
+  plugins: [tailwindcssAnimate, safeArea],
 }

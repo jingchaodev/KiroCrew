@@ -1,11 +1,14 @@
 import { memo, useState, useEffect, useMemo, useRef, type ComponentType } from 'react'
-import { Hourglass, Search, Lightbulb, Settings, Zap, Check, Sparkles, Brain, Pen } from 'lucide-react'
+import { Hourglass } from 'lucide-react'
 import { motion } from 'framer-motion'
 
 import { i18nT } from '../../i18n/t'
 import { GHOST_POSE_ICONS } from '../../components/GhostPoses'
 import { getThemeBranding } from '../../themeBranding'
+import { resolveThemeLoaderIcons } from '../../themeLoaderIcons'
+import { useOptionalTheme } from '../../hooks/useTheme'
 import ErrorBoundary from '../../components/ErrorBoundary'
+import { useLanguageGeneration } from '../../i18n/useLanguageGeneration'
 type StopState = 'idle' | 'soft_pending' | 'killing'
 
 /** One carousel beat — the cadence the .csb4 cross-fade was built around. */
@@ -21,14 +24,18 @@ const SLOTS = 4
 const SWAP_A_MS = 2000
 const SWAP_B_MS = 800
 
-/** The default icon pool, used by every theme that registers no artwork. */
-const DEFAULT_ICONS: ComponentType[] = [Search, Lightbulb, Settings, Zap, Check, Sparkles, Brain, Pen]
-
-/** Bundled artwork for themes the core ships. A theme registered through the
- *  `themeBranding` seam takes precedence over anything here. */
-const BUNDLED_THEME_ICONS: Record<string, ComponentType[]> = {
-  kiro: GHOST_POSE_ICONS,
-}
+/** The default icon pool, used by every theme that registers no artwork.
+ *
+ *  The mascot poses, not a neutral icon set. The ghost is a product-wide brand
+ *  asset — the same art carries the boot splash and the crew avatars, and neither
+ *  of those is theme-scoped — so the loader is not the surface where it becomes
+ *  conditional on a palette. Keying the poses to one theme slug instead hides them
+ *  from every user on another palette, including one whose stored
+ *  `mc-color-theme` names a theme that is no longer the default: that value
+ *  survives an upgrade, so the preference outlives the version that wrote it.
+ *  A theme that wants its own artwork overrides this through the `themeBranding`
+ *  seam. */
+const DEFAULT_ICONS: ComponentType[] = GHOST_POSE_ICONS
 
 /** Sample `SLOTS` DISTINCT indices out of `total`, avoiding any of the given sets
  *  so a swap always produces a visibly different group (never a repeat of what it
@@ -84,26 +91,28 @@ function useThemeSlug(): string {
   return slug
 }
 
-/** Resolve what the footer should show while a turn runs. A theme may replace the
- *  whole loader, or just the artwork the default carousel cycles through:
- *    1. `loader`      — the theme's own component, rendered instead of everything
- *    2. `loaderIcons` — the stock carousel, cycling the theme's artwork
- *    3. artwork bundled for a core theme
- *    4. the default icons
- *  An empty registered pool is ignored rather than rendering nothing. */
-export function resolveLoader(slug: string):
+/** Resolve what the footer should show while a turn runs. A compiled theme may
+ *  replace the whole loader; compiled and installed themes may select artwork:
+ *    1. `loader`               — trusted compiled component
+ *    2. manifest `loaderIcons` — stock symbols selected by an installed pack
+ *    3. compiled `loaderIcons` — trusted compiled artwork
+ *    4. the default pool (the mascot poses)
+ *  Invalid or empty pools are ignored rather than rendering nothing. */
+export function resolveLoader(slug: string, manifestIcons?: readonly string[]):
   | { kind: 'custom'; Component: ComponentType }
   | { kind: 'icons'; icons: ComponentType[] } {
   const branding = getThemeBranding(slug)
   if (branding?.loader) return { kind: 'custom', Component: branding.loader }
-  return { kind: 'icons', icons: resolveLoaderIcons(slug) }
+  return { kind: 'icons', icons: resolveLoaderIcons(slug, manifestIcons) }
 }
 
 /** The icon pool for the default carousel under a given theme. */
-export function resolveLoaderIcons(slug: string): ComponentType[] {
+export function resolveLoaderIcons(slug: string, manifestIcons?: readonly string[]): ComponentType[] {
+  const installed = resolveThemeLoaderIcons(manifestIcons)
+  if (installed.length > 0) return installed
   const registered = getThemeBranding(slug)?.loaderIcons
   if (registered && registered.length > 0) return registered
-  return BUNDLED_THEME_ICONS[slug] ?? DEFAULT_ICONS
+  return DEFAULT_ICONS
 }
 
 /**
@@ -209,7 +218,13 @@ export function useStreamIdle(tick: number, active: boolean, ms: number = STREAM
 }
 
 const ChatFooter = memo(function ChatFooter({ running, stopping, state, lastRole, regenerating, stopState, streamTick = 0 }: { running: boolean; stopping: boolean; state: string; lastRole: string; regenerating?: boolean; stopState?: StopState; streamTick?: number }) {
-  const loader = resolveLoader(useThemeSlug())
+  useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
+  const slug = useThemeSlug()
+  const themeState = useOptionalTheme()
+  const installedTheme = slug.startsWith('custom-')
+    ? themeState?.customThemeDataMap.get(slug.slice('custom-'.length))
+    : undefined
+  const loader = resolveLoader(slug, installedTheme?.assets?.loaderIcons)
   // Text is only ACTIVELY streaming while the slot says so AND chunks keep
   // arriving. `lastRole` alone cannot tell the two apart: the trailing
   // 'streaming' message is deliberately left unfinalized across a whole tool

@@ -31,6 +31,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import RefMarkdown from './RefMarkdown'
 import { parseRepoRef } from '../lib/refLinks'
+import DepsSection from './DepsSection'
 import { safeHttpUrl } from '../../../lib/safeUrl'
 import { copyToClipboard } from '../../../utils/clipboard'
 import { CommentCardSkeleton, HeaderSkeleton, TimelineSkeleton } from './DetailSkeleton'
@@ -48,7 +49,7 @@ import ListDetailBack from '../../../components/ListDetailBack'
 import InvestigateButton from './InvestigateButton'
 import { useIssueRadar } from '../context'
 import { useTitleScrolledOut } from '../lib/useTitleScrolledOut'
-import { relativeTimeOrDate, hexToRgba, asArray, detailPollMs } from '../lib/format'
+import { relativeTimeOrDate, hexToRgba, asArray, detailPollMs, resolveAiLanguage } from '../lib/format'
 import {
   issueRadarApi,
   AssigneesConflictError,
@@ -57,9 +58,10 @@ import {
   type RepoRef,
 } from '../api'
 import { commitUrlFor, userUrlFor, repoScopeKey } from '../lib/links'
-import { providerTerms } from '../lib/links'
+import { providerTerms, readOnlyHint } from '../lib/links'
 
 import { i18nT } from '../../../i18n/t'
+import ErrorNotice from '../../../components/ErrorNotice'
 import { fmtDateTime, fmtDateTimeNumeric } from '../../../i18n/format'
 /** A relative timestamp that flips to the absolute local date-time when
  * clicked (and always shows it on hover). Within the last 24h it reads
@@ -134,11 +136,16 @@ function StatePill({ state, reason }: { state?: string; reason?: string | null }
  * sidebar as dashed sparkle chips. Each has a one-click accept (＋) when the
  * user can write; on a read-only repo they show as suggestions only. */
 function AiSuggestions({
-  suggestions, loading, canWrite, pending, onAccept, colorByName,
+  suggestions, loading, canWrite, repoRef, pending, onAccept, colorByName,
 }: {
   suggestions: SuggestedLabel[]
   loading: boolean
   canWrite: boolean
+  /** The active repo, for why a write is refused: on a provider that supports no
+   * writes at all, "get triage/push access" is a remedy that changes nothing.
+   * Both the per-suggestion tooltip and the always-visible caption below need it,
+   * which is why this is the ref rather than one pre-resolved string. */
+  repoRef: RepoRef
   pending: boolean
   onAccept: (name: string) => void
   colorByName: Map<string, string>
@@ -165,7 +172,10 @@ function AiSuggestions({
             ? (s.reason
               ? i18nT('apps.issueRadar.components.issueDetail.add_with_reason', { name: s.name, reason: s.reason })
               : i18nT('apps.issueRadar.components.issueDetail.add', { name: s.name }))
-            : (s.reason || i18nT('apps.issueRadar.components.issueDetail.read_only_connect_with_triage_push_access_to_app_2'))
+            : (s.reason || readOnlyHint(
+              repoRef,
+              i18nT('apps.issueRadar.components.issueDetail.read_only_connect_with_triage_push_access_to_app_2'),
+            ))
           return (
             <motion.button
               key={s.name}
@@ -202,8 +212,15 @@ function AiSuggestions({
           )
         })}
       </div>
+      {/* The caption, unlike the per-suggestion tooltip above, needs no hover -- so
+          on a provider that refuses every write this is the sentence a user
+          actually reads, and telling them to go get access they already hold is the
+          failure this routes around. */}
       {!canWrite && (
-        <div className="text-[10.5px] text-muted mt-1.5">{i18nT('apps.issueRadar.components.issueDetail.read_only_connect_with_triage_push_access_to_app')}</div>
+        <div className="text-[10.5px] text-muted mt-1.5">{readOnlyHint(
+          repoRef,
+          i18nT('apps.issueRadar.components.issueDetail.read_only_connect_with_triage_push_access_to_app'),
+        )}</div>
       )}
     </div>
   )
@@ -454,7 +471,7 @@ function Section({
 export default function IssueDetail({ issue }: { issue: Issue }) {
   const {
     active, colorByName, memberRoleByLogin, repoLabels, countByLabel, canWrite, stateFilter,
-    me, refreshPrefs, listDetail, refStack,
+    me, refreshPrefs, listDetail, refStack, aiLanguage,
   } = useIssueRadar()
   const { owner, repo } = active
   const scopeKey = repoScopeKey(active)
@@ -569,12 +586,15 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
   // server-side (one model call per issue, served instantly on re-open). The
   // regenerate button forces a recompute via ?refresh=1 (same ref trick).
   const aiRefreshRef = useRef(false)
+  // The resolved AI-output language is part of the key: a summary fetched under
+  // one language must not be replayed from the client cache under another.
+  const aiLang = resolveAiLanguage(aiLanguage)
   const aiQuery = useQuery({
-    queryKey: ['issue-radar', 'issue-ai', scopeKey, issue.number],
+    queryKey: ['issue-radar', 'issue-ai', scopeKey, issue.number, aiLang],
     queryFn: () => {
       const useRefresh = aiRefreshRef.current
       aiRefreshRef.current = false
-      return issueRadarApi.issueAi(active, issue.number, { refresh: useRefresh })
+      return issueRadarApi.issueAi(active, issue.number, aiLang, { refresh: useRefresh })
     },
     // Wait for the detail read to land first (mirrors PrDetail's aiQuery). The AI
     // route derives its summary from the issue detail, and on a COLD open firing
@@ -904,9 +924,14 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
               </DetailOverflowMenu>
             </>}
             extra={stateMutation.isError && (
-              <div className="mt-2 text-[12px] text-danger">
-                {(stateMutation.error as Error).message}
-              </div>
+              /* Acts on a persisted issue; this pane holds no composer, so the
+                 hand-off loses nothing. Same for the three notices below. */
+              <ErrorNotice
+                message={(stateMutation.error as Error).message}
+                variant="inline"
+                askAgent
+                className="mt-2"
+              />
             )}
           />
 
@@ -952,6 +977,9 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
             {/* Linked PRs / issues — their own section, lifted off the rail. */}
             {relatedRefs.length > 0 && <RelatedLinks items={relatedRefs} />}
 
+            {/* Dependency edges — blocked by / blocking (deps cache). */}
+            <DepsSection number={issue.number} />
+
             {/* Activity timeline — newest first, latest node pulsing. */}
             <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted mb-3 font-medium">
               <CircleDot size={12} /> {i18nT('apps.issueRadar.components.issueDetail.timeline')}
@@ -978,7 +1006,12 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
 
             {activityLoading && <TimelineSkeleton />}
             {activityError && (
-              <div className="py-2 text-[12px] text-danger">{i18nT('apps.issueRadar.components.issueDetail.couldn_t_load_activity')} {activityError.message}</div>
+              <ErrorNotice
+                title={i18nT('apps.issueRadar.components.issueDetail.couldn_t_load_activity')}
+                message={activityError.message}
+                askAgent
+                className="my-2"
+              />
             )}
             {!activityLoading && !activityError && activityDesc.length === 0 && (
               <div className="py-2 text-[12px] text-muted">{i18nT('apps.issueRadar.components.issueDetail.no_activity_yet')}</div>
@@ -1038,7 +1071,12 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
               )}
 
               {assigneesMutation.isError && (
-                <div className="mt-2 text-[11px] text-danger">{(assigneesMutation.error as Error).message}</div>
+                <ErrorNotice
+                  message={(assigneesMutation.error as Error).message}
+                  variant="inline"
+                  askAgent
+                  className="mt-2"
+                />
               )}
             </Section>
 
@@ -1082,13 +1120,19 @@ export default function IssueDetail({ issue }: { issue: Issue }) {
                 suggestions={suggestions}
                 loading={aiQuery.isLoading}
                 canWrite={canWrite}
+                repoRef={active}
                 pending={labelMutation.isPending}
                 onAccept={acceptSuggestion}
                 colorByName={colorByName}
               />
 
               {labelMutation.isError && (
-                <div className="mt-2 text-[11px] text-danger">{(labelMutation.error as Error).message}</div>
+                <ErrorNotice
+                  message={(labelMutation.error as Error).message}
+                  variant="inline"
+                  askAgent
+                  className="mt-2"
+                />
               )}
             </Section>
 

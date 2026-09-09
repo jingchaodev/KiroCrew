@@ -63,6 +63,7 @@ const COMMAND_DESC_KEY: Record<string, string> = {
   '/model': 'components.slashCommandMenu.desc_model',
   '/onboarding': 'components.slashCommandMenu.desc_onboarding',
   '/paste': 'components.slashCommandMenu.desc_paste',
+  '/plain': 'components.slashCommandMenu.desc_plain',
   '/prompts': 'components.slashCommandMenu.desc_prompts',
   '/q': 'components.slashCommandMenu.desc_quit',
   '/quit': 'components.slashCommandMenu.desc_quit',
@@ -72,6 +73,7 @@ const COMMAND_DESC_KEY: Record<string, string> = {
   '/todos': 'components.slashCommandMenu.desc_todos',
   '/tools': 'components.slashCommandMenu.desc_tools',
   '/usage': 'components.slashCommandMenu.desc_usage',
+  '/workflow': 'components.slashCommandMenu.desc_workflow',
 }
 
 /**
@@ -95,14 +97,15 @@ function commandDescription(cmd: SlashCommand): string {
 // _SLASH_COMMANDS set MINUS _BLOCKED_SLASH_COMMANDS — so the same commands
 // appear whether they came from the live API or this fallback. Blocked
 // commands (/quit, /exit, /q, /chat, /paste, /reply, /editor, /tangent) are
-// terminal-only kiro-cli gestures the dashboard rejects, so suggesting them
-// anywhere is an inert affordance; the descriptions themselves come from
-// COMMAND_DESC_KEY either way. /kb is a frontend-only command (also merged
-// via FRONTEND_COMMANDS below).
+// terminal-only kiro-cli gestures the dashboard rejects, and /todos is one the
+// ACP harness does not implement, so suggesting any of them anywhere is an
+// inert affordance; the descriptions themselves come from COMMAND_DESC_KEY
+// either way. /kb is a frontend-only command (also merged via
+// FRONTEND_COMMANDS below).
 const FALLBACK_COMMAND_NAMES = [
   '/agent', '/changelog', '/clear', '/code', '/compact', '/context',
   '/experiment', '/help', '/hooks', '/issue', '/kb', '/logdump',
-  '/mcp', '/model', '/prompts', '/side', '/todos', '/tools', '/usage',
+  '/mcp', '/model', '/prompts', '/side', '/tools', '/usage', '/workflow',
 ] as const
 
 const FALLBACK_COMMANDS: SlashCommand[] = FALLBACK_COMMAND_NAMES.map(name => ({ name }))
@@ -121,14 +124,29 @@ interface Props {
   sendOnEnter?: SendMode
 }
 
-const FRONTEND_COMMAND_NAMES = ['/kb', '/onboarding'] as const
+/**
+ * Commands the backend's GET /api/slash-commands does not report, merged in so
+ * the menu still offers them. Two different kinds live here, and the difference
+ * matters when adding a row:
+ *
+ * - CLIENT-INTERCEPTED (`/kb`, `/onboarding`): the composer recognises the text
+ *   and acts on it locally; the message is never sent. Those also need a branch
+ *   in `interceptSlashCommand`.
+ * - QUICK PROMPT (`/plain`): a backend MACRO. The message IS sent, unchanged, and
+ *   `ContextBuilder.build_message` swaps the token for the instruction it stands
+ *   for (`src/kiro_crew/quick_prompts.py`). It must therefore stay OUT of
+ *   `interceptSlashCommand` — intercepting it would stop it ever reaching the
+ *   expansion — and out of the kiro-cli passthrough set, which would forward it
+ *   to a harness that has no such command.
+ */
+const FRONTEND_COMMAND_NAMES = ['/kb', '/onboarding', '/plain'] as const
 
 const FRONTEND_COMMANDS: SlashCommand[] = FRONTEND_COMMAND_NAMES.map(name => ({ name }))
 
 export default function SlashCommandMenu({ input, anchorRef, onSelect, onClose, open = true, sendOnEnter = 'enter' }: Props) {
-  const { data: apiCommands = FALLBACK_COMMANDS, isFetching } = useQuery<SlashCommand[]>({
+  const { data: apiCommands = FALLBACK_COMMANDS, isFetching, isError } = useQuery<SlashCommand[]>({
     queryKey: ['slash-commands'],
-    queryFn: () => api.slashCommands(),
+    queryFn: ({ signal }) => api.slashCommands(signal),
     enabled: typeof api.slashCommands === 'function',
   })
   const commands = useMemo(() => {
@@ -201,17 +219,38 @@ export default function SlashCommandMenu({ input, anchorRef, onSelect, onClose, 
   }, [displayed, visible, itemRefs, selectedRef])
 
   if (!visible || !anchorRef.current) return null
-  // Unsettled zero-match (remote list still in flight): keep rendering
-  // nothing — the release gate is off and the row set is not yet decided.
-  if (displayed.length === 0 && !releaseKeysWhenEmpty) return null
+  // Rows are ordered by an effect, so a matching list is briefly empty here.
+  // Render nothing until it lands, whether or not a refetch is in flight.
+  if (displayed.length === 0 && filtered.length > 0) return null
 
-  const { top, left, width, maxHeight } = menuGeometry(anchorRef.current, Math.max(displayed.length, 1), 40)
+  const { above, top, bottom, left, width, maxHeight } =
+    menuGeometry(anchorRef.current, Math.max(displayed.length, 1), 40)
+
+  /** Copy for the zero-row state. A settled ERROR is not a zero-match: both
+   *  release Enter, but "No matching commands" asserts the live list was read
+   *  and did not hold the typed prefix. On a failed load it was never read —
+   *  the rows are the offline fallback, and the served list is provider-aware,
+   *  so a command it would have offered may simply never have arrived. Named
+   *  per the send binding on both paths, for the reason given below. */
+  const emptyKey = isError
+    ? (sendOnEnter === 'ctrl-enter'
+        ? 'components.slashCommandMenu.commands_load_failed_ctrl_enter_sends'
+        : 'components.slashCommandMenu.commands_load_failed_enter_sends')
+    : (sendOnEnter === 'ctrl-enter'
+        ? 'components.slashCommandMenu.no_matching_commands_ctrl_enter_sends'
+        : 'components.slashCommandMenu.no_matching_commands_enter_sends')
+
+  // While the fetch is in flight the release gate is still closed, so the send
+  // key is swallowed here — name that hold instead of leaving it mute.
+  const loadingKey = sendOnEnter === 'ctrl-enter'
+    ? 'components.slashCommandMenu.loading_commands_ctrl_enter_held'
+    : 'components.slashCommandMenu.loading_commands_enter_held'
 
   return createPortal(
     <div
       className="fixed z-[9999] bg-card border border-border rounded-lg shadow-lg overflow-y-auto py-1 animate-slide-up"
       role="listbox"
-      style={{ top, left, width: Math.min(width, 380), maxHeight }}
+      style={{ ...(above ? { bottom } : { top }), left, width: Math.min(width, 380), maxHeight }}
     >
       {displayed.length === 0
         // Settled zero-match: Enter's meaning flips (pick → send), and the
@@ -219,7 +258,9 @@ export default function SlashCommandMenu({ input, anchorRef, onSelect, onClose, 
         // it at the point of action, mirroring the $skill picker's empty state.
         // Named per the composer's send binding ('ctrl-enter' → bare Enter is
         // a newline); role="status" so screen-reader users hear the flip too.
-        ? <div role="status" className="px-3 py-3 text-[12px] text-muted">{i18nT(sendOnEnter === 'ctrl-enter' ? 'components.slashCommandMenu.no_matching_commands_ctrl_enter_sends' : 'components.slashCommandMenu.no_matching_commands_enter_sends')}</div>
+        ? (isFetching
+            ? <div role="status" className="px-3 py-3 text-[12px] text-muted">{i18nT(loadingKey)}</div>
+            : <div role="status" className="px-3 py-3 text-[12px] text-muted">{i18nT(emptyKey)}</div>)
         : displayed.map((cmd, i) => (
         <button
           role="option"

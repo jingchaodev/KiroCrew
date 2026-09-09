@@ -182,7 +182,7 @@ afterEach(() => {
 // ════════════════════════════════════════════════════════════════════════════
 
 function openOverflow(filePath = '/tmp/notes.md', content = '# hi\n') {
-  render(<OverflowMenu filePath={filePath} content={content} />, { wrapper })
+  render(<OverflowMenu filePath={filePath} content={content} onError={vi.fn()} />, { wrapper })
   fireEvent.click(screen.getByTestId('markdown-panel-more-options'))
 }
 
@@ -301,18 +301,22 @@ describe('MarkdownPanel — snapshot failure', () => {
     await screen.findByLabelText('Open as artifact')
     openPanelMenu()
     fireEvent.click(await screen.findByText('Snapshot version'))
-    await waitFor(() => expect(window.alert).toHaveBeenCalledWith('artifact is read-only'))
+    // The failure lands in the panel's shared ErrorNotice, not a blocking alert.
+    expect(await screen.findByTestId('markdown-panel-action-error')).toHaveTextContent('artifact is read-only')
+    expect(window.alert).not.toHaveBeenCalled()
   })
 })
 
 describe('MarkdownPanel — discard with no owner refresh', () => {
   it('re-reads the file itself when the host supplies no refresh hook', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const onContentChange = vi.fn()
     fetchOpts.fileReadText = 'the version on disk'
     // Cancel lives in the unsaved-changes banner, which is mode-independent.
     mountPanel({ content: 'edited body', savedBaseline: 'disk body', onContentChange })
     fireEvent.click(screen.getByText('Cancel'))
+    // The discard guard is the in-app dialog, never window.confirm.
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard changes' }))
     await waitFor(() => expect(onContentChange).toHaveBeenCalledWith('the version on disk'))
     expect(fetch).toHaveBeenCalledWith('/api/file-read?path=%2Ftmp%2Fnotes.md')
   })
@@ -456,7 +460,7 @@ describe('MarkdownPanel — diff surface wiring', () => {
     vi.mocked(api.fileDiff).mockResolvedValue({ diff: 'x', original: 'from HEAD\n', status: 'clean' } as never)
     mountPanel({ initialDiffMode: true, content: 'in the buffer\n' })
     await screen.findByTestId('pierre-diff')
-    fireEvent.click(screen.getByText('View Source'))
+    fireEvent.click(screen.getByText('Edit'))
     const editor = await screen.findByTestId('pierre-editor')
     expect(screen.queryByTestId('pierre-diff')).toBeNull()
     // `diffBase` is what makes it the live-diff surface rather than the plain
@@ -470,14 +474,14 @@ describe('MarkdownPanel — diff surface wiring', () => {
     vi.mocked(api.fileDiff).mockResolvedValue({ diff: 'x', original: 'from HEAD\n', status: 'clean' } as never)
     const onContentChange = vi.fn()
     mountPanel({ initialDiffMode: true, content: 'in the buffer\n', onContentChange })
-    fireEvent.click(screen.getByText('View Source'))
+    fireEvent.click(screen.getByText('Edit'))
     fireEvent.click(await screen.findByTestId('pierre-editor-emit'))
     expect(onContentChange).toHaveBeenCalledWith('edited inside pierre')
   })
 
   it('leaves the plain editor unseeded when the diff is off', async () => {
     mountPanel({ content: 'in the buffer\n' })
-    fireEvent.click(screen.getByText('View Source'))
+    fireEvent.click(screen.getByText('Edit'))
     const editor = await screen.findByTestId('pierre-editor')
     expect(editor).toHaveAttribute('data-diff-base', 'none')
   })
@@ -486,7 +490,7 @@ describe('MarkdownPanel — diff surface wiring', () => {
     vi.mocked(api.fileDiff).mockResolvedValue({ diff: 'x', original: 'from HEAD\n', status: 'clean' } as never)
     localStorage.setItem('mc-diff-split', '0')
     mountPanel({ initialDiffMode: true, content: 'in the buffer\n' })
-    fireEvent.click(screen.getByText('View Source'))
+    fireEvent.click(screen.getByText('Edit'))
     expect(await screen.findByTestId('pierre-editor')).toHaveAttribute('data-diff-split', 'false')
   })
 })

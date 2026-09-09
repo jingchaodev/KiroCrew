@@ -21,6 +21,7 @@ deliberately does not use one.
   brew install steipete/tap/imsg
   imsg --version
   ```
+  The binary is resolved from a fixed source-level list — `/opt/homebrew/bin/imsg`, then `/usr/local/bin/imsg` — and from nowhere else. There is deliberately no `PATH` search and no configurable path: `config.json` is agent-writable, so a settable path would let an agent choose which binary the gateway executes. Homebrew on either architecture is already covered, and the fixed list is also what makes the launch-agent case work, where the inherited `PATH` has no Homebrew prefix.
 * **Two macOS permissions**, granted once:
   * **Full Disk Access** — so the process can read the Messages database.
   * **Automation → Messages** — so it can send. The first send prompts for this.
@@ -40,12 +41,13 @@ deliberately does not use one.
      "allowed_handles": ["+15551234567"]
    }
    ```
-3. **Restart the gateway**, then message yourself from another device and say hi.
+3. **Restart the gateway**, then send it a message and say hi. Messaging your own
+   handle from another device works — see [Messaging yourself](#messaging-yourself).
 
 If the gateway is not on your Mac, or `imsg` is missing, the channel reports why
 in **Settings → Channels → iMessage** instead of failing silently.
 
-## Who can reach the agent
+## Access control
 
 **The allow-list is the whole gate, and an empty one authorizes nobody.** Every
 other channel has an org or workspace boundary in front of it; iMessage has
@@ -59,6 +61,28 @@ Formatting is ignored when handles are compared, so `+1 (555) 123-4567` and
 **Group chats are refused**, and this is deliberate: a reply in a group would
 deliver the agent's output — including tool results — to everyone in the thread,
 allow-listed or not. Direct messages only.
+
+### Messaging yourself
+
+Listing your **own** handle and messaging it from another device is supported,
+and it is the most convenient setup: no second number, no second Apple Account.
+It is also the one chat where the agent is talking to its own identity, so the
+channel needs a way to tell your words from its own.
+
+It does not use the platform's own outbound flag alone for that. In a self-chat
+every message belongs to your account in both directions, and Messages writes
+that attribution asynchronously — the bridge's watch waits 500ms expressly so a
+correction can land — so a reply can come back looking exactly like something you
+typed. The channel instead remembers what it just sent, for 30 seconds, and
+ignores that coming back. Without it the agent answers its own reply and the
+conversation never stops.
+
+**One consequence, and it applies to every chat rather than only this one:** if
+you send the agent back the **exact** text it has just sent you, within those 30
+seconds, that message is read as the echo and ignored — no reply, and nothing
+said about it. Send anything else, or wait, and it goes through normally. The
+alternative is worse: the only way to tell a returning message from the agent's
+own is the platform's attribution, and trusting that is what produced the loop.
 
 ## What a conversation looks like
 
@@ -79,24 +103,23 @@ Commands, sent as an ordinary message:
 
 | Command | What it does |
 |---|---|
-| `/new` | Start a fresh conversation |
+| `/new` (or `/start`) | Start a fresh conversation |
 | `/compact` | Compress the conversation's context |
 | `/help` | List these commands |
 
-## Settings
+## Settings reference
 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Turn the channel on. |
 | `allowed_handles` | `[]` | Phone numbers / Apple Account emails allowed to message the agent. Empty denies everyone. |
-| `cli_path` | `imsg` | Path to the bridge binary. Use an absolute path when the gateway runs as a launch agent, whose `PATH` has no Homebrew. |
 | `db_path` | `""` | Override the Messages database location. Empty uses the default. |
 | `service` | `imessage` | Which service replies use: `imessage`, `sms`, or `auto` to fall back to SMS. |
 | `soft_threshold_pct` | `80` | Context level at which the agent suggests `/compact`. |
 | `hard_threshold_pct` | `95` | Context level at which it compacts automatically. |
 | `session_folder` | `""` | Optional sidebar folder for conversations that start here. |
 
-There is no credential to configure — that is the whole idea.
+There is no credential to configure — that is the whole idea. The bridge's location is not configurable either; see [What you need](#what-you-need).
 
 ## Why the gateway must run here
 
@@ -110,7 +133,7 @@ receive fine and answer nothing.
 Rather than ship a send path that cannot be made to work, the channel refuses to
 start off-Mac and says so.
 
-## Not in this version
+## Limits
 
 Group chats, attachments in either direction, and every kind of message
 mutation: tapbacks, edit, unsend, effects, polls, and group management. Those
@@ -126,6 +149,12 @@ mistyped `allowed_handles` is the common cause, and by design it produces
 silence rather than an error. **Settings → Channels → iMessage** shows whether
 the channel is connected and why not.
 
+**It answers its own messages / the conversation never stops.** A self-chat where
+the echo guard is not doing its job — [Messaging yourself](#messaging-yourself)
+explains the mechanism. Turn the channel off in **Settings → Channels →
+iMessage** to stop it immediately (every cycle is a real turn), and please report
+it: the log records the handle, redacted, the first time it suppresses an echo.
+
 **"Messages database unavailable".** Full Disk Access is missing for the process
 running the gateway. Grant it, then quit and relaunch — macOS only re-reads that
 permission at launch.
@@ -135,3 +164,9 @@ or the gateway is not running on the Messages host.
 
 **The channel never starts and the log says it requires macOS.** Expected on
 Linux or Windows; there is no iMessage there to reach.
+
+## Related docs
+
+- [Channel capabilities](channel-capabilities.md): the ten-channel matrix — streaming, buttons, uploads, reply length, approval timeout
+- [Getting Started](getting-started.md): install, first run, connecting a channel
+- [Configuration](configuration.md): the config file and environment variables

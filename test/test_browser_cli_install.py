@@ -1,4 +1,4 @@
-"""Detection, install sequencing, and the presence-is-consent gate."""
+"""Detection, install sequencing, and the capability-availability probe."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from kiro_crew import env as env_mod
 from kiro_crew.browser_cli import install as mod
 
 # The real implementation, captured before the autouse fixture below replaces
@@ -15,6 +16,27 @@ from kiro_crew.browser_cli import install as mod
 # restore THIS (re-reading ``mod._required_revisions`` there would just re-bind
 # the stub to itself, silently leaving every test on the fallback path).
 _REAL_REQUIRED_REVISIONS = mod._required_revisions
+
+
+@pytest.fixture(autouse=True)
+def _clear_node_bin_dir_caches() -> None:
+    """``node_bin_dirs`` / ``_node_all_bin_dirs`` are ``lru_cache``d for the
+    process lifetime, keyed on nothing (the former) or on ``(home, mise_data)``
+    (the latter). ``cli_path()`` reaches both via ``find_node_tool`` ->
+    ``node_augmented_path`` -> ``node_bin_dirs()``. Once any earlier test in
+    this worker (this file or another) resolves a node tool with the real
+    ``$HOME``, the memoized real-machine mise/volta/nvm directories stay
+    prepended to every later PATH lookup regardless of a test's own ``HOME``
+    override -- ``test_the_cli_is_found_where_the_standalone_installer_puts_it``
+    got the operator's real mise-installed ``playwright-cli`` shim instead of
+    the ``tmp_path``-rooted wrapper it wrote, only when an earlier test had
+    warmed the cache first (no-test-side-effects; mirrors the fixture in
+    test_node_toolchain_resolution.py)."""
+    env_mod.node_bin_dirs.cache_clear()
+    env_mod._node_all_bin_dirs.cache_clear()
+    yield
+    env_mod.node_bin_dirs.cache_clear()
+    env_mod._node_all_bin_dirs.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -148,10 +170,10 @@ def test_available_is_false_without_the_binary(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_available_is_presence_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Presence is consent: a broken Node or missing browser does not revoke it.
+    """Presence reports availability even with a broken Node or missing browser.
 
-    Reporting "not consented" for a repairable environment would send the
-    operator to the wrong fix, and there is no toggle that could say otherwise.
+    Reporting a repairable environment as absent would send the operator to the
+    wrong fix. Shell approval is a separate decision made by the runner.
     """
     _wire(
         monkeypatch,
@@ -165,10 +187,10 @@ def test_available_is_presence_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_no_consent_flag_is_consulted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gate reads PATH and nothing else -- no flag file, no config key.
+    """Availability reads PATH and nothing else -- no flag file, no config key.
 
     An empty data home must not make an installed CLI unavailable, which is what
-    a re-introduced consent file would do.
+    a capability flag would do. Approval remains outside this module.
     """
     monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "empty-home"))
     _wire(
@@ -723,8 +745,11 @@ class TestFailureDetailIsRedactedAtTheSource:
         step = mod._step("npm-install-global", ["npm", "install"], 1.0)
 
         # Extract the actual secret value (the part after = or between : and @)
-        # and confirm it does not survive.
-        assert "[REDACTED]" in step["stderr"]
+        # and confirm it does not survive. The inline-credential URL shape is
+        # now caught by the SHARED pass (whose marker is "[REDACTED:
+        # credential]") before the npm-specific patterns run, so accept either
+        # redaction marker -- what matters is that the secret is gone.
+        assert "[REDACTED" in step["stderr"]
         # None of the raw secret portions should appear.
         for fragment in (
             "npm_abc123secretXYZ",
@@ -1365,3 +1390,52 @@ class TestManifestResolution:
         monkeypatch.setenv("KIROCREW_PLAYWRIGHT_CLI_HOME", "/nonexistent-prefix")
         assert mod._browsers_manifest_path() is None
         assert _REAL_REQUIRED_REVISIONS() is None
+
+
+def _lifecycle_contract_tree(tmp_path: Path) -> tuple[Path, Path]:
+    package = tmp_path / "node_modules" / "@playwright" / "cli"
+    core = package / "node_modules" / "playwright-core"
+    (core / "lib" / "tools" / "cli-client").mkdir(parents=True)
+    (core / "browsers.json").write_text('{"browsers": []}', encoding="utf-8")
+    registry = core / "lib" / "tools" / "cli-client" / "registry.js"
+    bundle = core / "lib" / "coreBundle.js"
+    return package, registry, bundle
+
+
+def test_lifecycle_env_contract_is_confirmed_from_serving_cli_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package, registry, bundle = _lifecycle_contract_tree(tmp_path)
+    registry.write_text("process.env.PWTEST_DAEMON_SESSION_DIR", encoding="utf-8")
+    bundle.write_text("process.env.PWTEST_SOCKETS_DIR || os.tmpdir()", encoding="utf-8")
+    monkeypatch.setattr(mod, "_cli_package_dirs", lambda: [package])
+    mod._source_contains.cache_clear()
+
+    assert mod.cli_lifecycle_env_supported() is True
+
+
+def test_lifecycle_env_contract_fails_when_upstream_hook_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package, registry, bundle = _lifecycle_contract_tree(tmp_path)
+    registry.write_text("process.env.PWTEST_DAEMON_SESSION_DIR", encoding="utf-8")
+    bundle.write_text("// lifecycle socket override removed upstream", encoding="utf-8")
+    monkeypatch.setattr(mod, "_cli_package_dirs", lambda: [package])
+    mod._source_contains.cache_clear()
+
+    assert mod.cli_lifecycle_env_supported() is False
+
+
+def test_lifecycle_contract_never_falls_through_to_stale_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active, active_registry, active_bundle = _lifecycle_contract_tree(tmp_path / "active")
+    stale, stale_registry, stale_bundle = _lifecycle_contract_tree(tmp_path / "stale")
+    active_registry.write_text("// hook removed", encoding="utf-8")
+    active_bundle.write_text("// hook removed", encoding="utf-8")
+    stale_registry.write_text("process.env.PWTEST_DAEMON_SESSION_DIR", encoding="utf-8")
+    stale_bundle.write_text("process.env.PWTEST_SOCKETS_DIR || os.tmpdir()", encoding="utf-8")
+    monkeypatch.setattr(mod, "_cli_package_dirs", lambda: [active, stale])
+    mod._source_contains.cache_clear()
+
+    assert mod.cli_lifecycle_env_supported() is False

@@ -9,11 +9,52 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from kiro_crew import cli_doctor
+from conftest import requires_symlinks
+from kiro_crew import cli_doctor, cron
+
+
+class TestManagedServicePolicyDoctor:
+    def test_no_service_is_silent(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            cli_doctor.service_controller,
+            "installed_service_has_managed_marker",
+            lambda: None,
+        )
+        issues: list[str] = []
+        cli_doctor._doctor_managed_service_policy(issues)
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    def test_stale_service_names_the_one_time_fix(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            cli_doctor.service_controller,
+            "installed_service_has_managed_marker",
+            lambda: False,
+        )
+        issues: list[str] = []
+        cli_doctor._doctor_managed_service_policy(issues)
+        output = capsys.readouterr().out
+        assert "kirocrew service install" in output
+        assert "managed-service defaults" in output
+        assert issues == ["managed service definition is outdated"]
+
+    def test_current_service_reports_managed_policy(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            cli_doctor.service_controller,
+            "installed_service_has_managed_marker",
+            lambda: True,
+        )
+        issues: list[str] = []
+        cli_doctor._doctor_managed_service_policy(issues)
+        assert "managed-service policy marker installed" in capsys.readouterr().out
+        assert issues == []
 
 
 class TestFixHint:
@@ -40,6 +81,42 @@ class TestFixHint:
         # No Windows arm supplied → keep the Linux text rather than inventing one.
         monkeypatch.setattr(cli_doctor._plat, "system", lambda: "Windows")
         assert cli_doctor._os_fix_hint("brew x", "linux x") == "linux x"
+
+
+class TestFfmpegLinuxHintResolvable:
+    """The Linux missing-ffmpeg hint names only locations the resolver searches (#8897).
+
+    An earlier hint told the user to drop a static build into ``~/.local/bin``,
+    which ``transcribe._find_ffmpeg`` deliberately never searches (its candidate
+    list documents removing that directory), so following the advice literally
+    still ended at "not found". Hold the hint against the resolver's own candidate
+    list rather than freezing its prose.
+    """
+
+    def test_hint_does_not_name_the_deliberately_excluded_dir(self) -> None:
+        assert ".local/bin" not in cli_doctor._FFMPEG_LINUX_HINT
+
+    def test_every_directory_named_is_actually_searched(self) -> None:
+        from kiro_crew import transcribe
+
+        dirs = re.findall(r"/[A-Za-z0-9._/-]+", cli_doctor._FFMPEG_LINUX_HINT)
+        assert dirs, "the hint must name at least one concrete install directory"
+        for directory in dirs:
+            assert (
+                directory in transcribe._FFMPEG_CANDIDATE_DIRS
+            ), f"{directory} is in the doctor hint but _find_ffmpeg never searches it"
+
+    def test_hint_offers_the_managed_store_download(self) -> None:
+        # The store download is the remedy that needs no PATH reasoning and works
+        # on distros with no packaged ffmpeg (the AL2023 case the old hint cited).
+        # Anchored to the decoder table, not the prose alone: if the pinned Linux
+        # artifacts were ever dropped, the hint would promise a download the
+        # gateway refuses (409 decoder_unsupported_platform).
+        from kiro_crew.stt import decoder
+
+        assert "dashboard" in cli_doctor._FFMPEG_LINUX_HINT
+        assert decoder.artifact_for("Linux", "x86_64") is not None
+        assert decoder.artifact_for("Linux", "aarch64") is not None
 
 
 class TestDataHome:
@@ -475,7 +552,13 @@ class TestMemoryPressure:
 
 
 class TestDoctorKas:
-    """`kirocrew doctor` KAS backend section — gated on acp_backend == kas."""
+    """`kirocrew doctor` KAS backend section — gated on acp_backend == kas.
+
+    KAS is served by kiro-cli's ACP relay, so the section reports the relay
+    invocation and whether this kiro-cli can select the KAS engine. It probes no
+    credential: the relay resolves tokens from kiro-cli's own store, which the
+    sign-in check already covers.
+    """
 
     class _Cfg:
         def __init__(self, backend: str) -> None:
@@ -486,13 +569,6 @@ class TestDoctorKas:
             cli_doctor.KiroCrewConfig, "load", classmethod(lambda cls: self._Cfg(backend))
         )
 
-    def test_version_label_from_bundle_path(self) -> None:
-        script = Path("/home/u/.local/share/kiro-cli/kas/2.18.0-abc123/nm/acp-server.js")
-        assert cli_doctor._kas_version_label(script) == "2.18.0-abc123"
-
-    def test_version_label_unknown_for_unexpected_layout(self) -> None:
-        assert cli_doctor._kas_version_label(Path("/opt/foo/acp-server.js")) == "unknown"
-
     def test_silent_when_backend_not_kas(self, monkeypatch, capsys) -> None:
         self._patch_cfg(monkeypatch, "")
         issues: list[str] = []
@@ -500,92 +576,127 @@ class TestDoctorKas:
         assert "KAS backend" not in capsys.readouterr().out
         assert issues == []
 
-    def test_selected_but_assets_missing_appends_issue(self, monkeypatch, capsys) -> None:
+    def test_selected_but_no_kiro_cli_appends_issue(self, monkeypatch, capsys) -> None:
         self._patch_cfg(monkeypatch, "kas")
-        from kiro_crew.acp import kas_assets, kas_auth
-
-        # Overrides select the direct-spawn path, whose diagnostics these
-        # assertions describe; without them doctor reports the cli-fronted
-        # branch instead.
-        monkeypatch.setenv(kas_assets.ENV_KAS_SCRIPT, "/nonexistent/acp-server.js")
-        monkeypatch.setattr(kas_assets, "find_kas_node", lambda: None)
-        monkeypatch.setattr(kas_assets, "find_kas_server_script", lambda: None)
-
-        async def _raise(*, timeout: float = 8.0):
-            raise kas_auth.KasAuthCallbackError("kiro-cli not found; cannot obtain a KAS token")
-
-        monkeypatch.setattr(kas_auth, "resolve_kas_access_token", _raise)
+        monkeypatch.setattr(cli_doctor, "resolve_kiro_cli", lambda: None)
         issues: list[str] = []
         cli_doctor._doctor_kas(issues)
         out = capsys.readouterr().out
         assert "KAS backend" in out
-        assert "❌ not found" in out
-        assert "KAS backend selected but assets missing" in issues
-        # Token bytes never printed; only the advisory line.
-        assert "not obtainable" in out
+        assert "KAS backend selected but kiro-cli is not installed" in issues
+        # No engine probe is attempted when there is no binary to probe.
+        assert "engine:" not in out
 
-    def test_token_ok_prints_expiry_not_token(self, monkeypatch, capsys) -> None:
+    def test_engine_supported_prints_the_relay_argv(self, monkeypatch, capsys) -> None:
         self._patch_cfg(monkeypatch, "kas")
-        from kiro_crew.acp import kas_assets, kas_auth
-
-        monkeypatch.setenv(kas_assets.ENV_KAS_SCRIPT, "/x/kas/9.9.9-hash/nm/acp-server.js")
-        monkeypatch.setattr(kas_assets, "find_kas_node", lambda: Path("/x/node"))
+        monkeypatch.setattr(cli_doctor, "resolve_kiro_cli", lambda: "/x/kiro-cli")
         monkeypatch.setattr(
-            kas_assets,
-            "find_kas_server_script",
-            lambda: Path("/x/kas/9.9.9-hash/nm/acp-server.js"),
+            cli_doctor,
+            "_kas_relay_help",
+            lambda _binary: "--agent-engine <ENGINE>  v1, v2 (default), or v3",
         )
-
-        async def _ok(*, timeout: float = 8.0):
-            return {"accessToken": "SECRET-DO-NOT-PRINT", "expiresAt": "2099-01-01T00:00:00Z"}
-
-        monkeypatch.setattr(kas_auth, "resolve_kas_access_token", _ok)
         issues: list[str] = []
         cli_doctor._doctor_kas(issues)
         out = capsys.readouterr().out
-        assert "9.9.9-hash" in out
-        assert "2099-01-01T00:00:00Z" in out
-        assert "SECRET-DO-NOT-PRINT" not in out
+        # The exact invocation, so a reader can reproduce it by hand.
+        assert "acp --agent-engine v3 --auth-method cli" in out
+        assert "✅ v3 supported" in out
         assert issues == []
 
-    def test_cli_fronted_missing_kiro_cli_appends_issue(self, monkeypatch, capsys) -> None:
-        """Default (no override): readiness is kiro-cli itself being present."""
+    def test_engine_missing_appends_issue(self, monkeypatch, capsys) -> None:
+        """A kiro-cli that offers engines but not ours cannot serve KAS."""
         self._patch_cfg(monkeypatch, "kas")
-        from kiro_crew.acp import kas_assets, kas_auth
-
-        monkeypatch.delenv(kas_assets.ENV_KAS_NODE, raising=False)
-        monkeypatch.delenv(kas_assets.ENV_KAS_SCRIPT, raising=False)
-        monkeypatch.setattr(cli_doctor.shutil, "which", lambda _name: None)
-
-        async def _raise(*, timeout: float = 8.0):
-            raise kas_auth.KasAuthCallbackError("kiro-cli not found; cannot obtain a KAS token")
-
-        monkeypatch.setattr(kas_auth, "resolve_kas_access_token", _raise)
+        monkeypatch.setattr(cli_doctor, "resolve_kiro_cli", lambda: "/x/kiro-cli")
+        monkeypatch.setattr(
+            cli_doctor,
+            "_kas_relay_help",
+            lambda _binary: "--agent-engine <ENGINE>  v1, v2 (default)",
+        )
         issues: list[str] = []
         cli_doctor._doctor_kas(issues)
         out = capsys.readouterr().out
-        assert "kiro-cli acp --agent-engine v3" in out
-        assert "KAS backend selected but kiro-cli not found" in issues
+        assert "does not offer engine v3" in out
+        assert any("does not support the KAS engine" in i for i in issues)
 
-    def test_cli_fronted_ready_reports_engine_flag(self, monkeypatch, capsys) -> None:
+    def test_help_without_the_flag_is_a_failure_not_unknown(
+        self, monkeypatch, capsys
+    ) -> None:
+        """A kiro-cli predating engine selection must FAIL the check.
+
+        Reporting it as "unknown" would let a configuration that cannot work
+        pass readiness and fail later at session-create time instead.
+        """
         self._patch_cfg(monkeypatch, "kas")
-        from kiro_crew.acp import kas_assets, kas_auth
-
-        monkeypatch.delenv(kas_assets.ENV_KAS_NODE, raising=False)
-        monkeypatch.delenv(kas_assets.ENV_KAS_SCRIPT, raising=False)
-        monkeypatch.setattr(cli_doctor.shutil, "which", lambda _name: "/usr/bin/kiro-cli")
-        monkeypatch.setattr(cli_doctor, "_kas_engine_flag_supported", lambda _bin: True)
-
-        async def _ok(*, timeout: float = 8.0):
-            return {"accessToken": "SECRET-DO-NOT-PRINT", "expiresAt": "2099-01-01T00:00:00Z"}
-
-        monkeypatch.setattr(kas_auth, "resolve_kas_access_token", _ok)
+        monkeypatch.setattr(cli_doctor, "resolve_kiro_cli", lambda: "/x/kiro-cli")
+        monkeypatch.setattr(
+            cli_doctor,
+            "_kas_relay_help",
+            lambda _binary: "Usage: kiro-cli acp [OPTIONS]\n  -a, --trust-all-tools",
+        )
         issues: list[str] = []
         cli_doctor._doctor_kas(issues)
         out = capsys.readouterr().out
-        assert "engine flag" in out
-        assert "SECRET-DO-NOT-PRINT" not in out
+        assert "no --agent-engine flag" in out
+        assert "engine support unknown" not in out
+        assert any("too old to select the KAS engine" in i for i in issues)
+
+    def test_unreadable_help_is_reported_unknown_not_failed(
+        self, monkeypatch, capsys
+    ) -> None:
+        """Only a FAILED probe is unknown; a diagnostic must not invent a verdict.
+
+        ``None`` now means the subprocess did not run, which is the one case
+        where nothing is established either way.
+        """
+        self._patch_cfg(monkeypatch, "kas")
+        monkeypatch.setattr(cli_doctor, "resolve_kiro_cli", lambda: "/x/kiro-cli")
+        monkeypatch.setattr(cli_doctor, "_kas_relay_help", lambda _binary: None)
+        issues: list[str] = []
+        cli_doctor._doctor_kas(issues)
+        out = capsys.readouterr().out
+        assert "engine support unknown" in out
         assert issues == []
+
+    def test_probe_returns_help_text_even_without_the_flag(
+        self, monkeypatch
+    ) -> None:
+        """The probe must not swallow ran-but-lacks-the-flag into None.
+
+        Pins the split directly: the previous implementation returned None for
+        both a failed spawn and help text missing the selector, which is what
+        let an unsupported kiro-cli pass.
+        """
+
+        class _Proc:
+            stdout = "Usage: kiro-cli acp [OPTIONS]"
+            stderr = ""
+
+        monkeypatch.setattr(cli_doctor.subprocess, "run", lambda *a, **k: _Proc())
+        got = cli_doctor._kas_relay_help("/x/kiro-cli")
+        assert got is not None
+        assert "--agent-engine" not in got
+
+    def test_probe_returns_none_when_the_spawn_fails(self, monkeypatch) -> None:
+        def _boom(*_a, **_k):
+            raise OSError("no such binary")
+
+        monkeypatch.setattr(cli_doctor.subprocess, "run", _boom)
+        assert cli_doctor._kas_relay_help("/x/kiro-cli") is None
+
+    def test_no_credential_probe_is_performed(self, monkeypatch, capsys) -> None:
+        """The relay owns auth, so the doctor must not reach for a token.
+
+        Pinned as an assertion because the previous implementation DID shell out
+        for one, and re-adding that would put Crew back in the credential path.
+        """
+        self._patch_cfg(monkeypatch, "kas")
+        monkeypatch.setattr(cli_doctor, "resolve_kiro_cli", lambda: "/x/kiro-cli")
+        monkeypatch.setattr(cli_doctor, "_kas_relay_help", lambda _binary: "v3")
+        issues: list[str] = []
+        cli_doctor._doctor_kas(issues)
+        out = capsys.readouterr().out
+        assert "owned by kiro-cli" in out
+        assert not hasattr(cli_doctor, "_kas_version_label")
 
 
 class TestPathLauncherOwnership:
@@ -914,13 +1025,17 @@ class TestSourceCheckout:
     def test_git_line_pins_git_and_returns_none_when_untrusted(
         self, monkeypatch, tmp_path
     ) -> None:
-        """git resolves via trusted_system_bin; a miss means no subprocess at all.
+        """git resolves via trusted_git_bin; a miss means no subprocess at all.
 
         Doctor runs with operator privileges, so a ``git`` shim planted in an
         agent-writable PATH directory must never execute: when the trusted
-        resolver declines, _git_line collapses to None without spawning.
-        When it resolves, the pinned absolute path — not the bare name — is
-        what reaches argv[0].
+        resolver declines, _git_line collapses to None without spawning. When it
+        resolves, the pinned absolute path -- not the bare name -- reaches argv[0].
+
+        The resolver itself (system dirs plus the Windows install-root fallback)
+        is tested in `test_platform_compat`; this asserts what the doctor does
+        with each OUTCOME, which is why it patches the resolver rather than the
+        directories behind it.
         """
         import subprocess as _sp
 
@@ -932,82 +1047,17 @@ class TestSourceCheckout:
 
         monkeypatch.setattr(cli_doctor.subprocess, "run", fake_run)
 
-        # Miss: no trusted git -> None, and no process spawned. Neutralize
-        # the Windows fallback too so the miss is a miss on every platform
-        # (on a real Windows runner _windows_git_bin finds the actual Git
-        # for Windows install; the fallback has its own dedicated test).
-        monkeypatch.setattr(
-            cli_doctor.platform_compat, "trusted_system_bin", lambda _n: None
-        )
-        monkeypatch.setattr(cli_doctor, "_windows_git_bin", lambda: None)
+        # Miss: no trusted git -> None, and no process spawned.
+        monkeypatch.setattr(cli_doctor.platform_compat, "trusted_git_bin", lambda: None)
         assert cli_doctor._git_line(tmp_path, "rev-parse", "HEAD") is None
         assert calls == []
 
         # Hit: the resolved absolute path is argv[0], never the bare "git".
         monkeypatch.setattr(
-            cli_doctor.platform_compat,
-            "trusted_system_bin",
-            lambda _n: "/usr/bin/git",
+            cli_doctor.platform_compat, "trusted_git_bin", lambda: "/usr/bin/git"
         )
         assert cli_doctor._git_line(tmp_path, "rev-parse", "HEAD") == "main"
         assert calls and calls[0][0] == "/usr/bin/git"
-
-    def test_git_line_windows_falls_back_to_git_for_windows_roots(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """On Windows a system-dirs miss probes the fixed Git for Windows roots.
-
-        Git for Windows installs under Program Files, never System32, so
-        without the fallback every supported Windows source install reported
-        "could not check". The fallback stays pinned: fixed literal roots, and
-        a miss there still means no subprocess.
-        """
-        import subprocess as _sp
-
-        calls: list[list[str]] = []
-
-        def fake_run(argv, *a, **k):
-            calls.append(list(argv))
-            return _sp.CompletedProcess(argv, 0, stdout="main\n", stderr="")
-
-        monkeypatch.setattr(cli_doctor.subprocess, "run", fake_run)
-        monkeypatch.setattr(
-            cli_doctor.platform_compat, "trusted_system_bin", lambda _n: None
-        )
-        monkeypatch.setattr(cli_doctor.platform_compat, "IS_WINDOWS", True)
-
-        gfw = r"C:\Program Files\Git\cmd\git.exe"
-        monkeypatch.setattr(cli_doctor, "_windows_git_bin", lambda: gfw)
-        assert cli_doctor._git_line(tmp_path, "rev-parse", "HEAD") == "main"
-        assert calls and calls[0][0] == gfw
-
-        # Fallback miss: still no spawn at all.
-        calls.clear()
-        monkeypatch.setattr(cli_doctor, "_windows_git_bin", lambda: None)
-        assert cli_doctor._git_line(tmp_path, "rev-parse", "HEAD") is None
-        assert calls == []
-
-    def test_git_line_non_windows_never_probes_git_for_windows(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        # POSIX resolver miss must not consult the Windows fallback: the
-        # trusted-dirs decision is final there.
-        monkeypatch.setattr(
-            cli_doctor.platform_compat, "trusted_system_bin", lambda _n: None
-        )
-        monkeypatch.setattr(cli_doctor.platform_compat, "IS_WINDOWS", False)
-        monkeypatch.setattr(
-            cli_doctor,
-            "_windows_git_bin",
-            lambda: (_ for _ in ()).throw(AssertionError("probed on POSIX")),
-        )
-        assert cli_doctor._git_line(tmp_path, "rev-parse", "HEAD") is None
-
-    def test_windows_git_bin_returns_none_when_roots_empty(self, monkeypatch) -> None:
-        # Fixed roots only — a miss returns None without consulting PATH or
-        # the environment.
-        monkeypatch.setattr(cli_doctor, "_WINDOWS_GIT_DIRS", ("Z:\\nonexistent\\Git\\cmd",))
-        assert cli_doctor._windows_git_bin() is None
 
 
 class TestCliInstallerResidue:
@@ -1434,6 +1484,7 @@ class TestEffectiveModelSection:
 
         assert "\x1b" not in capsys.readouterr().out
 
+    @requires_symlinks
     def test_a_symlink_to_a_sensitive_target_is_refused(self, monkeypatch, capsys) -> None:
         """The doctor read goes through agent_discovery's hardened reader, which
         refuses a symlink whose RESOLVED target is sensitive (the documented
@@ -1458,12 +1509,12 @@ class TestEffectiveModelSection:
         assert "unreadable" in out
         assert issues == ["agent spec unreadable"]
         assert "(defers)" in out.split("default spec pin:", 1)[1].splitlines()[0]
-        # ... and explains the gap instead of accusing its own tier list of being
-        # stale. `effective` may still carry the value: the RESOLVER reads the
-        # spec through its own path, which follows the link, and hiding what will
-        # actually run would make the report lie. That resolver-side following is
-        # pre-existing and main-owned; noted as a follow-up, not changed here.
-        assert "refused to follow" in out
+        # ... and nothing else acts on it either: the resolver reads through
+        # the same hardened reader, so it refuses too -- `effective` carries no
+        # value from the refused spec, and there is no resolver-vs-report gap
+        # to explain.
+        assert "leaked-value" not in out
+        assert "refused to follow" not in out
         assert "out of date" not in out
 
     def test_an_absent_spec_is_not_reported_as_a_fault(self, capsys) -> None:
@@ -1523,11 +1574,13 @@ class TestEffectiveModelSection:
         monkeypatch.setattr(cli_doctor, "project_agent_files", lambda d: [hostile])
         monkeypatch.setattr(cli_doctor, "project_agent_name", lambda p: "kirocrew")
         # Only the injected path is faked; the user-level spec still goes through
-        # the real reader so the report's own self-check is not disturbed.
+        # the real reader so the report's own self-check is not disturbed. The
+        # stub forwards **kw because the reader takes keyword-only SEL
+        # attribution labels (#6722) that this test does not care about.
         monkeypatch.setattr(
             cli_doctor,
             "_read_agent_spec",
-            lambda p: {"model": "m"} if p == hostile else real_reader(p),
+            lambda p, **kw: {"model": "m"} if p == hostile else real_reader(p, **kw),
         )
         issues: list[str] = []
 
@@ -1558,3 +1611,692 @@ class TestEffectiveModelSection:
         # It degrades to the built-in agent and still produces the report.
         assert "effective:" in out
         assert "tracking:" in out
+
+
+class TestWhatsAppSection:
+    """`kirocrew doctor`'s WhatsApp Integration section.
+
+    WhatsApp is the only channel whose whole runtime hangs off an OPTIONAL wheel
+    plus a locally stored credential, and neither absence produces an error the
+    operator sees: a message simply never arrives. So the section has to answer
+    both, and it has to answer them WITHOUT loading the Go core: a preflight that
+    initializes the subsystem it is inspecting is both slow and a side effect.
+    """
+
+    def _cfg(self, *, enabled: bool = True, groups: list | None = None):
+        from kiro_crew.config import KiroCrewConfig
+
+        cfg = KiroCrewConfig()
+        cfg.whatsapp.enabled = enabled
+        cfg.whatsapp.groups = groups if groups is not None else []
+        return cfg
+
+    @pytest.fixture()
+    def home(self, tmp_path: Path, monkeypatch) -> Path:
+        """Pin the data home the section reports on, so no real store is read."""
+        target = tmp_path / "home"
+        target.mkdir()
+        monkeypatch.setattr(cli_doctor, "data_home", lambda: target)
+        return target
+
+    @staticmethod
+    def _extra(monkeypatch, present: bool) -> None:
+        monkeypatch.setattr(
+            "kiro_crew.whatsapp.client.neonize_available", lambda: present
+        )
+
+    @staticmethod
+    def _pair(home: Path) -> Path:
+        from kiro_crew.whatsapp.client import default_db_path
+
+        store = default_db_path(home)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b"sqlite")
+        return store
+
+    def test_a_disabled_channel_names_the_two_ways_to_enable_it(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        """The channel must be VISIBLE in the preflight even when off, because that
+        is the
+        surface an operator checks before wondering why nothing arrives."""
+        self._extra(monkeypatch, True)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(enabled=False), issues)
+
+        out = capsys.readouterr().out
+        assert "WhatsApp Integration" in out
+        assert "not enabled" in out
+        assert "setup --whatsapp" in out
+        assert issues == []
+
+    def test_a_missing_extra_on_an_enabled_channel_is_a_reported_issue(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        """Config says the channel is on and the wheel it needs is absent: the
+        channel cannot start at all, and the fix is one offline pip install."""
+        self._extra(monkeypatch, False)
+        self._pair(home)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(), issues)
+
+        out = capsys.readouterr().out
+        # neonize by name -- the extras form is not installable from an index.
+        assert "neonize" in out
+        assert "kirocrew[" not in out
+        assert "whatsapp extra missing" in issues
+
+    def test_an_installed_extra_and_a_paired_store_report_clean(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        self._extra(monkeypatch, True)
+        store = self._pair(home)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(), issues)
+
+        out = capsys.readouterr().out
+        assert "extra:       ✅" in out
+        assert f"session:     ✅ paired session store at {store}" in out
+        assert issues == []
+
+    def test_an_unpaired_store_warns_but_never_fails_doctor(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        """Load-bearing split. Pairing is a QR scan served BY the running gateway,
+        so a freshly enabled channel legitimately has no store yet. Counting that
+        as an issue would exit 1 and break the documented
+        `kirocrew doctor && kirocrew gateway` chain at the one moment the operator
+        has to start the gateway to make progress.
+        """
+        self._extra(monkeypatch, True)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(), issues)
+
+        out = capsys.readouterr().out
+        assert "not paired yet" in out
+        assert "Settings → Channels" in out
+        assert issues == [], "an unpaired channel must not fail the preflight"
+
+    def test_the_reported_store_is_the_path_the_gateway_opens(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        """Doctor and the channel must resolve ONE path, or the report describes a
+        store the gateway never touches."""
+        from kiro_crew.whatsapp.client import default_db_path
+
+        self._extra(monkeypatch, True)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(), issues)
+
+        assert str(default_db_path(home)) in capsys.readouterr().out
+
+    def test_the_check_never_imports_neonize(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        """The whole point of the ``find_spec`` probe: importing neonize loads a
+        ~19 MB ctypes CDLL plus protobuf descriptors, and a health check must not
+        pay that (or construct a client as a side effect of asking a question).
+        """
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _guard(name, *args, **kwargs):
+            if name.split(".")[0] == "neonize":
+                raise AssertionError(
+                    f"doctor imported {name!r}: the preflight must stay a find_spec check"
+                )
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _guard)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(), issues)
+
+        assert "WhatsApp Integration" in capsys.readouterr().out
+
+    def test_configured_groups_are_counted_and_junk_entries_are_not(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        """A hand-edited config reaches this section intact, so a non-dict or a
+        blank JID must neither be counted nor crash the one command a user runs
+        BECAUSE their config is broken."""
+        self._extra(monkeypatch, True)
+        issues: list[str] = []
+        groups = [{"jid": "123@g.us"}, {"jid": "  "}, "not-a-dict", {"jid": "456@g.us"}]
+
+        cli_doctor._doctor_whatsapp(self._cfg(groups=groups), issues)
+
+        assert "groups:      ✅ 2 configured" in capsys.readouterr().out
+
+    def test_no_configured_groups_says_group_messages_are_ignored(
+        self, home: Path, monkeypatch, capsys
+    ) -> None:
+        self._extra(monkeypatch, True)
+        issues: list[str] = []
+
+        cli_doctor._doctor_whatsapp(self._cfg(groups=[]), issues)
+
+        assert "none configured" in capsys.readouterr().out
+
+    def test_the_section_is_wired_into_the_doctor_run(self) -> None:
+        """Guards the call site itself. Every other test here drives the helper
+        directly, so a deleted call would leave them all green and the operator
+        with no WhatsApp line, the exact gap this section was added to close.
+        ``_doctor()`` spawns subprocesses, probes the network and calls
+        ``sys.exit``, so its source is read rather than run.
+        """
+        import inspect
+
+        source = inspect.getsource(cli_doctor._doctor)
+        assert "_doctor_whatsapp(cfg, issues)" in source
+
+
+class TestVenvDepsProbe:
+    """The deps probe answers for the VENV, never the doctor's own process.
+
+    ``python -c`` puts the child's CWD at ``sys.path[0]`` and inherits
+    ``PYTHONPATH``, so an unisolated probe imports whatever decoy package
+    sits on either route -- making the doctor's verdict describe the
+    caller's environment instead of the venv under test (the false-healthy
+    the isolated ``dep_sync._probe_interpreter`` closes). The decoys here
+    raise on import: a probe that can still see them fails against an
+    interpreter that genuinely serves the real modules, so each test proves
+    the route is closed in a way that does not depend on which direction the
+    decoy lies in. The probe children run a fixed read-only import with the
+    cwd the code under test pins (the interpreter's own bin dir) -- nothing
+    is written, so the tmp-cwd rule for file-creating children does not
+    apply, and pointing them at ``tmp_path`` would test nothing.
+    """
+
+    _DEP_NAMES = ("websockets", "slack_sdk", "aiohttp")
+
+    def _plant_raising_decoys(self, root: Path) -> Path:
+        decoy = root / "decoy-path"
+        for name in self._DEP_NAMES:
+            pkg = decoy / name
+            pkg.mkdir(parents=True)
+            (pkg / "__init__.py").write_text(
+                "raise ImportError('decoy package imported')", encoding="utf-8"
+            )
+        return decoy
+
+    def test_decoy_on_pythonpath_is_invisible_to_the_probe(self, tmp_path, monkeypatch) -> None:
+        """PYTHONPATH entries rank ahead of site-packages, so an unisolated
+        probe imports the raising decoys and misreports this healthy
+        interpreter as missing its deps."""
+        decoy = self._plant_raising_decoys(tmp_path)
+        monkeypatch.setenv("PYTHONPATH", str(decoy))
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is True
+
+    def test_decoy_in_the_callers_cwd_is_invisible_to_the_probe(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The second route: the caller's CWD lands at ``sys.path[0]`` for an
+        unisolated ``python -c``, ranking the decoys above site-packages."""
+        decoy = self._plant_raising_decoys(tmp_path)
+        monkeypatch.chdir(decoy)
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is True
+
+    def test_missing_modules_still_report_missing(self, monkeypatch) -> None:
+        """Isolation must not soften the verdict: a probe exiting nonzero is
+        exactly the missing-deps answer the doctor section exists to show."""
+        monkeypatch.setattr(
+            cli_doctor.dep_sync,
+            "_probe_interpreter",
+            lambda *a, **k: subprocess.CompletedProcess(args=[], returncode=1),
+        )
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is False
+
+    def test_a_wedged_interpreter_reports_missing(self, monkeypatch) -> None:
+        """A hung venv python must surface as a deps failure, not hang the
+        operator's doctor run or escape as a traceback."""
+
+        def _hang(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="python", timeout=5)
+
+        monkeypatch.setattr(cli_doctor.dep_sync, "_probe_interpreter", _hang)
+
+        assert cli_doctor._venv_deps_ok(Path(sys.executable)) is False
+
+    def test_an_unspawnable_interpreter_reports_missing(self, tmp_path) -> None:
+        assert cli_doctor._venv_deps_ok(tmp_path / "no-such-venv" / "python") is False
+
+    def test_the_probe_asks_the_venv_for_all_three_core_deps(self, monkeypatch) -> None:
+        """Pins the probe's question itself: the decoy tests above pass any
+        probe that ignores PYTHONPATH, including one that stopped importing a
+        module the gateway needs."""
+        seen: dict = {}
+
+        def record(target_py, code, timeout=None):
+            seen.update(target=target_py, code=code, timeout=timeout)
+            return subprocess.CompletedProcess(args=[], returncode=0)
+
+        monkeypatch.setattr(cli_doctor.dep_sync, "_probe_interpreter", record)
+
+        assert cli_doctor._venv_deps_ok(Path("/v/bin/python")) is True
+        assert seen["code"] == "import websockets, slack_sdk, aiohttp"
+        assert seen["target"] == Path("/v/bin/python")
+        assert seen["timeout"] == 15
+
+    def test_the_probe_is_wired_into_the_doctor_run(self) -> None:
+        """Guards the call site: every other test drives the helper directly,
+        so a deleted call would leave them green while the doctor silently
+        skipped the check. ``_doctor()`` spawns subprocesses and calls
+        ``sys.exit``, so its source is read rather than run."""
+        import inspect
+
+        source = inspect.getsource(cli_doctor._doctor)
+        assert "_venv_deps_ok(venv_py)" in source
+
+
+class TestCronHealth:
+    """`kirocrew doctor` Cron Jobs section — auto-paused / errored jobs.
+
+    Read-only by contract: the check reports and hints, it never resumes or
+    triggers anything. The negative half of this suite (healthy store,
+    user-paused job, missing file) is what stops the check crying wolf.
+    """
+
+    @staticmethod
+    def _job(job_id: str, name: str, **over: object) -> dict:
+        job = {
+            "id": job_id,
+            "name": name,
+            "message": "do a thing",
+            "schedule": {"kind": "every", "every_secs": 3600},
+            "enabled": True,
+            "user_paused": False,
+            "auto_paused": False,
+            "last_status": "ok",
+        }
+        job.update(over)
+        return job
+
+    def _write(self, tmp_path: Path, *jobs: dict) -> Path:
+        path = tmp_path / "crons.json"
+        path.write_text(json.dumps({"version": 2, "jobs": list(jobs)}), encoding="utf-8")
+        return path
+
+    def _run(self, monkeypatch, tmp_path: Path) -> list[str]:
+        # The scan lives in cron.py (single owner of the pause predicates), so
+        # the data home is patched THERE; doctor is only the presentation half.
+        monkeypatch.setattr(cron, "config_dir", lambda: tmp_path)
+        issues: list[str] = []
+        cli_doctor._doctor_cron_health(issues)
+        return issues
+
+    # ── positive: the signals ARE reported ──
+
+    def test_auto_paused_job_is_reported_with_resume_hint(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        self._write(
+            tmp_path,
+            self._job("j1", "nightly-sync", auto_paused=True, enabled=False, last_status="error"),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "Cron Jobs" in out
+        assert "auto-paused" in out
+        assert "'nightly-sync' ('j1')" in out
+        assert "kirocrew cron resume <id>" in out
+        assert issues == ["1 cron job(s) auto-paused"]
+
+    def test_errored_job_is_reported_with_trigger_hint(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        self._write(tmp_path, self._job("j2", "pr-watch", last_status="error"))
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "errored:" in out
+        assert "'pr-watch' ('j2')" in out
+        assert "kirocrew cron trigger <id>" in out
+        assert issues == ["1 cron job(s) last ran with an error"]
+
+    def test_a_user_paused_at_job_with_a_stale_error_is_not_reported(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        """An explicitly paused ``at`` job must stay silent even carrying an error.
+
+        The user pause is the later, more specific instruction, so it wins -- the
+        contract this function's own docstring states. A stale ``last_status``
+        from a run before the pause is not a reason to hand back a hint for a job
+        the user switched off.
+
+        Paired with the sibling below, which keeps a NON-paused errored at-job
+        reported: neither test alone pins the distinction, because one mutation
+        can only move one of the two outcomes.
+        """
+        self._write(
+            tmp_path,
+            self._job(
+                "j-at",
+                "one-off-import",
+                schedule={"kind": "at", "at_ts": 1.0},
+                enabled=False,
+                user_paused=True,
+                last_status="error",
+            ),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert issues == []
+        out = capsys.readouterr().out
+        assert "errored:" not in out
+        assert "'one-off-import' ('j-at')" not in out
+
+    def test_a_non_paused_at_job_with_an_error_is_still_reported(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        """The other half: silencing paused jobs must not silence live failures.
+
+        Same ``at`` schedule and the same errored status as the sibling above --
+        only the pause flag differs, so this is the assertion that catches a fix
+        that simply stopped reporting at-jobs.
+        """
+        self._write(
+            tmp_path,
+            self._job(
+                "j-at-live",
+                "live-import",
+                schedule={"kind": "at", "at_ts": 1.0},
+                enabled=True,
+                user_paused=False,
+                last_status="error",
+            ),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "errored:" in out
+        assert "'live-import' ('j-at-live')" in out
+        assert issues == ["1 cron job(s) last ran with an error"]
+
+    def test_auto_paused_job_is_not_also_counted_as_errored(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # A job only auto-pauses by failing repeatedly, so it carries
+        # last_status="error" too. Reporting both would print contradictory
+        # advice (resume vs. re-trigger) for one job.
+        self._write(
+            tmp_path,
+            self._job("j3", "flaky", auto_paused=True, enabled=False, last_status="error"),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert issues == ["1 cron job(s) auto-paused"]
+        assert "errored:" not in capsys.readouterr().out
+
+    def test_job_list_is_capped_with_a_plus_n_more_tail(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # A user with dozens of crons must not get a wall of text.
+        jobs = [self._job(f"j{n}", f"job-{n}", auto_paused=True, enabled=False) for n in range(8)]
+        self._write(tmp_path, *jobs)
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "+3 more" in out
+        assert "'job-0' ('j0')" in out
+        assert "'job-7' ('j7')" not in out, "beyond the cap must be summarised, not listed"
+        assert issues == ["8 cron job(s) auto-paused"]
+
+    # ── negative: healthy / deliberate state is NOT reported ──
+
+    def test_healthy_store_is_silent(self, monkeypatch, tmp_path: Path, capsys) -> None:
+        self._write(tmp_path, self._job("j4", "fine"), self._job("j5", "also-fine"))
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    def test_user_paused_job_is_not_reported(self, monkeypatch, tmp_path: Path, capsys) -> None:
+        # user_paused is deliberately distinct from auto_paused: a job the user
+        # paused on purpose is not a health signal, and neither is a stale
+        # last_status left over from before they paused it.
+        self._write(
+            tmp_path,
+            self._job("j6", "on-purpose", user_paused=True, enabled=False, last_status="error"),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    def test_legacy_record_without_user_paused_key_is_not_reported(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # Records written before `user_paused` existed carry the reason only in
+        # `enabled`; the deserializer derives user_paused from it, and so must this.
+        job = self._job("j7", "legacy", enabled=False, last_status="error")
+        del job["user_paused"]
+        self._write(tmp_path, job)
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    # ── degradation: a broken or absent store must not fail doctor ──
+
+    def test_missing_crons_file_is_silent(self, monkeypatch, tmp_path: Path, capsys) -> None:
+        # Every fresh install: no crons yet.
+        assert not (tmp_path / "crons.json").exists()
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    @pytest.mark.parametrize(
+        "body",
+        ["not json at all", "", "[]", '{"jobs": "not-a-list"}', '{"jobs": [null, 3]}'],
+        ids=["garbage", "empty", "top-level-list", "jobs-not-a-list", "jobs-of-scalars"],
+    )
+    def test_corrupt_crons_file_is_reported_not_silent(
+        self, monkeypatch, tmp_path: Path, capsys, body: str
+    ) -> None:
+        # The run on a host with a corrupt crons.json is exactly the run that
+        # most needs doctor's other checks — it must not get a traceback. But it
+        # must not be SILENT either: the scheduler can load no jobs from an
+        # unreadable store, so every job has stopped, and reporting a clean bill
+        # of health there is the silence this check exists to break.
+        (tmp_path / "crons.json").write_text(body, encoding="utf-8")
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert "could not be read" in capsys.readouterr().out
+        assert issues == ["cron store unreadable"]
+
+    def test_one_malformed_record_does_not_discard_the_rest(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        path = tmp_path / "crons.json"
+        good = self._job("j8", "real-job", auto_paused=True, enabled=False)
+        path.write_text(json.dumps({"jobs": ["junk", good]}), encoding="utf-8")
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert "'real-job' ('j8')" in capsys.readouterr().out
+        assert issues == ["1 cron job(s) auto-paused"]
+
+    def test_record_with_blank_id_and_name_still_renders(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # The `(unnamed)` / `no-id` label fallback, on a record the scheduler
+        # CAN load: `_job_from_record` needs the keys present, not non-empty, so
+        # blank strings still build a job and must still be nameable. A record
+        # MISSING those keys is a different case -- unloadable, so it is skipped
+        # and reported as a broken store instead (see the unloadable-record
+        # test above); asserting a hint for it would encode that defect.
+        self._write(tmp_path, self._job("", "", auto_paused=True, enabled=False))
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "(unnamed)" in out and "no-id" in out
+        assert issues == ["1 cron job(s) auto-paused"]
+
+    def test_an_auto_paused_job_the_user_also_paused_is_not_reported(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        """Both flags can be set at once, and the user pause wins.
+
+        `_enable_job_locked` clears `auto_paused` only when ENABLING, so pausing
+        an already-auto-paused job leaves `auto_paused` true and adds
+        `user_paused`. Telling the user to resume a job they deliberately
+        switched off would contradict the more specific instruction.
+        """
+        self._write(
+            tmp_path,
+            self._job(
+                "j10",
+                "off-on-purpose",
+                auto_paused=True,
+                user_paused=True,
+                enabled=False,
+                last_status="error",
+            ),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    def test_invalid_utf8_in_the_store_is_reported_not_silent(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # The store is bytes on disk and can hold invalid UTF-8. A
+        # UnicodeDecodeError here would abort the whole doctor run; swallowing
+        # it silently would instead hide that no job can load at all.
+        (tmp_path / "crons.json").write_bytes(b'{"jobs": [{"id": "a", "name": "\xff\xfe"}]}')
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert "could not be read" in capsys.readouterr().out
+        assert issues == ["cron store unreadable"]
+
+    def test_deeply_nested_json_is_reported_not_silent(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # json.loads raises RecursionError on deeply nested input, and
+        # RecursionError is a RuntimeError -- NOT a ValueError -- so it escapes
+        # the decode-error tuple and would abort the whole doctor run. Caught, it
+        # is still an unreadable store and must be reported rather than hidden.
+        depth = 100_000
+        (tmp_path / "crons.json").write_text("[" * depth + "]" * depth, encoding="utf-8")
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert "could not be read" in capsys.readouterr().out
+        assert issues == ["cron store unreadable"]
+
+    def test_a_store_of_non_job_dicts_is_reported_not_silent(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # `{}` is a dict, so an isinstance-only shape check calls this store
+        # readable -- but `_job_from_record` rejects it (KeyError: 'id'), so the
+        # scheduler loads ZERO jobs from it. Entries were present and none is
+        # loadable: that is the "parsed but nothing came out" fault this check
+        # exists to surface, not an honestly empty store.
+        (tmp_path / "crons.json").write_text('{"jobs": [{}]}', encoding="utf-8")
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert "could not be read" in capsys.readouterr().out
+        assert issues == ["cron store unreadable"]
+
+    def test_an_unloadable_record_does_not_produce_a_bogus_resume_hint(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # `{"auto_paused": true}` carries no id/name/message, so the scheduler
+        # rejects it and runs nothing -- but classifying it BEFORE checking
+        # loadability puts it in the auto-paused bucket, so doctor advises
+        # `cron resume` for a job that does not exist and the unloadable-store
+        # report never fires. The store is the fault; the phantom job is not.
+        (tmp_path / "crons.json").write_text(
+            '{"jobs": [{"auto_paused": true}]}', encoding="utf-8"
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "could not be read" in out
+        assert "resume" not in out
+        assert issues == ["cron store unreadable"]
+
+    def test_a_crons_json_directory_is_reported_not_silent(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # `is_file()` is False for a DIRECTORY just as it is for a missing file,
+        # so exempting on it silently classifies an unloadable store as the
+        # fresh-install case. The scheduler can load nothing from a directory.
+        (tmp_path / "crons.json").mkdir()
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert "could not be read" in capsys.readouterr().out
+        assert issues == ["cron store unreadable"]
+
+    def test_a_readable_but_empty_store_stays_silent(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # The boundary that stops the unreadable-store report crying wolf: a
+        # store that parses fine and simply holds no jobs is NOT a fault, and
+        # must stay silent even though the scan returns nothing — exactly like
+        # the missing-file case.
+        (tmp_path / "crons.json").write_text('{"jobs": []}', encoding="utf-8")
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        assert capsys.readouterr().out == ""
+        assert issues == []
+
+    def test_a_control_bearing_job_name_is_escaped(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        # A job name is free text an app or a hand-edit supplies, so it must not
+        # be able to act on the terminal or spoof the surrounding report lines.
+        self._write(
+            tmp_path,
+            self._job("j11", "evil\x1b[2Jname", auto_paused=True, enabled=False),
+        )
+
+        issues = self._run(monkeypatch, tmp_path)
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out, "raw escape from a job name reached the terminal"
+        assert "\\x1b" in out, "the name is still shown, just escaped"
+        assert issues == ["1 cron job(s) auto-paused"]
+
+    def test_check_is_read_only(self, monkeypatch, tmp_path: Path) -> None:
+        # The whole point: doctor diagnoses, it never resumes or triggers.
+        path = self._write(
+            tmp_path,
+            self._job("j9", "paused-job", auto_paused=True, enabled=False, last_status="error"),
+        )
+        before = path.read_bytes()
+
+        self._run(monkeypatch, tmp_path)
+
+        assert path.read_bytes() == before, "doctor must not mutate crons.json"

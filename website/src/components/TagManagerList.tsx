@@ -107,12 +107,20 @@ export default function TagManagerList({ mode, selectedIds = [], onToggleTag, cr
                 aria-label={i18nT('components.tagManagerList.rename_tag', { name: t.name })}
                 defaultValue={t.name}
                 className="flex-1 min-w-0 bg-transparent border-none outline-none text-[12px] text-text py-0 px-0.5 rounded focus-visible:bg-bg-elevated focus-visible:border focus-visible:border-accent/50"
-                onBlur={e => { const v = e.target.value.trim(); if (!v) { e.target.value = t.name; return } if (v !== t.name) updateTagMutation.mutate({ id: t.id, body: { name: v } }) }}
+                {...ime.bindComposition<HTMLInputElement>({
+                  onBlur: e => { const v = e.target.value.trim(); if (!v) { e.target.value = t.name; return } if (v !== t.name) updateTagMutation.mutate({ id: t.id, body: { name: v } }) },
+                })}
                 onKeyDown={e => {
                   const el = e.currentTarget as HTMLInputElement
                   if (e.key !== 'Enter' && e.key !== 'Escape') return
-                  e.stopPropagation()
+                  // Escape restores the canonical name first, so its path can never
+                  // persist a draft. Enter commits through the focus move below (it
+                  // fires this input's onBlur), so a committing IME Enter — whose
+                  // candidate text is still intermediate — must not reach it. Rule 1:
+                  // single-line input, so the declined key is left unconsumed.
                   if (e.key === 'Escape') el.value = t.name
+                  else if (ime.isComposing(e)) return
+                  e.stopPropagation()
                   // Move focus to the row's first button (swatch in column-filter mode,
                   // status ⚡ in manage mode) instead of blur()ing to <body>. This still
                   // fires the input's onBlur (commit) but keeps focus inside the owning
@@ -145,6 +153,11 @@ export default function TagManagerList({ mode, selectedIds = [], onToggleTag, cr
               *  Picking a colour PATCHes the tag and returns focus to the swatch
               *  (the palette unmounts, so focus would otherwise fall to <body>). */}
             {mode === 'manage' && openColorId === t.id && (
+              // The group's only listener is keyboard-only Escape-to-dismiss,
+              // delegated here so it fires whichever swatch holds focus. The
+              // group activates nothing itself — every affordance inside it is a
+              // real <button> — so there is no mouse action a keyboard misses.
+              // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- container-level Escape dismissal, which IS the keyboard path rather than a substitute for one
               <div
                 role="group"
                 data-testid={`tag-palette-${t.id}`}

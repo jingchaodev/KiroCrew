@@ -22,6 +22,7 @@ import {
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import Clickable from '../../../components/Clickable'
+import ErrorNotice from '../../../components/ErrorNotice'
 
 import EmptyState from '../components/EmptyState'
 import ListSkeleton from '../components/ListSkeleton'
@@ -30,6 +31,7 @@ import { relativeAge } from '../lib/format'
 
 import { useDialogFocusTrap } from '../../../hooks/useDialogFocusTrap'
 import { i18nT } from '../../../i18n/t'
+import { useImeGuard } from '../../../hooks/useImeGuard'
 
 /** One selectable repo row, shared by both lists. */
 function RepoRow({
@@ -111,6 +113,7 @@ function GhNotice({ message }: { message?: string }) {
 }
 
 export default function AddReposModal({ onClose }: { onClose: () => void }) {
+  const ime = useImeGuard()
   const {
     pinnedRepos, pinRepo, pinRepoUrl, pinError, unpinRepo,
     recent, recentLoading, recentError,
@@ -211,7 +214,7 @@ export default function AddReposModal({ onClose }: { onClose: () => void }) {
                 <input
                   value={manual}
                   onChange={(e) => setManual(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') submitManual() }}
+                  {...ime.bindEnter({ onEnter: submitManual })}
                   aria-label={i18nT('apps.codeReviewSage.components.addReposModal.repository_or_pull_request_url_or_owner_repo')}
                   placeholder={i18nT('apps.codeReviewSage.components.addReposModal.owner_repo_a_repo_url_or_paste_a_pull_request_li')}
                   className="flex-1 min-w-0 bg-transparent border-0 py-2 text-[13px] font-mono text-text outline-none"
@@ -256,8 +259,10 @@ export default function AddReposModal({ onClose }: { onClose: () => void }) {
 
           <div className="flex-1 min-h-0 overflow-y-auto scrollbar-none px-4 md:px-6 pb-5 flex flex-col gap-2.5">
             {setupRequired && <GhNotice message={recent?.error ?? mine?.error} />}
+            {/* No hand-off: the manual repo-URL input below is unsaved — the
+                navigation would take what was typed with the modal. */}
             {err && !setupRequired && (
-              <div className="text-[12.5px] text-danger">{err.message}</div>
+              <ErrorNotice message={err.message} variant="inline" />
             )}
 
             {loading && !setupRequired && (

@@ -17,7 +17,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -800,23 +799,16 @@ def _atomic_write(path: Path, text: str) -> None:
 
     The reports dir is reachable by the review worker, so any of these output
     names can be a planted symlink; `write_text` would follow it and overwrite
-    the linked file, and the `os.chmod` after it would follow it too. Staging a
+    the linked file, and the lockdown after it would follow it too. Staging a
     private temp file in the same directory and renaming over the name swaps the
     NAME without following a link, so a plant is destroyed rather than honoured.
-    Mirrors `learning.py:_atomic_write`.
+    The staging and the rename are both anchored to a DESCRIPTOR for the reports
+    dir instead of resolving its name three times -- see
+    ``store.atomic_write_locked``, which is now the single implementation this
+    and ``learning.py:_atomic_write`` share rather than two copies of one block.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        try:
-            os.write(fd, text.encode("utf-8"))
-        finally:
-            os.close(fd)  # always close the fd, even if os.write raised
-        os.chmod(tmp, 0o600)  # 0600 before it takes the real name, not after
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    store.atomic_write_text(path, text)
 
 
 def read_within_reports(path: Path, root: Path | None = None,

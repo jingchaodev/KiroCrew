@@ -9,14 +9,11 @@ practice is an element opting out of the outline — ``outline-none``,
 that happens: the element still works, and a pointer user never sees the
 difference.
 
-One thing to be honest about: that global rule is **commented out** in
-``index.css`` as this gate lands (behind a ``TESTING: disabled to check scroll
-bug`` note), and restoring it is a separate change. Until it is back, "inherit the
-global outline" is not yet a working remedy, and this gate's value is narrower than
-its end state: it stops NEW suppressors from reaching the trunk while the tree-wide
-backlog — which that one disabled line created — is cleared separately. That is
-what a diff-scoped gate is for, so the sequencing costs nothing; it just should not
-be mistaken for delivering the cue.
+Whether "inherit the global outline" is a working remedy depends on that rule
+being live, so ``global_ring_is_live()`` reads it out of the stylesheet rather than
+assuming it. If the rule is ever disabled, removing a suppressor would turn this
+gate green while a keyboard user still saw nothing — a gate certifying a fix that
+does not render — so the remedy list drops that option and says so.
 
 ## Why diff-scoped and not whole-tree
 
@@ -38,6 +35,14 @@ non-failing report, so the backlog stays visible without being a build break.
 * An element that supplies its own cue — any ``focus-visible:``/``focus:``
   utility that paints (ring, border, background, shadow, text), or the repo's
   ``focus-ring`` class.
+* An element whose cue is carried by an **ancestor** through ``focus-within:`` —
+  the search-pill idiom, where a wrapper gets ``focus-within:border-accent`` and
+  the input inside suppresses its own outline so the two indicators do not stack.
+  The wrapper's utility must pass ``is_cue`` (a suppressor like
+  ``focus-within:ring-0``, or a non-visual one like ``focus-within:w-auto``, does
+  not exempt) and its ``className`` must be a **static string literal**: a cue
+  inside a ternary or template literal is present on only some branches, and
+  taking it as proof would silence the branches that have none.
 * An element whose cue is carried by a **descendant** through Tailwind's
   ``group`` mechanism: the element itself has the ``group`` marker class and a
   child has ``group-focus-visible:ring-2`` or similar. Such an element suppresses
@@ -79,6 +84,7 @@ the real cue lives.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import subprocess
@@ -167,6 +173,27 @@ DESCENDANT_CUE = re.compile(r"\bgroup-(?:focus-visible|focus):([a-z0-9-]+)")
 # over-generous window can only ever SILENCE a report, never invent one, and for
 # a blocking gate a missed violation is cheaper than a wrongly failed build.
 DESCENDANT_CUE_WINDOW = 60
+
+# The mirror image, and the more common one in this tree: the cue sits on the
+# WRAPPER via `focus-within:`, and the control inside legitimately suppresses its
+# own outline so the two indicators do not stack. A bordered search pill --
+# `border border-border focus-within:border-accent` on the div, `outline-none` on
+# the input -- is the dominant search-field idiom here, and reading only the
+# input's own className scores it as an uncued suppressor.
+#
+# That is the same FALSE POSITIVE class as the group mechanism above, and it does
+# the same damage: the remedy this gate prints tells the author to add a ring on
+# top of the wrapper's existing border change, painting two focus indicators on
+# one control -- which is exactly what the sibling check shipped and reverted.
+ANCESTOR_CUE = re.compile(r"\bfocus-within:([a-z0-9-]+(?:\[[^\]]*\])?)")
+# Four lines, deliberately tight. A wrapper's cue is on the line immediately
+# above its child, or within a short attribute list; every one of the wrapper-cued
+# elements in this tree sits at distance 1-4. A wider window starts exempting
+# elements whose nearest `focus-within:` belongs to a DIFFERENT wrapper -- at 20
+# it silences the composer textarea in `components/ChatInput.tsx`, whose
+# `focus-within:border-accent/50` lives only in the final else-branch of a
+# ternary, so three persistent modes really do render with no regional cue.
+ANCESTOR_CUE_WINDOW = 4
 
 
 @dataclass
@@ -277,6 +304,62 @@ def descendant_supplies_cue(src: str, value: str, tag_end: int) -> bool:
     )
 
 
+def still_open_at(src: str, opened_at: int, pos: int) -> bool:
+    """Whether the element whose opening tag ends at ``opened_at`` encloses ``pos``.
+
+    Proximity alone is not enclosure: a CLOSED sibling wrapper sitting a line or
+    two above would otherwise lend its cue to an element it does not contain, and
+    the gate would accept a keyboard control with no visible cue -- a false
+    NEGATIVE, which is the one direction an exemption must never introduce.
+
+    Depth is counted by tag, not parsed: over the few lines this is asked about,
+    every `<tag` opens, `/>` and `</tag>` close, and reaching depth 0 means the
+    candidate wrapper ended before ``pos``. Fragments and expression braces do not
+    carry focus utilities, so they cannot change the answer.
+    """
+    depth = 1
+    for m in re.finditer(r"</\s*[A-Za-z][\w.-]*\s*>|/>|<\s*[A-Za-z][\w.-]*",
+                         src[opened_at:pos]):
+        depth += -1 if m.group().startswith(("</", "/>")) else 1
+        if depth <= 0:
+            return False
+    return True
+
+
+def ancestor_supplies_cue(src: str, tag_at: int) -> bool:
+    """Whether an ENCLOSING element carries the cue via `focus-within:`.
+
+    Two conditions, and dropping either one turns this exemption into a false
+    negative:
+
+    * The wrapper must actually still be open at the element -- see
+      ``still_open_at``. A nearby closed sibling is not an ancestor.
+    * The wrapper's `className` must be a STATIC STRING LITERAL. A cue inside a
+      template literal or ternary is present on only some branches, and taking it
+      as proof would silence the branches that have none:
+      `components/SearchBar.tsx` carries `focus-within:border-accent` one line
+      above its input, but only in the undocked branch -- docked renders no border
+      and no cue at all.
+    """
+    lines = src[:tag_at].split("\n")
+    window_at = len("\n".join(lines[:-(ANCESTOR_CUE_WINDOW + 1)])) if (
+        len(lines) > ANCESTOR_CUE_WINDOW + 1) else 0
+    for m in re.finditer(r'\bclassName\s*=\s*"([^"]*)"', src[window_at:tag_at]):
+        if not any(is_cue(util) for util in ANCESTOR_CUE.findall(m.group(1))):
+            continue
+        at = window_at + m.end()
+        close = src.find(">", at)
+        if close == -1:
+            continue
+        # A self-closed wrapper (`<div ... />`) encloses nothing, so its cue can
+        # never reach the element below it.
+        if src[close - 1] == "/":
+            continue
+        if still_open_at(src, close + 1, tag_at):
+            return True
+    return False
+
+
 def scan_source(path: str, raw: str) -> list[tuple[Violation, set[int]]]:
     """Violations in ``raw``, each with the line span the element occupies."""
     src = blank_comments(raw)
@@ -305,6 +388,8 @@ def scan_source(path: str, raw: str) -> list[tuple[Violation, set[int]]]:
         if not reachable:
             continue
         if descendant_supplies_cue(src, value, tag_at + len(tag_text)):
+            continue
+        if ancestor_supplies_cue(src, tag_at):
             continue
         first = raw[:tag_at].count("\n") + 1
         last = raw[:span[1]].count("\n") + 1
@@ -337,75 +422,90 @@ def in_scope(path: str) -> bool:
     return path.startswith(SCAN_ROOT) and path.endswith(".tsx")
 
 
+_SCOPE_MODULE = None
+
+
+def _scope():
+    """The shared diff plumbing (see ``scripts/ratchet_scope.py``).
+
+    Loaded by path, not imported: ``scripts/`` is not a package, so a plain
+    import would resolve only by accident of ``sys.path[0]``. Shared so the
+    env-base gates and the merge-ref ratchets agree on what a change added; a
+    private copy per gate is how they would come to disagree. Loaded lazily so
+    the ``--test`` mode's RULE probes do not require it — the deletion probe
+    does, since it exercises the real parsing chain through this loader.
+    """
+    global _SCOPE_MODULE
+    if _SCOPE_MODULE is None:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratchet_scope.py")
+        spec = importlib.util.spec_from_file_location("ratchet_scope", script)
+        if spec is None or spec.loader is None:
+            raise SystemExit(f"cannot load {script}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SCOPE_MODULE = module
+    return _SCOPE_MODULE
+
+
+# One decision, made once: a deletion-only hunk is ANCHORED, not dropped. Both
+# consumers below reference this constant so the self-test's deletion probe
+# (which goes through ``hunk_touched_lines``) covers the production path
+# (``touched_lines``) — two independent keyword arguments would let the
+# production one be dropped with the probe still green, silently restoring the
+# exact failure the anchoring exists to prevent.
+_ANCHOR_DELETIONS = True
+
+
 def diff_base(base: str) -> str:
     """The commit to measure against; a shallow CI clone may have no merge-base."""
-    try:
-        return git(["merge-base", base, "HEAD"]).strip()
-    except subprocess.CalledProcessError:
-        return base
+    return _scope().resolve_base(base)
 
 
 def changed_paths(frm: str) -> list[str]:
-    """In-scope paths this change touches. ``-z`` so odd bytes cannot hide one."""
+    """In-scope paths this change touches (``ratchet_scope.changed_paths_at``)."""
     try:
-        out = git(["diff", "--name-only", "-z", "--diff-filter=d", frm])
+        paths = _scope().changed_paths_at(frm)
     except subprocess.CalledProcessError as exc:
         raise SystemExit(
             f"::error::focus-cue gate: cannot diff against {frm} — the base commit "
             f"is not present. Fetch it before running, or unset FOCUS_CUE_BASE_REF "
             f"to report whole-tree counts without enforcing.\n{exc.stderr}"
         )
-    return [p for p in out.split("\0") if p and in_scope(p)]
+    return [p for p in paths if in_scope(p)]
 
 
 def hunk_touched_lines(diff: str) -> set[int]:
     """1-based line numbers the hunk headers in ``diff`` mark as touched.
 
-    Split out from ``touched_lines`` so the zero-count rule below is testable
-    without a repository: a probe that re-implements this parsing would pass while
-    the real parser stayed broken.
+    Delegates to ``ratchet_scope.parse_added_lines`` with
+    ``_ANCHOR_DELETIONS``, and stays a named seam so the self-test's
+    deletion-only probe exercises the REAL parsing chain without a repository.
+    The anchoring is this gate's one semantic difference from its siblings: a
+    deletion-only hunk reads ``+<start>,0`` — the change removed lines and
+    added none — and the edit that most often removes a focus cue is exactly a
+    deletion. Delete the line carrying ``focus-visible:ring-2`` from a
+    multi-line className and the element's own lines are all unchanged, so no
+    purely-added line intersects it and the gate that exists to catch a lost
+    cue would let the loss straight through. ``start`` is where the removed
+    lines sat, so the hunk is anchored there.
     """
-    touched: set[int] = set()
-    for raw in diff.splitlines():
-        if not raw.startswith("@@"):
-            continue
-        m = re.search(r"\+(\d+)(?:,(\d+))?", raw)
-        if not m:
-            continue
-        start = int(m.group(1))
-        count = int(m.group(2)) if m.group(2) is not None else 1
-        if count == 0:
-            # A deletion-only hunk reads `+<start>,0`: the change removed lines and
-            # added none. `range(start, start)` is empty, so a naive read reports
-            # NOTHING as touched -- and the edit that most often removes a focus cue
-            # is exactly a deletion. Delete the line carrying
-            # `focus-visible:ring-2` from a multi-line className and the element's
-            # own lines are all unchanged, so no touched line intersects it and the
-            # gate that exists to catch a lost cue lets the loss straight through.
-            # `start` is where the removed lines sat, so anchor the hunk there.
-            touched.add(start)
-            continue
-        touched.update(range(start, start + count))
-    return touched
+    return _scope().parse_added_lines(diff, anchor_deletions=_ANCHOR_DELETIONS)
 
 
 def touched_lines(frm: str, path: str) -> set[int]:
-    """1-based line numbers this change adds to ``path`` (base to working tree)."""
-    return hunk_touched_lines(
-        git(["diff", "--unified=0", "--no-color", "--text", frm, "--", path])
-    )
+    """1-based line numbers this change touched in ``path`` (base to working tree)."""
+    return _scope().added_lines_at(frm, path, anchor_deletions=_ANCHOR_DELETIONS)
 
 
 def global_ring_is_live() -> bool:
     """Whether index.css currently declares an ACTIVE global :focus-visible outline.
 
     The gate's most natural remedy — "drop the suppressor and inherit the global
-    outline" — only works if that rule is actually live. At the time this gate was
-    written it was commented out (`/* TESTING: disabled to check scroll bug */`),
-    so an author who followed that advice would turn the gate green while the
-    keyboard user still saw nothing: the gate would certify a fix that does not
-    render. The remedy list is therefore generated from the stylesheet's real
-    state rather than assumed, and self-corrects the moment the rule is restored.
+    outline" — only works if that rule is live. An author who follows it while the
+    rule is disabled turns this gate green while the keyboard user still sees
+    nothing, so the gate would certify a fix that does not render. The remedy list
+    is therefore generated from the stylesheet's real state rather than assumed,
+    which also means it needs no edit when the rule is toggled either way.
     """
     raw = read_text(os.path.join(SCAN_ROOT, "index.css"))
     if raw is None:
@@ -455,7 +555,7 @@ def report(violations: Iterable[Violation], *, enforcing: bool,
     if not violations:
         scope = f"elements touched since {base}" if enforcing else "whole tree"
         print(f"focus-cue gate: every Tab-reachable element in the {scope} "
-              f"keeps a focus cue ✓")
+              f"keeps a focus cue OK")
         return 0
     if enforcing:
         print(f"::error::focus-cue gate: {len(violations)} element(s) this change "
@@ -598,6 +698,57 @@ PROBES: list[tuple[str, str, bool]] = [
      '<div role="slider" tabIndex={0} className="group outline-none">\n'
      '  <div className="group-focus-visible:cursor-pointer" />\n'
      '</div>', True),
+
+    # The wrapper (`focus-within:`) mechanism. The search-pill idiom: the cue is
+    # on the parent and the child suppresses its own outline so the two do not
+    # stack, which is correct and must not be reported.
+    ("a wrapper focus-within cue exempts the input inside it",
+     '<div className="border border-border focus-within:border-accent">\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', False),
+    ("a focus-within SUPPRESSOR is not a cue",
+     '<div className="border focus-within:ring-0">\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', True),
+    ("focus-within:border-transparent is not a cue",
+     '<div className="border focus-within:border-transparent">\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', True),
+    ("a non-visual focus-within utility is not a cue",
+     '<div className="flex focus-within:w-auto">\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', True),
+    ("a wrapper cue beyond the window does not reach the input",
+     '<div className="border focus-within:border-accent">\n'
+     '  <span />\n  <span />\n  <span />\n  <span />\n  <span />\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', True),
+    # Both conditional shapes: a cue on only some branches proves nothing about
+    # the branches that lack it, so it must not exempt.
+    ("a wrapper cue inside a template literal does not exempt",
+     '<div className={`border ${docked ? "" : "focus-within:border-accent"}`}>\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', True),
+    ("a wrapper cue inside a ternary does not exempt",
+     "<div className={docked ? 'flex w-full' : 'border focus-within:border-accent'}>\n"
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>', True),
+    # Proximity is not enclosure. A CLOSED sibling must not lend its cue, or the
+    # exemption becomes a false NEGATIVE -- the one direction it must never take.
+    ("a closed sibling wrapper does not exempt the element after it",
+     '<div className="border focus-within:border-accent">\n'
+     '  <input className="bg-transparent outline-none" />\n'
+     '</div>\n'
+     '<input className="bg-transparent outline-none" />', True),
+    ("a self-closed sibling wrapper does not exempt the element after it",
+     '<div className="border focus-within:border-accent" />\n'
+     '<input className="bg-transparent outline-none" />', True),
+    ("a cue two levels up still exempts",
+     '<div className="border focus-within:border-accent">\n'
+     '  <span className="flex">\n'
+     '    <input className="bg-transparent outline-none" />\n'
+     '  </span>\n'
+     '</div>', False),
 ]
 
 
@@ -646,7 +797,13 @@ def self_test() -> int:
 
         def run(*args: str) -> str:
             return subprocess.run(
-                ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+                ["git", *args],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
             ).stdout
 
         run("init", "-q")
@@ -693,7 +850,7 @@ def self_test() -> int:
         for line in failures:
             print(line)
         return 1
-    print(f"focus-cue gate self-test: {len(PROBES) + 2} probes agree ✓")
+    print(f"focus-cue gate self-test: {len(PROBES) + 2} probes agree OK")
     return 0
 
 

@@ -1,10 +1,19 @@
-import { useEffect, useCallback, useRef, useState } from 'react'
+import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppDispatch, useAppStore } from '../store'
 import { switchSlot, deleteSlot, openActivityToTab } from '../store/chatSlice'
 import { loadChatConfig } from '../pages/chat/ChatSettings'
-import { queryComposer, releaseComposerForKeyboardSwitch } from '../pages/chat/composerFocus'
+import { queryComposerOrExpand, queryPendingApprovalAction, releaseComposerForKeyboardSwitch } from '../pages/chat/composerFocus'
 import { reportSeamCollision } from '../apps/seamCollision'
+import {
+  loadPanelToggleOverrides,
+  matchPanelToggleEvent,
+  PANEL_TOGGLE_SHORTCUTS_EVENT,
+  PANEL_TOGGLE_SHORTCUTS_KEY,
+  PANEL_TOGGLES_SKIPPING_SHELL,
+  type PanelToggleId,
+  type PanelToggleOverrides,
+} from '../lib/panelToggleShortcuts'
 import { i18nT } from '../i18n/t'
 
 export const SHORTCUTS_ENABLED_KEY = 'mc-keyboard-shortcuts'
@@ -162,6 +171,13 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'nav-schedule', key: 's', alt: true, group: 'panel-navigation' },
   // Actions
   { id: 'focus-input', key: 'Enter', alt: true, group: 'actions' },
+  // Alt+Shift+Enter: focus the pending tool-approval row. Sibling of focus-input
+  // above and deliberately the shifted variant of it, which `focus-input`'s own
+  // handler branch already excludes (`!e.shiftKey`) — so this claims a chord no
+  // other entry wants and needs no new letter reservation, `Enter` already being
+  // in RESERVED_PANEL_CODES. It MOVES FOCUS ONLY: see queryPendingApprovalAction
+  // for why answering a prompt is not something a chord should be able to do.
+  { id: 'focus-approval', key: 'Enter', alt: true, shift: true, group: 'actions' },
   { id: 'new-chat', key: 'n', alt: true, shift: true, group: 'actions' },
   { id: 'close-chat', key: 'w', alt: true, shift: true, group: 'actions' },
   { id: 'shortcuts-modal', key: 'k', alt: true, group: 'actions' },
@@ -242,6 +258,7 @@ export const SHORTCUT_LABEL_KEY: Record<string, string> = {
   'nav-projects': 'hooks.useKeyboardShortcuts.projects_panel',
   'nav-schedule': 'hooks.useKeyboardShortcuts.schedule_panel',
   'focus-input': 'hooks.useKeyboardShortcuts.focus_text_input',
+  'focus-approval': 'hooks.useKeyboardShortcuts.focus_pending_approval',
   // Reused: the same command as the chat sidebar's own New chat / Close session
   // controls, so the reference list and the buttons cannot drift apart.
   'new-chat': 'pages.chatSidebar.new_chat',
@@ -358,38 +375,53 @@ export const RESERVED_PANEL_CODES: ReadonlySet<string> = new Set<string>([
 ])
 
 /**
- * Letters usable for chat-jumps 10+ (digit 1–9 stay digits; the 10th session
- * onward gets a letter). a–z minus every letter another unshifted chord owns,
- * so a jump letter can never shadow an existing shortcut:
- *  - c/n/p/s — core panel navigation (CORE_PANEL_MAP)
- *  - k       — shortcuts modal (Alt+K)
- *  - g       — agent monitor (Ctrl+G is literal Ctrl on EVERY platform, so it
- *              collides with the Mac Ctrl-jump mode; excluded uniformly rather
- *              than per-platform so the same session always shows the same
- *              letter on every OS)
- *  - runtime — any code a downstream edition registered via
- *              registerPanelShortcut (EXTRA_PANEL_ROUTES); registration
- *              happens at module init, before any keypress or badge render,
- *              and panels always win over jump letters.
- * Computed per call (not a constant) so the runtime exclusions are honored.
+ * Letters a jump chord must avoid for a reason OTHER than pre-panel routing, so
+ * they are absent from RESERVED_PANEL_CODES and cannot be derived from it: global
+ * Ctrl/⌘ chords that reach hasCommandModifier via plain Ctrl on macOS and would
+ * double-fire with the Mac Ctrl-jump branch. Each is an independent document
+ * listener, so an unexcluded letter fires both actions at once; excluded
+ * uniformly across platforms so a session shows the same letter on every OS.
+ *  - a — select-all in a focusable list (Ctrl/⌘+A)
+ *  - d — split the focused pane (Ctrl/⌘+D)
+ *  - f — message search / Markdown find (Ctrl/⌘+F)
+ *  - g — agent monitor (Ctrl+G, literal Ctrl on every platform)
+ *  - t/w — file-explorer new-folder-tab / close-tab (Ctrl/⌘+T, Ctrl/⌘+W)
  */
-// a: Ctrl/⌘+A select-all (knowledge list, pages/knowledge/index.tsx; plus the
-//    OS-level select-all expectation in any focusable list). d: Ctrl/⌘+D splits
-//    the focused pane (ChatPage.tsx + SessionGridView.tsx). Both collide with
-//    the Mac Ctrl jump branch — and since each is an independent document
-//    listener, an unexcluded chord would fire BOTH actions at once. Excluded
-//    uniformly (like g) so letter assignments match across platforms.
-// f: message search + Markdown find (useMessageSearch.ts, MarkdownPanel.tsx).
-// t/w: file-explorer new-folder-tab / close-tab (FileExplorerPage.tsx). All
-//    three listen via hasCommandModifier — an XOR (metaKey !== ctrlKey), so a
-//    plain Ctrl+letter satisfies it on macOS and would double-fire with the
-//    Mac Ctrl-jump branch. Same class and same fix as a/d above.
-const JUMP_LETTER_STATIC_EXCLUDE = new Set(['a', 'c', 'd', 'f', 'g', 'k', 'n', 'p', 's', 't', 'w'])
+const JUMP_LETTER_GLOBAL_EXCLUDE = new Set(['a', 'd', 'f', 'g', 't', 'w'])
+
+/**
+ * Lowercase letters a pre-panel chord owns, read straight from
+ * RESERVED_PANEL_CODES so the two never drift: a panel or pre-panel Alt+<letter>
+ * chord added to that set — which the extension-seams drift test already forces —
+ * drops its jump letter in the same edit instead of being silently shadowed by
+ * one. Only single-letter Key* codes name a jump letter; the Comma, Enter,
+ * Backquote, Arrow, and Digit codes are not letters and contribute nothing here.
+ */
+function reservedPanelLetters(): Set<string> {
+  const out = new Set<string>()
+  for (const code of RESERVED_PANEL_CODES) {
+    const m = /^Key([A-Z])$/.exec(code)
+    if (m) out.add(m[1].toLowerCase())
+  }
+  return out
+}
+
+/**
+ * Letters usable for chat-jumps 10+ (digit 1–9 stay digits; the 10th session
+ * onward gets a letter). a–z minus every letter another unshifted chord owns —
+ * the pre-panel chords (`reservedPanelLetters`), the global editor chords
+ * (`JUMP_LETTER_GLOBAL_EXCLUDE`), and any code a downstream edition registered
+ * via registerPanelShortcut (`EXTRA_PANEL_ROUTES`, resolved at module init before
+ * any keypress or badge render, panels winning over jump letters). Computed per
+ * call, not a constant, so the runtime exclusions are honored.
+ */
 export function jumpLetters(): string[] {
+  const panelLetters = reservedPanelLetters()
   const out: string[] = []
   for (let i = 0; i < 26; i++) {
     const ch = String.fromCharCode(97 + i)
-    if (JUMP_LETTER_STATIC_EXCLUDE.has(ch)) continue
+    if (panelLetters.has(ch)) continue
+    if (JUMP_LETTER_GLOBAL_EXCLUDE.has(ch)) continue
     if (('Key' + ch.toUpperCase()) in EXTRA_PANEL_ROUTES) continue
     out.push(ch)
   }
@@ -590,10 +622,22 @@ interface UseKeyboardShortcutsOpts {
   onCycleModel?: () => void
   onCyclePrevModel?: () => void
   onToggleFocusMode?: () => void
+  onToggleLeftSidebar?: () => void
+  onToggleSessionPanel?: () => void
+  onToggleSidePanel?: () => void
+  /**
+   * Toggle the docked terminal panel. Owned by App rather than dispatched here:
+   * the panel's store is module-level, but the DECISION needs App-only state (the
+   * `dashboard.terminal.enabled` probe, whether the panel is popped out into its
+   * own window, and the active session's project as the shell's cwd). Left
+   * undefined when the terminal is disabled, so the chord no-ops exactly as the
+   * nav row disappears.
+   */
+  onToggleTerminal?: () => void
   disabled?: boolean
 }
 
-export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycleAgent, onCyclePrevAgent, onCycleReasoningEffort, onCyclePrevReasoningEffort, onCycleApprovalMode, onCyclePrevApprovalMode, onCycleModel, onCyclePrevModel, onToggleFocusMode, disabled }: UseKeyboardShortcutsOpts) {
+export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycleAgent, onCyclePrevAgent, onCycleReasoningEffort, onCyclePrevReasoningEffort, onCycleApprovalMode, onCyclePrevApprovalMode, onCycleModel, onCyclePrevModel, onToggleFocusMode, onToggleLeftSidebar, onToggleSessionPanel, onToggleSidePanel, onToggleTerminal, disabled }: UseKeyboardShortcutsOpts) {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const appStore = useAppStore()
@@ -605,6 +649,8 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
   const suppressNextInputRef = useRef(false)
   const [enabled, setEnabled] = useState(() => localStorage.getItem(SHORTCUTS_ENABLED_KEY) !== '0')
   const [ctrlDigits, setCtrlDigits] = useState(() => getCtrlDigitsEnabled())
+  // In state, not read per keystroke, to keep the hot keydown path off localStorage.
+  const [panelBindings, setPanelBindings] = useState<PanelToggleOverrides>(() => loadPanelToggleOverrides())
 
   // Listen for toggle changes from Settings
   useEffect(() => {
@@ -614,6 +660,18 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     }
     window.addEventListener(SHORTCUTS_ENABLED_EVENT, onToggle)
     return () => window.removeEventListener(SHORTCUTS_ENABLED_EVENT, onToggle)
+  }, [])
+
+  // Pick up rebinds from Settings (same-tab event) and other tabs (storage).
+  useEffect(() => {
+    const refresh = () => setPanelBindings(loadPanelToggleOverrides())
+    const onStorage = (e: StorageEvent) => { if (e.key === PANEL_TOGGLE_SHORTCUTS_KEY) refresh() }
+    window.addEventListener(PANEL_TOGGLE_SHORTCUTS_EVENT, refresh)
+    window.addEventListener('storage', onStorage)
+    return () => {
+      window.removeEventListener(PANEL_TOGGLE_SHORTCUTS_EVENT, refresh)
+      window.removeEventListener('storage', onStorage)
+    }
   }, [])
 
   // Reset MRU walk index when Alt is released
@@ -639,6 +697,28 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     document.addEventListener('beforeinput', onBeforeInput, true)
     return () => document.removeEventListener('beforeinput', onBeforeInput, true)
   }, [])
+
+  /**
+   * Panel-toggle id → the action that toggles it, or `undefined` when the host
+   * passed none.
+   *
+   * `undefined` means NOT BOUND, and both dispatch phases must treat it that way:
+   * a chord with no action behind it is left for the browser, never claimed and
+   * then dropped. `onToggleTerminal` is the case that exists today — App leaves it
+   * undefined while `dashboard.terminal.enabled` is false — and swallowing the key
+   * there would suppress the browser's native Ctrl+J (Downloads) in exchange for
+   * nothing.
+   *
+   * Keying by id also keeps the two phases in step: the capture-phase skip-shell
+   * listener dispatches through this same map, so extending
+   * {@link PANEL_TOGGLES_SKIPPING_SHELL} needs no second per-panel branch.
+   */
+  const panelToggleActions = useMemo<Record<PanelToggleId, (() => void) | undefined>>(() => ({
+    'left-sidebar': onToggleLeftSidebar,
+    'session-panel': onToggleSessionPanel,
+    'side-panel': onToggleSidePanel,
+    'terminal': onToggleTerminal,
+  }), [onToggleLeftSidebar, onToggleSessionPanel, onToggleSidePanel, onToggleTerminal])
 
   const handler = useCallback((e: KeyboardEvent) => {
     const tag = (e.target as HTMLElement)?.tagName
@@ -745,6 +825,31 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       return
     }
 
+    // User-rebindable toggles for the sidebar / session list / activity panel.
+    // Before the Alt gate because the defaults are ⌘/Ctrl chords with no Alt;
+    // like the bracket chords they fire inside the composer but yield to a
+    // terminal. `defaultPrevented` defers to a handler that already claimed the
+    // key (e.g. the Pierre editor's capture-phase ⌘S save), so a shared chord
+    // saves there rather than also toggling a panel.
+    //
+    // A panel in `PANEL_TOGGLES_SKIPPING_SHELL` keeps its chord even while a
+    // terminal holds focus — see that set for why the terminal toggle must.
+    //
+    // A panel whose host passed no callback is NOT BOUND, so its chord must fall
+    // through untouched rather than be claimed into a no-op: the terminal toggle
+    // is undefined while `dashboard.terminal.enabled` is false, and claiming it
+    // there would `preventDefault()` the browser's own Ctrl+J (Downloads) for a
+    // feature the user turned off.
+    const panelToggle = matchPanelToggleEvent(e, panelBindings)
+    const panelAction = panelToggle ? panelToggleActions[panelToggle] : undefined
+    if (panelToggle && panelAction && !e.defaultPrevented
+        && (PANEL_TOGGLES_SKIPPING_SHELL.has(panelToggle) || !isTerminalTarget(e.target))) {
+      if (!enabled || disabled) return
+      e.preventDefault()
+      panelAction()
+      return
+    }
+
     // All other shortcuts use Alt (Option on Mac)
     if (!e.altKey || e.ctrlKey || e.metaKey) return
 
@@ -798,14 +903,42 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     // chord dead exactly where it is wanted.
     if (e.shiftKey && code === 'KeyM') { e.preventDefault(); onToggleFocusMode?.(); return }
 
+    // Alt+Shift+Enter: Focus the pending tool-approval row.
+    //
+    // Fires from inside the composer, exactly like Alt+Enter below and for the
+    // reason Alt+Shift+M states above: this is a chord you reach for mid-sentence,
+    // so bailing out on a focused text field would make it dead precisely where it
+    // is wanted. Firing while typing is safe HERE ONLY BECAUSE IT MOVES FOCUS AND
+    // NOTHING ELSE — the decision still costs a second, deliberate press on a
+    // control the user can now see is focused. A chord that ANSWERED the prompt
+    // would be a one-keystroke path to running a tool call nobody read, which is
+    // why this one stops at focus; see queryPendingApprovalAction.
+    //
+    // Claimed unconditionally, even with no approval pending, on the same grounds
+    // the Alt+digit jumps claim a dead digit: the chord collides with no browser
+    // binding, so swallowing it avoids surprise typing — here, a stray newline in
+    // the draft. Nothing is focused in that case; the keystroke simply does nothing.
+    //
+    // Mutually exclusive with Alt+Enter by an explicit guard on BOTH branches, so
+    // neither depends on which is tested first.
+    if (e.shiftKey && code === 'Enter') {
+      e.preventDefault()
+      queryPendingApprovalAction()?.focus()
+      return
+    }
+
     // Alt+Enter: Focus text input — works even from other inputs
     if (code === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      // Synchronous and unguarded on purpose: no state change precedes this, so
-      // there is no next-frame commit to wait for, and a pressed keyboard
-      // shortcut proves a keyboard exists — the helper's touch-device skip
-      // would wrongly no-op it.
-      queryComposer()?.focus()
+      // Unguarded on purpose: a pressed keyboard shortcut proves a keyboard
+      // exists — `focusComposer`'s touch-device skip would wrongly no-op it.
+      // Still synchronous whenever the composer is on screen: the resolver runs
+      // its callback inline in that case, so the ordering this comment used to
+      // rely on is unchanged. It defers a single frame only when the composer
+      // was COLLAPSED and had to be asked back — without that, "focus text
+      // input" silently did nothing for as long as the user left it collapsed,
+      // which outlives a reload.
+      queryComposerOrExpand(ta => ta.focus())
       return
     }
 
@@ -902,7 +1035,7 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
       navigate(panelMap[code])
       return
     }
-  }, [dispatch, navigate, appStore, onToggleShortcutsModal, onNewChat, onCycleAgent, onCyclePrevAgent, onCycleReasoningEffort, onCyclePrevReasoningEffort, onCycleApprovalMode, onCyclePrevApprovalMode, onCycleModel, onCyclePrevModel, onToggleFocusMode, disabled, enabled, ctrlDigits])
+  }, [dispatch, navigate, appStore, onToggleShortcutsModal, onNewChat, onCycleAgent, onCyclePrevAgent, onCycleReasoningEffort, onCyclePrevReasoningEffort, onCycleApprovalMode, onCyclePrevApprovalMode, onCycleModel, onCyclePrevModel, onToggleFocusMode, panelToggleActions, disabled, enabled, ctrlDigits, panelBindings])
 
   // Escape stops in-progress voice read-back. CAPTURE phase so it runs before the command palette's bubble-phase Escape
   // handler, which stopPropagation()s and would otherwise close the palette while
@@ -925,6 +1058,39 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
     document.addEventListener('keydown', onEsc, true)
     return () => document.removeEventListener('keydown', onEsc, true)
   }, [enabled, appStore])
+
+  // Skip-shell panel toggles (`PANEL_TOGGLES_SKIPPING_SHELL`) need a CAPTURE-phase
+  // listener, and only while a terminal holds focus.
+  //
+  // The bubble-phase block above cannot serve them: xterm.js consumes the keys it
+  // recognises before a document listener runs, and on Windows/Linux a `mod` chord
+  // IS a control code it recognises — Ctrl+J is ^J (line feed). Verified live: the
+  // chord opened the panel, focus landed in the shell, and pressing it again sent a
+  // newline to the PTY instead of closing. VS Code has the same problem and solves
+  // it inside its own terminal key handler (`commandsToSkipShell` is consulted
+  // there, not at the workbench edge); a capture-phase document listener is the
+  // equivalent seam here, and it also stops the keystroke reaching the shell.
+  //
+  // Scoped to terminal targets on purpose: everywhere else the bubble path still
+  // owns these chords, so `defaultPrevented` deference and ordering are unchanged.
+  useEffect(() => {
+    if (!enabled || disabled) return
+    const onSkipShell = (e: KeyboardEvent) => {
+      if (!isTerminalTarget(e.target)) return
+      const id = matchPanelToggleEvent(e, panelBindings)
+      if (!id || !PANEL_TOGGLES_SKIPPING_SHELL.has(id)) return
+      // An unbound panel (no action) is not ours to claim — see
+      // `panelToggleActions`. Checked BEFORE preventDefault so the keystroke
+      // still reaches the shell it was aimed at.
+      const action = panelToggleActions[id]
+      if (!action) return
+      e.preventDefault()
+      e.stopPropagation()
+      action()
+    }
+    document.addEventListener('keydown', onSkipShell, true)
+    return () => document.removeEventListener('keydown', onSkipShell, true)
+  }, [enabled, disabled, panelBindings, panelToggleActions])
 
   useEffect(() => {
     document.addEventListener('keydown', handler)

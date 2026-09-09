@@ -218,6 +218,54 @@ class TestProjectScopeSatisfied:
         assert project_scope_satisfied("/src/pkg/", tmp_path) is False
         assert project_scope_satisfied("src/pkg", tmp_path) is True
 
+    def test_a_relative_project_is_refused_not_resolved_against_the_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        # The gate promises never to consult the process working directory, but
+        # ``Path.resolve()`` anchors a RELATIVE path to exactly that. Standing the
+        # process inside a tree that DOES hold the fragment is what makes the
+        # difference observable: resolving "." would find "src/pkg" here and admit
+        # the entry, which is the fail-open this gate exists to prevent.
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "src" / "pkg").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        assert project_scope_satisfied("src/pkg", ".") is False
+        assert project_scope_satisfied("src/pkg", "") is False
+        assert project_scope_satisfied("src/pkg", "src") is False
+        assert project_scope_satisfied("src/pkg", Path("src") / "pkg") is False
+        # The same project named ABSOLUTELY still qualifies, so this refuses an
+        # unanchored value rather than the project itself.
+        assert project_scope_satisfied("src/pkg", tmp_path) is True
+
+    def test_a_relative_project_cannot_borrow_the_cwd_of_an_unrelated_tree(
+        self, tmp_path, monkeypatch
+    ):
+        # The sharper shape of the same fault: the SESSION's project is one tree
+        # and the gateway's cwd is another, so anchoring to cwd answers about the
+        # wrong repository entirely -- admitting an entry scoped to the checkout
+        # the gateway happens to sit in, for a session working somewhere else.
+        #
+        # The fixture is built so cwd is the ONLY way to reach a True: the
+        # fragment "pkg" exists in the gateway checkout and nowhere in the
+        # session's tree, and the relative project "src" lands inside the gateway
+        # checkout when resolved against its cwd.
+        gateway = tmp_path / "gateway-checkout"
+        (gateway / ".git").mkdir(parents=True)
+        (gateway / "src" / "pkg").mkdir(parents=True)
+        session = tmp_path / "elsewhere"
+        (session / "src").mkdir(parents=True)
+        (session / ".git").mkdir()
+        monkeypatch.chdir(gateway)
+
+        assert project_scope_satisfied("pkg", "src") is False
+        # The session's real project, named absolutely, does not hold the fragment
+        # -- which is the answer the gate should have given all along.
+        assert project_scope_satisfied("pkg", session / "src") is False
+        # Positive control: the gateway's own tree still qualifies when it is the
+        # project, so this refuses an unanchored value rather than a directory.
+        assert project_scope_satisfied("pkg", gateway / "src") is True
+
 
 class TestSkillLoaderSharesTheGate:
     """The skill gate must answer through the shared function, not a copy."""
@@ -547,7 +595,7 @@ class TestVectorStoreLessonScope:
         store = self._store(tmp_path)
         try:
             self._plant_malformed(store, "always rebase before pushing")
-            assert store.write_lesson("always rebase before pushing", "tool") is True
+            assert store.write_lesson("always rebase before pushing", "tool").wrote is True
             assert "always rebase before pushing" in store.get_lessons_context()
         finally:
             store.close()
@@ -568,7 +616,7 @@ class TestVectorStoreLessonScope:
         # neither deduped the other.
         store = self._store(tmp_path)
         try:
-            assert store.write_lesson("r", "tool", repo_scope="src/pkg") is True
+            assert store.write_lesson("r", "tool", repo_scope="src/pkg").wrote is True
             store.write_lesson("r", "tool", repo_scope="src/pkg/")
             assert len(store.get_lessons()) == 1
         finally:
@@ -583,7 +631,10 @@ class TestVectorStoreLessonScope:
         try:
             rule = "\u4e00" * 500
             negative = "\u4e00" * 500
-            assert store.write_lesson(rule, "tool", negative=negative, repo_scope="src/pkg") is True
+            assert (
+                store.write_lesson(rule, "tool", negative=negative, repo_scope="src/pkg").wrote
+                is True
+            )
             assert len(store.get_lessons()) == 1
         finally:
             store.close()
@@ -596,11 +647,11 @@ class TestVectorStoreLessonScope:
         # scope, which stores it globally. It refuses.
         store = self._store(tmp_path)
         try:
-            assert store.write_lesson("r", "tool", repo_scope="/src/pkg") is False
+            assert store.write_lesson("r", "tool", repo_scope="/src/pkg").wrote is False
             assert store.get_lessons() == []
             # A trailing slash is an equivalent SPELLING, not an invalid scope, so it
             # still folds and still writes.
-            assert store.write_lesson("r", "tool", repo_scope="src/pkg/") is True
+            assert store.write_lesson("r", "tool", repo_scope="src/pkg/").wrote is True
             assert _lesson_scope(json.loads(store.get_lessons()[0]["value_json"])) == "src/pkg"
         finally:
             store.close()

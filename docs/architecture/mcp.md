@@ -147,6 +147,11 @@ and asymmetrically on purpose:
 - `_refresh_dynamic_fields()` **retracts** an entry a previous pass wrote while
   the gate was open, because a skip-only refresh would mean turning a feature off
   never reclaims the process turning it on started;
+
+`kirocrew doctor` is a third, read-only consumer: its MCP sections resolve the
+same registry gate (`cli_doctor._spec_gate_closed`) so a gated-off server's
+absence reads as informational rather than as a missing entry — the drift where
+doctor demanded what emission deliberately omitted was #6548.
 **The `@server` refs in `tools` / `allowedTools` are left exactly as they are.**
 Withholding the entry is the whole control: a `@server` ref resolves against the
 agent's own `mcpServers` plus the global `mcp.json`, so with no entry in either
@@ -192,7 +197,8 @@ signed in to, not a user preference, and because the client's filter is
 symmetric: outside registry mode a marked entry is the one that gets dropped.
 `command`/`args` stay either way, since the registry path is not the only
 consumer of this spec (doctor's handshake probe and the CC sidecar sync both
-launch from it). See
+launch from it — though doctor skips the probe for a server whose spec gate is
+closed, since no emitted spec defines it). See
 [../guides/enterprise-mcp-governance.md](../guides/enterprise-mcp-governance.md).
 
 `kirocrew-computer` carries **no `autoApprove` key and none may ever be added.**
@@ -259,7 +265,9 @@ Probes run from `POST /api/mcp/probe`:
   `declared` for the managed in-process fallback below). Both ride the cache
   into the API payload, so the UI can say *when* a status was true — the caches
   legitimately serve results up to their TTL, and an undated "Online" reads as
-  "now".
+  "now". A remote result may additionally carry **`authChallenge`** and, when
+  the grant lookup produced a verdict, **`authGrantPresent`**. Both ride the
+  same cache and are described with `needs_auth` below.
 - Timeout is `dashboard.mcp_probe_timeout_secs` (default 15s;
   `_PROBE_TIMEOUT_SECS` is the fallback if config is not loaded yet). Results
   are cached for `_PROBE_TTL_SECS` (1800s), after which status reads as
@@ -274,17 +282,112 @@ Probes run from `POST /api/mcp/probe`:
   excluded from the shared per-name probe cache, because a synthetic-identity
   handshake is a diagnostic and not the canonical observation the dashboard
   renders.
+- Remote header VALUES may carry `${VAR}`/`${env:VAR}` references — the
+  documented config form kiro-cli resolves at session runtime. The probe
+  resolves them through the gateway rewriter's declared-env expander
+  (`mcp_gateway.rewriter._expand_env_placeholders`): same regex, same
+  credential-filtered source view, and an unresolved reference stays literal —
+  so the probe presents the credential a session presents instead of sending
+  the reference as text and reporting the server's correct rejection as a
+  failing row. Probe-error redaction keys on the resolved values the probe
+  actually sent.
 - A remote server that answers the handshake with `401` — or with `403` carrying a
-  `WWW-Authenticate` challenge — and whose config has no static `Authorization`
-  header gets status `needs_auth` and an empty `error`, not `error`. The probe
+  `WWW-Authenticate` challenge — and whose sent headers carry no static
+  `Authorization` credential gets status `needs_auth` and an empty `error`, not
+  `error`. An `Authorization` value still carrying an unresolved `${VAR}`
+  reference (a missing or credential-filtered variable) supplied nothing, so it
+  does not count as a static credential here. The probe
   holds no OAuth token, because kiro-cli owns token custody
   ([design-notes/mcp-oauth-ownership.md](design-notes/mcp-oauth-ownership.md)), so
-  that answer carries no verdict on the server: an unauthorized server and one the
-  runtime calls successfully both return it. The dashboard renders `needs_auth` as
-  "Not verified" for that reason — naming an action the user may not need would
-  assert more than the probe observed. A `401` on an entry that DOES carry a static
-  `Authorization` header stays `error`: a supplied credential was rejected, which
-  is a real fault.
+  the status code alone carries no verdict on the server: an unauthorized server
+  and one the runtime calls successfully both return it.
+
+  **Two pieces of evidence split that ambiguity**, and the wording follows what
+  they support rather than the status code. The probe parses the challenge (a
+  Bearer challenge carrying a `scope` list or an https `resource_metadata` URL sets
+  `authChallenge`), and it stats kiro-cli's paired grant artifacts for the url to
+  set `authGrantPresent`. Three wordings follow, one per answer the pair supports:
+
+  | Evidence | Badge | Why |
+  |---|---|---|
+  | challenge, `authGrantPresent` false | **Sign-in required** | "Nobody has signed in" is observed, so the row names the action and states where it happens. |
+  | challenge, `authGrantPresent` true | **Signed in** (muted) | A grant artifact exists. The badge reports THAT, never that the server answers — the probe holds no token, so validity is the one thing it cannot check, and the hover says so. Toned muted rather than warn: amber is the panel's "act now" colour, and a resolved row wearing it is indistinguishable by colour from one that still needs a sign-in. |
+  | no challenge, or `authGrantPresent` absent | **Not verified** | An older gateway, or a bare `401`. Naming any state here would assert more than the probe observed. |
+
+  The middle row is what gives the guided sign-in an ending: without it a user who
+  followed the instruction landed back on the same badge they started from. It is
+  deliberately not "Online" — a stored grant is evidence a sign-in happened, not
+  proof it has not since been revoked, and only a probe carrying the runtime's
+  token could close that gap.
+
+  Reaching that ending is a VISIBLE instruction, not a hover. The panel is served
+  from the probe cache for the whole TTL, so a user returning from a completed
+  sign-in meets a row that still reads "Sign-in required"; if the "probe to
+  refresh" step lived only in the badge's `title` it would reach neither a
+  keyboard nor a touch user, at the moment of highest doubt. The cell carries one
+  clause, and the `title` carries the longer form naming the control and the state
+  the row lands in.
+
+  Grant-key derivation, paired artifact paths, and presence checks live in the
+  leaf `mcp_grant` module. The probe, connection mint, and persisted connection
+  status all consume that shared layout so a kiro-cli cache change cannot make
+  those surfaces disagree with one another. Its origin serialization matches
+  the Rust URL runtime at the byte boundary: Unicode domain names are
+  IDNA-encoded and IPv6 literals retain their brackets before hashing.
+
+  **`grant_presence()` is the single tri-state**, and there is deliberately only
+  one spelling of it. Each paired artifact is stat-ed exactly once and classified
+  by errno — the ENOENT family is a definitive absence, any other `OSError` is
+  "unknowable" — then the pair combines: either artifact definitively absent
+  decides it, any remaining failed stat makes it unknowable, otherwise present.
+  It is **not** built on `Path.is_file()`, and that is load-bearing rather than
+  stylistic: from Python 3.14 that method swallows every `OSError` and answers
+  `False`, so a permission error or a stalled mount would be indistinguishable
+  from "nothing was ever written". This package declares `requires-python >=
+  3.10` with no ceiling, so a build on 3.14 would silently collapse the middle
+  answer and tell the owner of an authorized server to sign in again — the exact
+  harm the three-valued design exists to prevent. Two spellings over the same
+  artifacts is how one of them loses that answer, which is why the probe and the
+  status module resolve through this one function.
+
+  **The grant stat is SEL-audited on whichever answer its caller acts on.** The
+  mint and the status module poll for a grant to *appear*, so only the positive
+  moves anything and only the positive is recorded — auditing each poll would
+  write one critical event per iteration of a single flow. The probe reads once
+  and renders either answer, and an absent pair is exactly what produces
+  "Sign-in required", so it passes `audit_absence=True` and the access leaves a
+  trail as `success` or `missing`. Opting in is the caller's, not the default's,
+  so a future polling caller cannot silently flood the log.
+
+  **Absence in the payload is meaningful, and the UI gates on an explicit `false`.**
+  `authChallenge` is omitted when the probe learned nothing about authorization.
+  `authGrantPresent` is omitted for that reason too, and *also* when the grant
+  lookup could not answer at all — a cache home that raises, such as a permission
+  error or a broken mount. Reporting an unanswerable lookup as `false` would tell
+  the owner of an already-authorized server to sign in again, so the three-valued
+  result is preserved to the wire rather than flattened. Each probe clears both
+  fields before it runs: the probe cache is keyed by NAME, so a row whose url was
+  edited would otherwise inherit the previous endpoint's verdict.
+
+  One degradation is NOT covered by that, and the limit is worth stating. The
+  lookup mirrors kiro-cli's own cache-key derivation and artifact layout, both
+  undocumented internals. If kiro-cli re-keys them, the stat succeeds against a
+  path that is simply absent, so the answer is `false` rather than unanswerable and
+  an authorized server reads "Sign-in required". That row does not recover on its
+  own: a second sign-in mints artifacts under the NEW key while Crew keeps stat-ing
+  the old one, so it goes on asking for a sign-in until the mirror here is
+  corrected. The recorded-hash tests pin the mirror only against itself, so the
+  drift would not fail in-repo either. Detecting it needs an observation of an
+  artifact kiro-cli actually wrote.
+
+  A `401` on an entry that DOES carry a static `Authorization` header stays
+  `error`: a supplied credential was rejected, which is a real fault. The
+  challenge is still recorded there, because "this server wants OAuth, so no
+  static header can satisfy it" is the actionable part of that failure. The GRANT
+  is not: `authGrantPresent` is read only by the "Sign-in required" wording, which
+  is gated on `needs_auth`, so looking it up on an `error` row would run a stat —
+  and let `grant_observed` write a critical SEL event — for an observation nothing
+  reads.
 - A probed stdio child that ignores a closed stdin costs
   `_PROBE_TEARDOWN_WAIT_SECS` twice (graceful wait, then again after SIGKILL)
   before the process-group reap, which is why that budget is a named constant
@@ -407,6 +510,55 @@ reconcile that failed is reported in the danger tint instead of the usual
 user sees is not honesty — the sessions did restart, but against a config that
 may not match the sources, and that is the one thing the caller needs told.
 
+### Live reconcile: when no restart is needed at all
+
+kiro-cli 2.10.0+ watches `~/.kiro/agents` and `mcp.json` and reconciles a
+RUNNING session against an edit: only the changed servers restart, the
+conversation is kept, and the change applies at the next turn boundary. That
+makes the restart above redundant on that harness — it exists only to make
+kiro-cli re-read a file it already watches. `kiro_crew/mcp_hot_reload.py` owns
+the gate, and it is keyed to the processes actually running, never to the
+binary on disk: every live provider — the registered sessions plus the warm
+pool the reset would drain — must declare `LLMProvider.mcp_config_hot_reload`
+as a literal `True` (default `False`, harness-parity H14). `AcpProvider`
+answers it from membership in `ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD` (kiro-cli
+only — KAS gets its servers injected on `session/new`, claude reads no agent
+file) AND the `agentInfo.version` its own process reported at `initialize`
+being at or above `MCP_HOT_RELOAD_MIN_KIRO_CLI_VERSION`. That floor is
+2.21.0 — the release the reconcile semantics were observed on — not 2.10.0,
+where the watcher first shipped: a release in between keeps the always-correct
+reset until it is verified, because granting the skip to one that reconciles
+differently fails invisibly, and lowering the floor later is one line. The
+handshake version
+is what each process runs; after an in-place kiro-cli upgrade the file on disk
+is newer than every process spawned before it, so probing the file would answer
+for a version nothing is running. The gate fails CLOSED: one provider that has
+not handshaked, is below the floor, sits on another harness, or has not
+declared the capability at all resets everything as before. `POST
+/api/mcp/sync` consults it and, when it holds, touches no session —
+`sessions_reset: 0` is the observable outcome. With no live process at all
+there is nothing a reset could reach, so the answer is also to skip.
+`POST /api/sessions/restart` stays the unconditional manual path.
+
+The skip is inferred from that declaration, not observed: kiro-cli's
+`_kiro.dev/mcp/server_initialized` notification is the signal that a reconcile
+actually spawned the server, and the gate does not yet consult it. A watcher
+that fails at runtime therefore reads as success with nothing red; the
+troubleshooting entry below and the manual restart are the recovery, and
+confirmation-based hardening is a named follow-up.
+
+What the reconcile keys on shapes what the dashboard writes. An added, removed,
+or edited `mcpServers` entry is acted on; `disabled: true` stops the server's
+process and `disabledTools` hides a tool. A `@server` ref ADDED to `tools` is
+honoured from the next turn — so the sync's write order (entry, then ref) is
+fine. But a ref REMOVED while the server keeps running leaves its tools mounted,
+so dropping the ref is not a disable. The dashboard's disable path
+(`_sync_mcp_to_agent`, single and batch) therefore writes `disabled: true` onto
+the agent-file entry as well as removing the ref, and the enable path lifts it.
+The `disabled` in the kiro-global file cannot stand in: `includeMcpJson` is
+pinned false, so kiro-cli never reads that file. The marker also helps a cold
+session — a disabled server is no longer spawned only to sit unmounted.
+
 A probe that FAILS after the sanitizer stripped a declared env key names the key
 in its error (`_note_denied_env`). The sanitizer's own WARNING goes to the
 gateway log, which is not where someone staring at a red badge is looking: a
@@ -521,10 +673,31 @@ answers `tools/list` from):
 - **Subagents:** `spawn_status`, `spawn_continue`, `spawn_steer`,
   `spawn_release`, `spawn_sub_agents`, `wait`
 - **Messaging and notification:** `send_message`, `send_notification`,
-  `delete_message`, `file_send`, `read_slack_profile`
+  `delete_message`, `file_send`, `read_slack_profile`. `send_message` is the
+  agent's only proactive egress, and it names its destination rather than
+  inferring one: `session="slack"` / `channel` / `user` / `thread_ts` are the
+  Slack fields, and `channel_type` is the non-Slack one — the transport of the
+  conversation the calling session already belongs to. Exactly one of the two
+  families may appear per call. The routing ladder and the fail-closed contract
+  behind `channel_type` are in
+  [messaging](../system-specs/modules/messaging.md) § Proactive sends. Two
+  things to know before adding a destination to it:
+  - **The governance gate must name the transport the message actually leaves
+    over.** The `channels` scope is a per-transport allowlist, so vetting
+    `"slack"` for a Telegram send evaluates a Telegram denial against Slack's
+    rule — and refuses a permitted Telegram send whenever Slack is denied.
+  - **`channel_type` is the one `send_message` argument that requires strict
+    identity (via `require_strict_session_key`).** It posts into one specific conversation,
+    which is the "targets a specific session" case below; the lenient walk
+    climbs process ancestors, so a sub-agent would resolve to its parent and
+    deliver into the parent's chat window. An unresolvable identity refuses the
+    call rather than guessing.
 - **Session-bound directives** (`session_directive.DIRECTIVE_TOOLS`):
-  `ask_question`, `suggest_followup`, `monitor_start`, `monitor_update`,
-  `autonudge_stop`, `set_project`
+  `ask_question`, `suggest_followup`, `monitor_start`, `monitor_watch`,
+  `monitor_update`, `monitor_stop`, `autonudge_stop`, `set_project`,
+  `reset_conversation`
+- **Structured monitor read:** `monitor_inspect` (strict authenticated session
+  identity only; no ancestor fallback)
 - **Crew routing:** `select_crew`
 - **Sessions and history:** `list_sessions`, `get_chat_session`,
   `search_chat_history`
@@ -787,8 +960,11 @@ Two failure modes follow.
 backend: the warm pool spawns with an empty key, and a sub-agent inherits its
 parent's tree. `mcp_core.py` offers two resolvers:
 
-- `_resolve_session_key_strict()` for **anything that mutates or targets a
-  specific session** (post to a slot, change its state, deliver a callback). It
+- `_resolve_session_key_strict` for **anything that mutates or targets a
+  specific session** (post to a slot, change its state, deliver a callback) —
+  reached ONLY through `require_strict_session_key()`, the shared fail-closed
+  gate every reflexive tool module routes through (`REFLEXIVE_TOOL_MODULES`
+  enumerates them; a ratchet test rejects direct calls outside `mcp_core`). It
   accepts only the gateway-injected caller context (`mcp_caller.current_caller()`,
   which gatewayd stamps on every forwarded frame after stripping any
   client-forged `kirocrew.caller` block), the injected `KIROCREW_SESSION_KEY`, or
@@ -801,11 +977,14 @@ parent's tree. `mcp_core.py` offers two resolvers:
 - `_resolve_session_key()` (lenient, still walks ancestors) is only for read-only
   and telemetry callers where misattribution is harmless.
 
-An unresolved key is not automatically a refusal. `mcp_computer.py` forwards an
-empty key and lets the call proceed, because neither strict source exists for a
+An unresolved key is not automatically a refusal. `mcp_computer.py` forwards a
+namespace-only key (`unresolved:<shim pid>`, plus the gateway's per-connection
+nonce when there is one) and lets the call proceed, because neither strict source
+exists for a
 GUI-launched kiro-cli on macOS, so gating on identity would make the feature
 unusable on its only supported platform. What is lost there is audit
-*attribution*, not a control: the trail records an empty key, which is honest,
+*attribution*, not a control: the trail records a key the prefix marks as
+unresolved, which is honest,
 where the lenient walk would have recorded a forgeable one.
 
 **2. State belongs in the gateway.** The tool should be a thin forwarder: resolve
@@ -831,7 +1010,8 @@ and let a sub-agent's card land in its parent's slot.
 
 **Return a session directive and let the session-aware consumer apply it.** This
 is what the `ask_question` MCP tool itself now does, along with `monitor_start`,
-`monitor_update`, `autonudge_stop`, `set_project` and `suggest_followup`
+`monitor_watch`, `monitor_update`, `monitor_stop`, `autonudge_stop`, `set_project`
+and `suggest_followup`, and `reset_conversation`
 (`session_directive.DIRECTIVE_TOOLS`). The tool validates its arguments and
 returns a human-readable confirmation plus a marker line carrying the validated
 payload and **no session key**. `dashboard/chat_runner`'s tool-result handler
@@ -857,6 +1037,82 @@ framing token must not depend on characters that sanitizers and normalizers
 legitimately rewrite. `encode()` refuses above `MAX_DIRECTIVE_CHARS` (3800), under
 the ACP tool-result truncation bound, so an oversized payload fails loudly
 instead of losing its trailing marker.
+
+A tail-anchored marker must survive delivery, and a rejection must not be able to
+carry one. `validate_tool_args` reports an unknown field by echoing the argument
+NAME, which the model chooses, so that name is the injection point for both
+problems. A name carrying the sentinel plus a JSON payload plus a newline made the
+REJECTION string decode as a genuine directive under the real tool's authenticated
+identity — applying the arguments validation had just refused — so every place
+`mcp_shared` builds an `"Error: …"` result passes the interpolated text through
+`session_directive.neutralize_markers`. That defanging is applied only where the
+caller KNOWS the string is not a directive: doing it centrally over every tool
+result would defang the real marker too. Separately, a 9,000-character name
+produced a result whose refusal tag the transport cut removed, and the decline read
+as a lost marker again — `tag_refusal` elides the middle of an over-long text
+against `MAX_TOOL_RESULT_CHARS`, the single constant `acp/_dispatch.py` slices on.
+That bound alone is necessary but not sufficient, because the cut runs AFTER
+redaction and redaction GROWS text (a credential becomes a longer placeholder,
+measured 7,999 chars in and 8,755 out), so `preserve_tail_marker` re-attaches a
+marker the cut removed — the same re-injection the MCP App render marker already
+gets at that seam, for the same reason: a control token that decides how a frame is
+interpreted must not be a casualty of a length cut applied to the frame's prose.
+
+**A directive tool's result either carries the marker, or it is a tagged
+refusal — nothing in between.** The consumer cannot otherwise tell a decline from
+a marker destroyed in transport: both decode to "no directive", but only the
+second is a bug, and the diagnostic for the second is a WARNING
+(`session-directive decode FAILED … effect dropped`) whose whole purpose is to
+catch a rawOutput-envelope escaping regression. So every marker-less return is
+stamped with `_REFUSAL_SENTINEL` and reported at INFO as
+`session-directive REFUSED`: `encode()` stamps its own oversized-payload refusal,
+and `mcp_core._call_tool` stamps the rest via `refuse_if_markerless()`. That
+second producer sits at the OUTERMOST return because argument validation runs in
+the dispatch wrapper *ahead of* the handler, so a schema rejection never reaches
+code inside the tool that could tag itself. Tagging is diagnostic only and keys on
+the tool name alone: the token carries no payload and grants no effect, so it can
+change how a line is logged and never what is applied. Two consequences for a tool
+author — a directive tool must RETURN its declines rather than raise them (an
+exception escapes this return path and reads as a lost marker), and a caller that
+sees `decode FAILED` is looking at a transport bug or at a handler that crashed --
+the line names both, because a crash also drops the effect and asserting only the
+transport cause sends an operator hunting a regression that is not there.
+That first rule is enforced rather than left to convention: a parametrized test
+drives every name in `DIRECTIVE_TOOLS` with a hostile call and asserts the result
+is a marker or a tagged refusal, and its companion asserts the table covers the
+frozenset, so a new directive tool fails until it is added. The one raising
+dependency these handlers share, `parse_github_pull_request_target`, is reached
+through a single guarded seam (`_parsed_pull_request_target`) for the same reason
+-- guarding its two call sites independently is how the second one came to ship
+unguarded.
+
+`FieldSpec.clamp_to_max` is the other half of that: an over-long argument used to
+be able to defeat the request it was only describing. `autonudge_stop` and
+`monitor_stop` both take a `reason` that selects no behaviour — the applier just
+interpolates it into the outcome text and the persisted stop record — so their
+`reason` is TRUNCATED to the cap instead of rejecting the stop, and the truncated
+value carries a `[... truncated, dropped N chars]` note so the cut is visible
+wherever the value travels. `N` counts what THAT cut dropped, including the note's
+own cost — deliberately not the caller's original length, which the clamp cannot
+know because the field is sanitized before the cap is checked, so one number
+cannot honestly stand for both removals. Opt-in per field, and never for a field
+the handler acts on: a truncated control input is a wrong control input, and
+rejecting is the only safe answer there.
+
+Structured monitoring deliberately splits mutation from inspection.
+`monitor_watch`, `monitor_update`, and `monitor_stop` are directives: the
+consumer applies them to its authoritative session, so their payloads contain
+neither a session key nor a loop id. `monitor_inspect` needs a result in the same
+turn and therefore calls the session-bound read route only after
+`require_strict_session_key()` resolves, passing that exact key to `_get`.
+It projects that response into bounded agent-oriented state (check counts and
+accepted wake count, plus only a small failed/pending/unknown name sample),
+omitting wake instructions and browser/persistence internals. Inspection reports
+unavailable when strict identity is absent; it never falls back to the
+process-ancestor resolver. Every structured-monitor tool refusal caused by a
+missing or unsupported session binding returns an `Error:` result and writes an
+explicit `denied` SEL event; the shared MCP wrapper therefore records the call as
+failed rather than completed.
 
 ### The one allowed exception: caller-agnostic process caches
 
@@ -892,6 +1148,11 @@ the gateway log.
 not appear in interactive kiro-cli or Kiro IDE sessions. If they do, something
 wrote them into a provider global.
 
-**A newly added server does not appear in sessions.** The warm pool holds
-pre-spawned processes carrying the old config. Use Apply & Restart, or
-`kirocrew config set`, which triggers a restart.
+**A newly added server does not appear in sessions.** On kiro-cli 2.21.0+ the
+running sessions reconcile the agent file themselves and the dashboard skips its
+reset (see "Live reconcile" above); a server that stays absent there means the
+entry never reached `~/.kiro/agents/kirocrew.json` — check `kirocrew doctor` —
+or the watcher failed at runtime, which the skip cannot see: `POST
+/api/sessions/restart` is the recovery. On an older kiro-cli, or another
+harness, the warm pool holds pre-spawned processes carrying the old config. Use
+Apply & Restart, or `kirocrew config set`, which triggers a restart.

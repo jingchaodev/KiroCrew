@@ -27,6 +27,13 @@ installed by the caller should just forward into ``stop_event.set()``.
 
 from __future__ import annotations
 
+# System-trust injection is process-local and must run before imports below can
+# create or cache an SSLContext. Environment-only CA settings are inherited
+# from GatewayManager, but Security.framework-backed contexts are not.
+from kiro_crew._ssl_compat import _ensure_ssl_certs
+
+_ensure_ssl_certs()
+
 import argparse
 import asyncio
 import contextlib
@@ -39,16 +46,27 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Collection, Iterator, Optional
+from typing import Any, Callable, Collection, Iterator, NoReturn, Optional
 
+from kiro_crew.code_fingerprint import code_fingerprint, warm_code_fingerprint
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.config.loader import config_dir as _config_dir
-from kiro_crew.executors import maintenance_executor, subprocess_executor
+from kiro_crew.executors import (
+    configure_default_executor,
+    maintenance_executor,
+    subprocess_executor,
+)
 from kiro_crew.mcp_caller import CallerContext
 from kiro_crew.mcp_caller import _parent_pid as _ppid_fn
-from kiro_crew.mcp_gateway import credwatch, hazards, socketsec, transport
+from kiro_crew.mcp_caller import new_tenant_nonce
+from kiro_crew.mcp_gateway import credwatch, hazards, socketsec, tool_surface, transport
 from kiro_crew.mcp_gateway.apps import sweep_spool as apps_sweep_spool
-from kiro_crew.mcp_gateway.backend import Backend, BackendGone, spawn_backend
+from kiro_crew.mcp_gateway.backend import (
+    INTERNAL_STUB_PREFIXES,
+    Backend,
+    BackendGone,
+    spawn_backend,
+)
 from kiro_crew.mcp_gateway.backend_tmp import sweep_all_backend_tmp
 from kiro_crew.mcp_gateway.breaker import CircuitBreaker
 from kiro_crew.mcp_gateway.hashing import hash_effective_env, non_secret_env
@@ -82,8 +100,11 @@ from kiro_crew.mcp_gateway.stub import fallback_counts as stub_fallback_counts
 from kiro_crew.metrics.provider import get_recorder
 from kiro_crew.peer_resolve import resolve_peer_identity
 from kiro_crew.platform_compat import IS_WINDOWS
+from kiro_crew.platform_compat import count_open_fds as _shared_count_open_fds
 from kiro_crew.platform_compat import get_process_start_id as _get_process_start_id
+from kiro_crew.platform_compat import pid_exists as _pid_exists
 from kiro_crew.platform_compat import proc_rss_bytes as _proc_rss_bytes
+from kiro_crew.platform_compat import process_start_time as _process_start_time
 from kiro_crew.sandbox import _PYTHON_ENV_PREFIXES, warm_backend
 from kiro_crew.sel import SecurityEventLog
 
@@ -263,6 +284,7 @@ async def run_gatewayd(
     target_resolver: Optional[TargetResolver] = None,
     prewarm_count: int = 0,
     credential_watch_paths: Optional[list[Path]] = None,
+    owner_pid: int = 0,
 ) -> None:
     """Run the gateway until ``stop_event`` is set.
 
@@ -309,11 +331,26 @@ async def run_gatewayd(
     socket directory not creatable, another daemon already bound to the
     path) propagate so the caller can surface a clear error.
     """
+    # Published for the ping reply before anything can connect.
+    global _OWNER_PID
+    _OWNER_PID = int(owner_pid) if owner_pid > 0 else 0
+    # The fingerprint the pong and the stand-down handler read is computed
+    # once, HERE, off the loop: its first computation runs git (or walks the
+    # package tree), and the connection handler that reads it must not pay
+    # that on the event loop.
+    await warm_code_fingerprint()
+    # The daemon's own start-time identity, read ONCE here off the loop: on
+    # macOS ``process_start_time`` is a ``ps`` subprocess, and the pong that
+    # publishes it is answered from the connection handler on the loop.
+    global _OWN_START_TIME
+    _own_start = await asyncio.to_thread(_process_start_time, os.getpid())
+    _OWN_START_TIME = _own_start or ""
     socket_path = Path(socket_path)
     # Off the event loop for the same reason as the manager's call: the
-    # owner-only step shells out to icacls on Windows. Startup is the least
-    # contended moment in this process, but the daemon's signal handlers and
-    # supervising ping are already live, so it is offloaded here too.
+    # owner-only step is blocking filesystem work (the Windows DACL is applied
+    # in-process). Startup is the least contended moment in this process, but
+    # the daemon's signal handlers and supervising ping are already live, so it
+    # is offloaded here too.
     await asyncio.to_thread(transport.prepare_dir, socket_path)
     # Singleton guard (race-free): acquire an exclusive advisory lock on a
     # lockfile beside the endpoint BEFORE probing/unlinking/binding. Without it,
@@ -393,10 +430,17 @@ async def run_gatewayd(
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         try:
-            await _handle_connection(reader, writer, pool, resolver, socket_path, hot_keys)
+            await _handle_connection(
+                reader, writer, pool, resolver, socket_path, hot_keys, stop_event=stop_event
+            )
         except asyncio.CancelledError:
             # Normal on shutdown — propagate for the gather() below.
             raise
+        except ConnectionError:
+            # Abrupt peer disconnect (ECONNRESET / EPIPE from a hard-killed
+            # client) is routine — the clean-EOF sibling is already handled
+            # inside _handle_connection — so don't log it as a crash.
+            logger.debug("client disconnected abruptly", exc_info=True)
         except Exception:
             logger.exception("connection handler crashed")
         finally:
@@ -439,6 +483,7 @@ async def run_gatewayd(
     sweeper: Optional[asyncio.Task[None]] = None
     tmp_sweeper: Optional[asyncio.Task[None]] = None
     socket_liveness: Optional[asyncio.Task[None]] = None
+    owner_liveness: Optional[asyncio.Task[None]] = None
     diagnostic: Optional[asyncio.Task[None]] = None
     heartbeat: Optional[asyncio.Task[None]] = None
     flush_sweeper: Optional[asyncio.Task[None]] = None
@@ -517,6 +562,23 @@ async def run_gatewayd(
             socket_liveness = asyncio.create_task(
                 _socket_liveness_sweeper(socket_path, sweep_interval, stop_event),
                 name="mcp-gateway-socket-liveness",
+            )
+
+        # Owner-liveness self-exit: this daemon exists to serve ONE gateway
+        # process -- the one that spawned it -- and has no business outliving
+        # it. Its socket is spawned ``start_new_session=True`` so a SIGKILLed
+        # gateway never signals it, and the next gateway to start then found
+        # a healthy daemon on the socket and ADOPTED it: a daemon running the
+        # code of a checkout two days old, pooling backends that spoke a
+        # control-frame shape the new gateway did not read. Watching the
+        # owner's PID (with its start time, so a recycled PID is not mistaken
+        # for the owner) closes that: the owner dying takes the daemon down the
+        # same graceful path SIGTERM takes. Not armed when no owner was named
+        # (an operator running the module by hand).
+        if owner_pid > 0:
+            owner_liveness = asyncio.create_task(
+                _owner_liveness_sweeper(owner_pid, _OWNER_LIVENESS_INTERVAL_SECS, stop_event),
+                name="mcp-gateway-owner-liveness",
             )
 
         # Zombie diagnostic: probes
@@ -721,6 +783,11 @@ async def run_gatewayd(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await socket_liveness
 
+        if owner_liveness is not None:
+            owner_liveness.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await owner_liveness
+
         if diagnostic is not None:
             diagnostic.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -813,6 +880,74 @@ async def _idle_sweeper(
 #: must not kill a healthy daemon, so only an uninterrupted run of misses
 #: counts as proof of unreachability.
 _SOCKET_LIVENESS_MISSES = 3
+
+#: How often the daemon confirms its owning gateway is still the process
+#: that spawned it. Coarse on purpose: a stat of one /proc entry, and a
+#: dead owner costs nothing but idle pooled backends until the next probe.
+_OWNER_LIVENESS_INTERVAL_SECS = 15.0
+
+#: Consecutive owner-gone observations before self-exit. Two, not one: the
+#: start-time read and the pid-exists read are separate syscalls, and a
+#: transient EACCES/EIO between them must not end a serving daemon.
+_OWNER_LIVENESS_MISSES = 2
+
+
+async def _owner_liveness_sweeper(
+    owner_pid: int,
+    interval: float,
+    stop_event: asyncio.Event,
+) -> None:
+    """Self-exit when the gateway that spawned this daemon is gone.
+
+    ``owner_pid`` is the PID the launcher passed on argv. Its start time is
+    read ONCE at arm time and compared on every probe: a PID number is
+    recycled by the kernel, so ``pid_exists`` alone would let a daemon keep
+    running for whatever unrelated process later took its owner's number.
+
+    Fail-safe rules mirror :func:`_socket_liveness_sweeper`: an unreadable
+    start time at arm time disables the check (nothing to compare against,
+    and refusing to serve would be worse than serving one generation too
+    long); a probe that cannot read the start time is inconclusive and
+    neither counts nor resets; :data:`_OWNER_LIVENESS_MISSES` consecutive
+    conclusive misses set ``stop_event``, which is the graceful drain path.
+    """
+    baseline = await asyncio.to_thread(_process_start_time, owner_pid)
+    if baseline is None:
+        logger.warning(
+            "gatewayd: owner pid %d has no readable start time; the owner-liveness "
+            "check is disabled for this daemon",
+            owner_pid,
+        )
+        return
+    misses = 0
+    try:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+            alive = await asyncio.to_thread(_pid_exists, owner_pid)
+            if alive:
+                now = await asyncio.to_thread(_process_start_time, owner_pid)
+                if now is None:
+                    continue  # inconclusive: neither a miss nor a reset
+                if now == baseline:
+                    misses = 0
+                    continue
+            misses += 1
+            if misses >= _OWNER_LIVENESS_MISSES:
+                logger.warning(
+                    "gatewayd: owning gateway pid %d is gone (%s); this daemon serves "
+                    "no live gateway and would only be adopted by a newer one running "
+                    "different code -- initiating graceful self-shutdown",
+                    owner_pid,
+                    "pid recycled" if alive else "process exited",
+                )
+                stop_event.set()
+                break
+    except asyncio.CancelledError:
+        raise
 
 
 async def _socket_liveness_sweeper(
@@ -1286,6 +1421,46 @@ def _declared_env_to_forward(pool_key: PoolKey) -> dict[str, str]:
     return _declared_non_secret_env(pool_key)
 
 
+#: The canonical target-env prefix. ``MC_MCP_TARGET_`` is the legacy spelling
+#: :func:`env_target_resolver` still accepts, so both normalize to this stem set.
+_TARGET_ENV_PREFIXES = ("KIROCREW_MCP_TARGET_", "MC_MCP_TARGET_")
+
+
+def resolvable_target_stems(env: Optional[dict[str, str]] = None) -> list[str]:
+    """The set of target-env STEMS this daemon can resolve, sorted.
+
+    A stem is the env key with its prefix and any ``__<command_args_hash>``
+    suffix removed -- e.g. both ``KIROCREW_MCP_TARGET_KIROCREW_CORE`` and
+    ``KIROCREW_MCP_TARGET_KIROCREW_CORE__61774e20...`` yield ``KIROCREW_CORE``.
+
+    Reported on the ``pong`` reply so an adopting :class:`GatewayManager` can
+    tell whether an incumbent daemon's env still covers the servers the current
+    config wants stubbed. This is the ONLY way to see that: the daemon's target
+    map is baked into its process env at spawn (``manager._spawn_once``) and a
+    frozen :class:`GatewaySpec` is never re-applied to an adopted survivor, so a
+    daemon that predates a ``stub_servers`` change serves a stale map forever.
+
+    Deliberately reports STEMS rather than server names. Recovering a name would
+    mean undoing ``upper().replace("-", "_")``, which is lossy -- ``my-server``
+    and ``my_server`` normalize identically (the rewriter warns about exactly
+    that collision). Both sides comparing stems needs no such guess.
+    """
+    source = os.environ if env is None else env
+    stems: set[str] = set()
+    for key in source:
+        for prefix in _TARGET_ENV_PREFIXES:
+            if not key.startswith(prefix):
+                continue
+            stem = key[len(prefix) :]
+            # Strip the args-disambiguated suffix so a hashed-only entry still
+            # reports the server it serves.
+            stem = stem.split("__", 1)[0]
+            if stem:
+                stems.add(stem)
+            break
+    return sorted(stems)
+
+
 def env_target_resolver(pool_key: PoolKey) -> Optional[tuple[str, list[str], dict[str, str], str]]:
     """Look up ``KIROCREW_MCP_TARGET_<SERVER>`` in the process env and return the
     spawn tuple, or ``None`` if no mapping is set.
@@ -1517,7 +1692,14 @@ class _StubConn:
     unreadable /proc) and never counts as a mismatch.
     """
 
-    __slots__ = ("stub_uuid", "ancestor_pids", "pool_label", "caller", "pid_start_ids")
+    __slots__ = (
+        "stub_uuid",
+        "ancestor_pids",
+        "pool_label",
+        "caller",
+        "pid_start_ids",
+        "tenant_nonce",
+    )
 
     def __init__(
         self,
@@ -1526,12 +1708,20 @@ class _StubConn:
         pool_label: str,
         caller: Optional[CallerContext],
         pid_start_ids: Optional[dict[int, Optional[str]]] = None,
+        tenant_nonce: str = "",
     ) -> None:
         self.stub_uuid = stub_uuid
         self.ancestor_pids = ancestor_pids
         self.pool_label = pool_label
         self.caller = caller
         self.pid_start_ids = pid_start_ids if pid_start_ids is not None else {}
+        # Namespace separator for a connection whose session the gateway cannot
+        # name, forwarded to the backend on every request (#5322). GATEWAY-minted
+        # and never derived from the Register frame: ``stub_uuid`` arrives from
+        # the stub, so a nonce derived from it would let one stub choose to share
+        # an unnamed peer's per-tenant namespace. Independent of ``caller``,
+        # which may be retargeted by a later claim-push while this stays put.
+        self.tenant_nonce = tenant_nonce
 
 
 #: Live stub connections indexed by every ancestor PID of the kiro-cli
@@ -1766,7 +1956,36 @@ def _audit_peer_identity_denied(reason: str, peer_pid: int | None, stub_uuid: st
         logger.debug("SEL audit emit for peer identity denial failed", exc_info=True)
 
 
-def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
+def _audit_reserved_stub_prefix_denied(stub_uuid: str) -> None:
+    """SEL audit: a registrant naming a reserved internal stub prefix was refused.
+
+    The prefix decides whether `Backend` treats a request as the gateway's own
+    and skips the model-visibility filter, so claiming one is an attempt to
+    acquire an exemption rather than a malformed frame -- the same class of
+    access decision as :func:`_audit_peer_identity_denied`, and recorded the
+    same way. The sibling rejects on this path (a malformed Register, an empty
+    stub_uuid) stay WARNING-only because they are schema failures with no
+    control being evaded.
+
+    ``stub_uuid`` is peer-supplied, but the SEL serializes each event with
+    ``json.dumps``, which escapes the control characters a forged log line would
+    need, so it is recorded as received rather than pre-sanitized.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller="unverified-peer",
+            operation="mcp-gateway.reserved-stub-prefix-denied",
+            outcome="denied",
+            source="gateway",
+            resources=f"stub_uuid={stub_uuid}",
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for reserved stub prefix denial failed", exc_info=True)
+
+
+async def _apply_claim(
+    frame: dict[str, Any], pool: Optional["BackendPool"] = None
+) -> dict[str, Any]:
     """Apply a ``claim`` frame to every indexed connection of the target PID.
 
     Returns the ack frame. Validation is deny-by-default: a non-integer or
@@ -1818,7 +2037,13 @@ def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
     # be rejected.
     raw_token = frame.get("pid_start_id")
     claim_token = raw_token if isinstance(raw_token, str) else None
-    for conn in conns:
+    # Pass 1: retarget every eligible connection SYNCHRONOUSLY (no awaits)
+    # before any eviction runs — see the wrong-principal note below.
+    retargeted: list[tuple[Any, str]] = []
+    # Snapshot: the eviction below AWAITS, and a connection disconnecting
+    # during that await mutates the live ``conns`` set mid-iteration —
+    # aborting the claim with no ack and leaving the remaining stubs stale.
+    for conn in list(conns):
         recorded_token = conn.pid_start_ids.get(pid)
         if claim_token is not None and recorded_token is not None and claim_token != recorded_token:
             skipped += 1
@@ -1839,7 +2064,33 @@ def _apply_claim(frame: dict[str, Any]) -> dict[str, Any]:
         old_key = conn.caller.session_key if conn.caller is not None else ""
         if old_key == updated_caller.session_key:
             continue  # already correct — idempotent re-claim
+        # Reassign the owner BEFORE any eviction awaits — and reassign
+        # EVERY eligible connection before the FIRST eviction awaits (the
+        # second pass below): an eviction yields, and a sibling connection
+        # still carrying the old caller during that await would forward
+        # its frames as the previous session — wrong-principal execution.
+        # A subscribe arriving during an await must likewise already be
+        # authorized as the NEW caller on every connection.
         conn.caller = updated_caller
+        retargeted.append((conn, old_key))
+    # Pass 2: all connections now carry the new owner; run the evictions.
+    for conn, old_key in retargeted:
+        if pool is not None:
+            # The stub changed OWNER: its resource subscriptions belong to
+            # the old principal, and without eviction the new session would
+            # keep receiving the old session's resource-update URIs (which
+            # can carry tokens or presigned params). Caller-binding
+            # ownership lives here at the connection layer, so this is the
+            # one moment the clearance fires; the backend releases upstream
+            # as the grant-time caller.
+            for backend in pool.backends_hosting_stub(conn.stub_uuid):
+                try:
+                    await backend.evict_stub_subscriptions(conn.stub_uuid)
+                except Exception:
+                    logger.exception(
+                        "claim: subscription eviction failed for stub %s",
+                        conn.stub_uuid,
+                    )
         updated += 1
         _audit_caller_claimed(old_key, updated_caller.session_key, conn.pool_label, "allowed")
         logger.info(
@@ -1966,6 +2217,36 @@ def _audit_pool_rejected(caller: str, pool_label: str, reason: str) -> None:
         logger.debug("SEL audit emit for gateway reject failed", exc_info=True)
 
 
+def _audit_replacement_validated(caller: str, pool_label: str, outcome: str, detail: str) -> None:
+    """Emit a SEL audit event for a backend replacement, adopted OR refused.
+
+    A transparent respawn is the one place the gateway swaps the process behind
+    a live session, so both outcomes are access decisions about which server may
+    answer that session — the same class as :func:`_audit_pool_rejected`, and the
+    same two-sided shape as the peer-identity and app-call trails, which record
+    allow as well as deny. Recording only the refusal would leave the event this
+    whole guard exists to make visible — a process gaining authority to serve a
+    session that did not ask for it — as a rotating log line and nothing more.
+
+    ``detail`` carries what the decision was made on: WHICH tools moved on a
+    refusal, and whether the tool set was verified or there was nothing to verify
+    on an adoption. That is what separates a server upgrade from a server that
+    answers differently per caller. Wrapped defensively — an audit-log failure
+    must never break the recovery path.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller=caller or "unknown",
+            operation="mcp-gateway.respawn-toolset",
+            outcome=outcome,
+            source="gateway",
+            resources=pool_label,
+            error=detail,
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for backend replacement failed", exc_info=True)
+
+
 def _audit_prewarm_spawn(pool_label: str) -> None:
     """Emit a SEL audit event for a backend spawned by the warm-pool prewarmer.
 
@@ -1990,6 +2271,155 @@ def _audit_prewarm_spawn(pool_label: str) -> None:
         logger.debug("SEL audit emit for prewarm spawn failed", exc_info=True)
 
 
+#: The gateway PID this daemon was spawned for; 0 when run by hand. Read by
+#: :func:`_pong_payload` so a pinger can tell an ORPHAN (owner dead) from a
+#: daemon another live gateway still owns, and by the stand-down handler.
+_OWNER_PID: int = 0
+
+#: This daemon's own ``process_start_time`` token, computed once at startup
+#: (off the loop) so the pong can publish it without a syscall or a ``ps``.
+_OWN_START_TIME: str = ""
+
+
+def _pong_payload() -> dict[str, Any]:
+    """What a ping is answered with.
+
+    ``targets`` lets the pinger detect a daemon whose baked target map does not
+    cover its stubs. ``fingerprint`` lets it detect a daemon running DIFFERENT
+    CODE -- the case the target check cannot see, since two checkouts resolve
+    the same stems while disagreeing about a wire shape. ``owner_pid`` lets it
+    tell whether anyone is still supervising this daemon; ``start_time`` is the
+    identity a pinned kill must match. Every field is
+    additive: an older manager reads ``type`` and ``targets`` and ignores the
+    rest, and an older daemon omits the new ones, which the manager treats as
+    unverifiable rather than as a match.
+    """
+    return {
+        "type": "pong",
+        "targets": resolvable_target_stems(),
+        "fingerprint": code_fingerprint(),
+        "owner_pid": _OWNER_PID,
+        "pid": os.getpid(),
+        # The daemon's own start-time identity, so a caller that decides to
+        # signal this pid pins the signal on the process that ANSWERED, not on
+        # whatever holds the number by the time the signal is sent.
+        "start_time": _OWN_START_TIME,
+    }
+
+
+def _audit_stand_down(reason: str, outcome: str) -> None:
+    """Emit a SEL audit event for a stand-down request.
+
+    A stand-down ends the daemon, so it is the most consequential frame the
+    control surface accepts and belongs in the HMAC-chained SEL alongside the
+    claim/abort/peer decisions. Wrapped defensively -- an audit-log failure must
+    never break connection handling.
+    """
+    try:
+        SecurityEventLog().log_api_access(
+            caller="gateway-manager",
+            operation="mcp-gateway.stand_down",
+            outcome=outcome,
+            source="gateway",
+            resources=",".join(resolvable_target_stems()) or "(none)",
+            error=reason,
+        )
+    except Exception:  # pragma: no cover — audit must never break the handler
+        logger.debug("SEL audit emit for stand-down failed", exc_info=True)
+
+
+def _apply_stand_down(frame: dict[str, Any], stop_event: Optional[asyncio.Event]) -> dict[str, Any]:
+    """Yield the socket voluntarily so a daemon with a current target map can bind.
+
+    ``manager._report_adoption_drift`` can already SEE that an adopted survivor's
+    baked target map no longer covers the configured stub set; its own warning
+    ends "Replace the daemon to restore them", and this frame is how that
+    replacement happens without anyone unlinking a live socket.
+
+    Setting ``stop_event`` takes exactly the graceful path SIGTERM takes (the
+    signal handlers installed by ``_amain`` do only ``stop_event.set()``):
+    accepts stop, attached stubs drain, ``pool.shutdown_all()`` runs, the
+    endpoint is removed, the lock is released, the process exits. Doing it this
+    way round is the whole point. The alternative -- the starting gateway
+    unlinking the socket to take it -- is a connect-probe-then-unlink, which in
+    its documented false-stale window steals a LIVE incumbent's endpoint and
+    re-introduces the socket-theft class the flock guard exists to prevent. Here
+    the incumbent decides, and the request only ever arrives over a connection
+    that proves the incumbent is alive, so there is no stale-vs-live judgement to
+    get wrong.
+
+    ``need`` is the list of target stems the caller requires. A daemon that
+    already resolves ALL of them is REFUSED: there is nothing to gain by cycling
+    it, and honouring the request would turn this into a bare kill switch a
+    confused caller could aim at a daemon serving it correctly. A SUPERSET is
+    therefore fit -- extra stems a newer config no longer asks for are harmless,
+    and refusing on inequality would cycle a perfectly good daemon.
+
+    Trust basis for the rest is the same uid-gated owner-only socket that
+    authenticates Register/Claim/Abort.
+    """
+    # Two grounds, either sufficient. A caller running DIFFERENT CODE names
+    # its own fingerprint; a daemon whose fingerprint differs yields, because
+    # it cannot know which wire shapes the caller's code changed and serving
+    # it anyway is how a two-day-old daemon answered a gateway that did not
+    # read its control frames. A matching fingerprint is NOT a ground: the
+    # caller is running this very code, so there is nothing to gain.
+    caller_fp = frame.get("caller_fingerprint")
+    stale_code = isinstance(caller_fp, str) and bool(caller_fp) and caller_fp != code_fingerprint()
+    # Third ground: this daemon's own gateway has exited. The caller may CLAIM
+    # it (``orphaned``), but the daemon decides from its own record -- a live
+    # owner means the claim is false and nothing here yields. An orphan is
+    # about to stop itself anyway (the owner sweeper); yielding now lets the
+    # replacement bind before any session is handed a dying broker.
+    orphaned = frame.get("orphaned") is True and _OWNER_PID > 0 and not _pid_exists(_OWNER_PID)
+    yield_regardless = stale_code or orphaned
+    need = frame.get("need")
+    if need is None and yield_regardless:
+        need = []
+    if not isinstance(need, list) or not all(isinstance(s, str) and s for s in need):
+        _audit_stand_down("missing or invalid need list", "denied")
+        return {"type": "stand-down-rejected", "reason": "missing or invalid 'need' stem list"}
+    if not need and not yield_regardless:
+        _audit_stand_down("missing or invalid need list", "denied")
+        return {"type": "stand-down-rejected", "reason": "missing or invalid 'need' stem list"}
+    served = set(resolvable_target_stems())
+    missing = sorted(set(need) - served)
+    if not missing and not yield_regardless:
+        _audit_stand_down("already covers every needed stem", "denied")
+        return {
+            "type": "stand-down-rejected",
+            "reason": "this daemon already resolves every requested target stem",
+        }
+    if stop_event is None:
+        # Reached only by a handler wired without a stop event (unit tests
+        # constructing _handle_connection directly). Refuse rather than claim a
+        # shutdown that cannot happen -- an accepted-but-inert control frame is
+        # worse than a rejected one, because the caller then waits for a lock
+        # that is never released.
+        _audit_stand_down("handler has no stop event", "denied")
+        return {"type": "stand-down-rejected", "reason": "shutdown not wired on this handler"}
+    grounds: list[str] = []
+    if missing:
+        grounds.append(f"cannot resolve {', '.join(missing)}")
+    if stale_code:
+        grounds.append(f"runs code {code_fingerprint()} while the caller runs {caller_fp}")
+    if orphaned:
+        grounds.append(f"is owned by gateway pid {_OWNER_PID}, which has exited")
+    logger.warning(
+        "gatewayd: standing down on request — this daemon %s; draining so a daemon "
+        "matching the caller can bind",
+        " and ".join(grounds),
+    )
+    _audit_stand_down("; ".join(grounds), "allowed")
+    stop_event.set()
+    return {
+        "type": "standing-down",
+        "missing": missing,
+        "stale_code": stale_code,
+        "orphaned": orphaned,
+    }
+
+
 async def _handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -1997,6 +2427,8 @@ async def _handle_connection(
     resolver: TargetResolver,
     socket_path: Path,
     hot_keys: Optional[HotKeyStore] = None,
+    *,
+    stop_event: Optional[asyncio.Event] = None,
 ) -> None:
     """Process one stub connection end-to-end.
 
@@ -2082,7 +2514,10 @@ async def _handle_connection(
     # uses this to confirm the daemon is serving before returning from
     # ``start()``.
     if register.get("type") == "ping":
-        await _write_json_line(writer, {"type": "pong"})
+        # ``targets`` lets the pinger detect a STALE incumbent before adopting
+        # it. Absent on a pre-#6xxx daemon, which the adoption gate treats as
+        # unverifiable rather than assuming coverage.
+        await _write_json_line(writer, _pong_payload())
         return
 
     # Metrics short-circuit: return a point-in-time pool snapshot (backends,
@@ -2111,7 +2546,7 @@ async def _handle_connection(
     # (fixes warm-pool re-claim staleness). Validation + auditing live in
     # ``_apply_claim``.
     if register.get("type") == "claim":
-        await _write_json_line(writer, _apply_claim(register))
+        await _write_json_line(writer, await _apply_claim(register, pool))
         return
 
     # Abort-push short-circuit (one-shot control connection from the main
@@ -2121,6 +2556,17 @@ async def _handle_connection(
     # same uid-gated 0700 socket as Register/Claim.
     if register.get("type") == "abort":
         await _write_json_line(writer, await _apply_abort(register, pool))
+        return
+
+    # Stand-down short-circuit (one-shot control connection from a STARTING
+    # gateway): "your baked target map cannot resolve what my config needs --
+    # yield the socket". The only frame that ends the daemon, and the mechanism
+    # that turns _report_adoption_drift's warning into an actual repair. Trust
+    # basis: same uid-gated owner-only socket as Register/Claim/Abort.
+    # Validation, the already-covers refusal and auditing live in
+    # ``_apply_stand_down``.
+    if register.get("type") == "stand-down":
+        await _write_json_line(writer, _apply_stand_down(register, stop_event))
         return
 
     # App-call short-circuit (one-shot control connection from the dashboard):
@@ -2177,10 +2623,50 @@ async def _handle_connection(
     # the safe default in both directions: an overlay written before the flag
     # existed never silently starts sharing, and a malformed frame cannot widen
     # a connection's blast radius beyond itself.
-    exclusive_stub_uuid = "" if register.get("poolable") is True else stub_uuid
+    poolable_requested = register.get("poolable") is True
+    exclusive_stub_uuid = "" if poolable_requested else stub_uuid
+
+    # Retreat: a server OBSERVED behaving per-client while shared is not pooled
+    # again, whatever the overlay still says. This is the consuming half of the
+    # hazard ledger. Without it, recording a hazard changed a label on the MCP
+    # page and nothing else, so "share by default, retreat when observed" had no
+    # retreat -- the ledger's own evidence never reached a routing decision.
+    #
+    # The identity-checked read is the right one precisely BECAUSE this acts on
+    # the verdict: it answers for the program this launch actually runs, so an
+    # upgrade or a config edit re-earns pooling instead of leaving the server
+    # stranded on evidence about the build it replaced.
+    #
+    # Per-connection and per-key, so nothing global is switched off: every other
+    # server keeps pooling, and this one still gets a working PRIVATE backend --
+    # the same topology it would have with no gateway at all. The cost of a
+    # wrong retreat is therefore lost process reuse, never a broken server.
+    if poolable_requested:
+        observed = hazards.observed_codes(
+            pool_key.server_name,
+            hazards.launch_identity(
+                pool_key.command_args_hash,
+                pool_key.effective_env_hash,
+                pool_key.binary_version,
+            ),
+        )
+        if observed:
+            exclusive_stub_uuid = stub_uuid
+            logger.warning(
+                "hazard retreat: serving %r a private backend because %s was "
+                "observed while it was shared",
+                pool_key.server_name,
+                ", ".join(observed),
+            )
 
     def _release_reservation() -> None:
         """Release the hand-out reservation this connection actually took.
+
+        Keyed on the OUTCOME, because that is what decides which acquire path
+        ran: ``pool.get_or_create`` reserves, ``pool.acquire_exclusive`` does
+        not. A hazard-retreated connection therefore reserved nothing even
+        though it asked to pool, so releasing on the REQUEST would decrement a
+        digest this connection never reserved.
 
         A private backend takes none: it never enters the shared index, so no
         sweeper can reclaim it between hand-out and attach. Releasing one anyway
@@ -2188,9 +2674,10 @@ async def _handle_connection(
         ``poolable`` is not a PoolKey dimension, so a pooled connection with an
         identical PoolKey shares the digest. That pairing is reachable whenever
         the allowlist changes under a daemon that outlives the gateway: the old
-        overlay's stub still registers poolable while the new one does not. The
-        stray decrement would drop the pooled connection's eviction protection
-        before its stub attaches.
+        overlay's stub still registers poolable while the new one does not, and
+        now also whenever a retreat lands beside a concurrent pooled connection
+        on the same key. The stray decrement would drop the pooled connection's
+        eviction protection before its stub attaches.
         """
         if not exclusive_stub_uuid:
             pool.unreserve(pool_key)
@@ -2201,6 +2688,23 @@ async def _handle_connection(
             {"type": "rejected", "reason": "missing stub_uuid"},
         )
         logger.warning("rejected Register: missing stub_uuid")
+        return
+
+    # A reserved prefix is the gateway's OWN marker: `Backend` treats any stub
+    # uuid starting with one as an internal request and skips both the MCP Apps
+    # render path and the model-visibility filter (`INTERNAL_STUB_PREFIXES`).
+    # That check is correct for requests the gateway mints itself, so the gap is
+    # here: a stub that simply NAMES itself with the prefix at registration
+    # inherits the exemption and can list tools the model is meant not to see.
+    # Refused at the door, because the prefix is not a namespace a client may
+    # enter.
+    if stub_uuid.startswith(INTERNAL_STUB_PREFIXES):
+        await _write_json_line(
+            writer,
+            {"type": "rejected", "reason": "reserved stub_uuid prefix"},
+        )
+        logger.warning("rejected Register: reserved stub_uuid prefix %r", stub_uuid)
+        _audit_reserved_stub_prefix_denied(stub_uuid)
         return
 
     caller = _caller_from_register(register)
@@ -2290,7 +2794,14 @@ async def _handle_connection(
         logger.exception("pid start-id snapshot failed for stub %s", stub_uuid)
         pid_start_ids = {}
 
-    conn = _StubConn(stub_uuid, indexed_pids, pool_key.human_readable(), caller, pid_start_ids)
+    conn = _StubConn(
+        stub_uuid,
+        indexed_pids,
+        pool_key.human_readable(),
+        caller,
+        pid_start_ids,
+        new_tenant_nonce(),
+    )
     _conn_index_add(conn)
 
     # Register this connection for the keepalive probe. Scoped to the handler's
@@ -2491,12 +3002,43 @@ async def _handle_connection(
                         # + create_task overhead so the metric stays true to name.
                         _acquire_ms = (time.monotonic() - _acquire_t0) * 1000.0
                     except _TargetUnknown as exc:
-                        _audit_pool_rejected(
+                        # An unknown target here means THIS DAEMON'S env has no
+                        # mapping -- which, at the pre-flight, can only be map
+                        # drift: a stub exists at all only because the rewriter
+                        # wrapped that server, and the stub is holding the real
+                        # ``--target-command`` on its own argv. A genuinely
+                        # unrunnable target fails later, as BackendUnavailable.
+                        # So this is fallback-ELIGIBLE: no real MCP frame has
+                        # been forwarded yet, so the stub can exec the target
+                        # directly and lose nothing but pooling.
+                        #
+                        # Loud, and named: the pre-fix behaviour was a bare
+                        # ``rejected`` with no ``fallback`` key, which the stub
+                        # reads as terminal (stub.py) -- it died in 0.2s having
+                        # logged only to a stderr nobody captures, so a whole
+                        # server's tools vanished from the session with no
+                        # attributable record anywhere. See
+                        # docs/architecture/design-notes/mcp-stub-decoupling.md.
+                        logger.warning(
+                            "ensure_backend: no target mapping for %s -- this "
+                            "daemon's target env predates the current "
+                            "stub_servers set (target map is baked at spawn and "
+                            "an adopted daemon never re-applies it). Replying "
+                            "fallback-eligible so the stub degrades to a "
+                            "per-session exec; pooling and the strict session "
+                            "key are LOST for this connection. Daemon stems: %s",
+                            pool_key.human_readable(),
+                            ",".join(resolvable_target_stems()) or "(none)",
+                        )
+                        _audit_pool_fallback(
                             caller.session_key if caller else "",
                             pool_key.human_readable(),
                             str(exc),
                         )
-                        await _write_json_line(writer, {"type": "rejected", "reason": str(exc)})
+                        await _write_json_line(
+                            writer,
+                            {"type": "rejected", "reason": str(exc), "fallback": True},
+                        )
                         return
                     except (BackendUnavailable, PoolAtCapacity) as exc:
                         logger.info(
@@ -2593,6 +3135,20 @@ async def _handle_connection(
                     # create_task overhead.
                     _lazy_elapsed_ms = (time.monotonic() - _lazy_t0) * 1000.0
                 except _TargetUnknown as exc:
+                    # Same drift as the pre-flight site, but NOT fallback-tagged:
+                    # only a pre-ensure_backend stub reaches this path and it has
+                    # already forwarded a real MCP frame, so an exec fallback
+                    # would lose that frame. Terminal is correct here -- what was
+                    # missing is saying so anywhere durable.
+                    logger.warning(
+                        "lazy-spawn: no target mapping for %s -- this daemon's "
+                        "target env predates the current stub_servers set. "
+                        "Terminal (a real frame was already forwarded, so an "
+                        "exec fallback would drop it): this server's tools will "
+                        "be ABSENT for the session. Daemon stems: %s",
+                        pool_key.human_readable(),
+                        ",".join(resolvable_target_stems()) or "(none)",
+                    )
                     _audit_pool_rejected(
                         caller.session_key if caller else "",
                         pool_key.human_readable(),
@@ -2662,7 +3218,9 @@ async def _handle_connection(
                 captured_init = dict(msg)
 
             try:
-                await backend.forward_from_stub(stub_uuid, msg, caller=caller)
+                await backend.forward_from_stub(
+                    stub_uuid, msg, caller=caller, tenant_nonce=conn.tenant_nonce
+                )
             except BackendGone as exc:
                 # Transparent respawn: a shared backend dying must NOT brick
                 # this stub's transport (which would make kiro-cli mark the
@@ -2671,17 +3229,27 @@ async def _handle_connection(
                 # handshake from the captured initialize, re-attach this stub,
                 # and fail ONLY this one in-flight request with a retryable
                 # error. The transport stays open, so the next call self-heals.
-                recovered = await _respawn_backend_for_stub(
-                    pool,
-                    pool_key,
-                    resolver,
-                    stub_uuid,
-                    writer,
-                    captured_init,
-                    backend,
-                    inbox,
-                    writer_task,
-                )
+                try:
+                    recovered = await _respawn_backend_for_stub(
+                        pool,
+                        pool_key,
+                        resolver,
+                        stub_uuid,
+                        writer,
+                        captured_init,
+                        backend,
+                        inbox,
+                        writer_task,
+                        caller=caller,
+                        conn=conn,
+                    )
+                except _ReplacementRefused as refusal:
+                    # A replacement was available but validating it said no. The
+                    # session gets the REASON, not "backend gone": that is the
+                    # difference between a stated failure it can act on and one
+                    # indistinguishable from an unrecoverable spawn.
+                    await _write_json_line(writer, _jsonrpc_error(msg, str(refusal)))
+                    return
                 if recovered is None:
                     # Genuinely unrecoverable (no captured init, circuit
                     # breaker open / capacity, or prime failed): fall back to
@@ -2891,6 +3459,91 @@ async def _acquire_backend(
     return backend, was_spawned
 
 
+class _ReplacementRefused(Exception):
+    """A respawn was rejected for a reason the SESSION should be told.
+
+    Distinct from the plain ``None`` give-ups (no captured initialize, acquire
+    rejected, prime failed) because those say nothing a client could act on
+    beyond "the backend is gone", while this one names what changed underneath
+    it. The message is put into the terminal JSON-RPC error verbatim, so it must
+    stay bounded and free of line breaks — which is what
+    :func:`~kiro_crew.mcp_gateway.tool_surface.describe_surface_change` already
+    guarantees for the tool names it reports.
+    """
+
+
+def _rekey_refusal_reason(conn: Optional["_StubConn"], captured_key: str) -> str:
+    """Why a respawn must be refused because its stub changed owner, or ``""``.
+
+    A ``claim`` frame can retarget a connection's identity on any await, and both
+    sides of the tool-set comparison belong to the CAPTURED caller — the anchor
+    is the listing that principal was served, and the probe asks as that
+    principal. Across a rekey the comparison therefore describes somebody who no
+    longer owns this stub, and on a caller-scoped server it says nothing about
+    what the live owner would be served. Re-probing would race the same way, so
+    the answer is refusal on the same fail-closed terms the subscription replay
+    already uses.
+
+    A connection that cannot answer the question (``None``) is NOT read as a
+    rekey: it simply cannot be checked.
+    """
+    live_key = _live_session_key(conn)
+    if live_key is None or live_key == captured_key:
+        return ""
+    return (
+        "the stub's owner was retargeted mid-respawn, so the tool set it was "
+        "told about cannot speak for the live owner"
+    )
+
+
+def _refuse_replacement(
+    stub_uuid: str, pool_key: PoolKey, captured_key: str, reason: str
+) -> NoReturn:
+    """Log, audit, and raise for a replacement that validation rejected.
+
+    Fail loud rather than silently: the frozen tool set lives in the client and
+    no gateway-side write can refresh it, so the only honest options are to adopt
+    a process whose schema the session cannot see has moved, or to refuse and say
+    why. Refusing lands on the give-up path this function already has — the
+    caller answers the in-flight request with a terminal error and the stub
+    reconnects — which is a stated failure at a call boundary instead of a wrong
+    one.
+
+    RAISES rather than returning ``None`` so the reason reaches the SESSION: the
+    generic give-ups answer with "backend gone", indistinguishable from an
+    unrecoverable spawn, and the one party that could act on knowing the tool set
+    moved is the client, which sees neither the log nor the audit trail.
+
+    One function for every refusal site, because a second copy is how the log
+    line, the audit event and the client's message drift apart.
+    """
+    logger.warning(
+        "respawn give-up (replacement rejected) stub=%s pool=%s: %s",
+        stub_uuid,
+        pool_key.human_readable(),
+        reason,
+    )
+    _audit_replacement_validated(captured_key, pool_key.human_readable(), "denied", reason)
+    raise _ReplacementRefused(
+        f"the MCP server was replaced and its tool set changed ({reason}); "
+        f"this session's tools are stale — reconnect to pick up the new ones"
+    )
+
+
+def _live_session_key(conn: Optional["_StubConn"]) -> Optional[str]:
+    """The session key that owns ``conn`` RIGHT NOW, or ``None`` when unknowable.
+
+    A ``claim`` frame retargets a connection's identity, and it can land on any
+    await — so a decision a respawn made from the caller captured at request
+    time has to be re-checked against this before it takes effect. ``None`` (no
+    connection threaded through) means the question cannot be asked, which is
+    NOT the same as "unchanged": a caller must not read it as agreement.
+    """
+    if conn is None:
+        return None
+    return conn.caller.session_key if conn.caller is not None else ""
+
+
 async def _respawn_backend_for_stub(
     pool: BackendPool,
     pool_key: PoolKey,
@@ -2901,6 +3554,8 @@ async def _respawn_backend_for_stub(
     old_backend: Backend,
     old_inbox: Optional["asyncio.Queue[bytes]"],
     old_writer_task: Optional[asyncio.Task[None]],
+    caller: Optional[CallerContext] = None,
+    conn: Optional[_StubConn] = None,
 ) -> Optional[tuple[Backend, "asyncio.Queue[bytes]", asyncio.Task[None]]]:
     """Rebuild a fresh backend for ``stub_uuid`` after its shared backend
     died and re-bind this stub to it transparently.
@@ -2941,6 +3596,23 @@ async def _respawn_backend_for_stub(
                 # catch a hang). Mirrors _write_json_line's bounded drain.
                 await asyncio.wait_for(writer.drain(), timeout=_WRITE_REPLY_TIMEOUT_SECS)
 
+    # Captured BEFORE detach (which prunes them): the URIs whose live
+    # subscriptions must be replayed onto the replacement backend, or they
+    # silently go dark — kiro-cli never learns the old backend died, so it
+    # will never re-subscribe on its own.
+    replay_uris: list[str] = []
+    with contextlib.suppress(Exception):
+        replay_uris = old_backend.resource_subscription_uris(stub_uuid)
+    # Captured BEFORE detach for the same reason as the URIs above: the tool set
+    # THIS stub was told about is per-stub state that detach prunes, and reading
+    # it afterwards would report "nothing was ever served" for a session that
+    # was told plenty — which reads as agreement and adopts blindly.
+    old_surface: Optional[tool_surface.ToolSurface] = None
+    with contextlib.suppress(Exception):
+        old_surface = old_backend.served_tool_surface(stub_uuid)
+    # The principal this respawn is FOR, as of when the failing request arrived.
+    # Both rekey gates below re-check the live owner against it.
+    captured_key = caller.session_key if caller is not None else ""
     with contextlib.suppress(Exception):
         await old_backend.detach_stub(stub_uuid)
 
@@ -2954,14 +3626,43 @@ async def _respawn_backend_for_stub(
         )
         return None
 
+    # A respawn must honour the ledger too, or the retreat has a hole exactly
+    # where it matters most. The recycle that follows an unroutable server
+    # request comes straight back here, so re-pooling would hand the SAME stubs
+    # a shared backend for the server just observed misbehaving -- and no new
+    # register happens to re-decide it, so the retreat would not take effect
+    # until those sessions reconnected.
+    #
+    # ONE local drives both the acquire below and the release in the ``finally``,
+    # because those two must agree: only ``pool.get_or_create`` reserves, so a
+    # release keyed on a different predicate than the acquire would decrement a
+    # digest this respawn never reserved and drop a concurrent pooled
+    # connection's eviction protection.
+    respawn_exclusive_uuid = stub_uuid if old_backend.exclusive_token else ""
+    if not respawn_exclusive_uuid and hazards.observed_codes(
+        pool_key.server_name,
+        hazards.launch_identity(
+            pool_key.command_args_hash,
+            pool_key.effective_env_hash,
+            pool_key.binary_version,
+        ),
+    ):
+        respawn_exclusive_uuid = stub_uuid
+        logger.warning(
+            "hazard retreat on respawn: %r comes back private because a "
+            "hazard is on record for this launch",
+            pool_key.server_name,
+        )
+
     try:
         new_backend, _ = await _acquire_backend(
             pool,
             pool_key,
             resolver,
             # A respawn must not silently promote a private backend into the
-            # shared bucket: the replacement inherits the original binding.
-            exclusive_stub_uuid=stub_uuid if old_backend.exclusive_token else "",
+            # shared bucket: the replacement inherits the original binding,
+            # unless the ledger has since argued against sharing it at all.
+            exclusive_stub_uuid=respawn_exclusive_uuid,
         )
     except (_TargetUnknown, BackendUnavailable, PoolAtCapacity, OSError) as exc:
         logger.info(
@@ -2994,13 +3695,112 @@ async def _respawn_backend_for_stub(
                 exc,
             )
             return None
+        # Validate the replacement's tool set BEFORE adopting it. Priming the
+        # captured handshake proves the fresh process talks MCP; it says nothing
+        # about what it publishes, and ``initialize`` metadata does not describe
+        # a tool set — so up to here a server upgraded in place could keep its
+        # protocolVersion, capabilities and serverInfo while renaming a tool or
+        # tightening a required field, and this stub's session would go on
+        # issuing calls built against the schema the DEAD process published.
+        #
+        # Only asked when this stub was actually served a listing: with no
+        # claim on record there is nothing a replacement can contradict, and
+        # refusing then would turn a recovery this path already performs today
+        # into a failure on no evidence. ``old_surface`` was captured above,
+        # before the detach that prunes it.
+        if old_surface is not None:
+            drift = tool_surface.describe_surface_change(
+                old_surface,
+                await new_backend.probe_tool_surface(
+                    caller=caller,
+                    tenant_nonce=(conn.tenant_nonce if conn is not None else ""),
+                ),
+            ) or _rekey_refusal_reason(conn, captured_key)
+            if drift:
+                # The fresh backend is deliberately left in the pool. Its tool
+                # set is wrong only for a session holding the OLD declaration;
+                # a session that starts after this reads the new one correctly
+                # and legitimately, so tearing it down would punish every
+                # future session for this one's frozen view.
+                _refuse_replacement(stub_uuid, pool_key, captured_key, drift)
         new_inbox = await new_backend.attach_stub(stub_uuid)
+        if replay_uris and conn is not None:
+            # Rekey race: a ``claim`` frame can retarget this connection's
+            # identity during the awaits above (acquire + prime). The
+            # captured URIs belong to the OLD principal — replaying them
+            # now would resubscribe the old owner's resources onto the
+            # rekeyed stub, the exact leak ``evict_stub_subscriptions``
+            # exists to prevent. Recheck the live owner at the last moment
+            # and skip the replay when it changed (fail closed: the new
+            # owner subscribes on its own; the old owner's leases on the
+            # dead backend died with it).
+            if _live_session_key(conn) != captured_key:
+                logger.info(
+                    "respawn skipping subscription replay (owner rekeyed "
+                    "mid-respawn) stub=%s pool=%s",
+                    stub_uuid,
+                    pool_key.human_readable(),
+                )
+                replay_uris = []
+        if replay_uris:
+            # A server refusal of an individual replayed subscribe is
+            # fail-closed by design (the update goes undelivered, never
+            # mis-attributed). A WRITE failure is different: the fresh
+            # backend's pipe is already broken, so reporting this respawn
+            # as a success would hand the stub a backend whose replayed
+            # subscriptions are silently dark forever. Give up loudly —
+            # the caller tears the stub down and kiro-cli reconnects.
+            try:
+                await new_backend.replay_resource_subscriptions(
+                    stub_uuid, replay_uris, caller=caller
+                )
+            except BackendGone as exc:
+                logger.info(
+                    "respawn give-up (subscription replay failed) " "stub=%s pool=%s: %s",
+                    stub_uuid,
+                    pool_key.human_readable(),
+                    exc,
+                )
+                await new_backend.detach_stub(stub_uuid)
+                return None
     finally:
         # A private backend never took a reservation, and releasing one would
         # decrement a POOLED connection sharing this digest (see
-        # ``_release_reservation`` in the connection handler).
-        if not old_backend.exclusive_token:
+        # ``_release_reservation`` in the connection handler). Read the SAME
+        # local the acquire used, not ``old_backend.exclusive_token``: a hazard
+        # retreat above can make this respawn private while the old backend was
+        # pooled, and the two must not disagree.
+        if not respawn_exclusive_uuid:
             pool.unreserve(pool_key)
+    # LAST word on ownership, and the one that actually closes the window. The
+    # check beside the comparison above is an optimisation — it avoids the attach
+    # and the replay when the owner has already moved — but ``attach_stub`` and
+    # ``replay_resource_subscriptions`` both await, so a claim can still land
+    # between that check and here. Everything from this point to the return is
+    # synchronous, so a re-check here leaves no gap.
+    #
+    # Only when a surface was validated: with no anchor the comparison never
+    # happened, so a rekey invalidates nothing, and refusing would fail a
+    # recovery this path performs today on no evidence.
+    if old_surface is not None:
+        late_rekey = _rekey_refusal_reason(conn, captured_key)
+        if late_rekey:
+            # Detach what was just attached, or this backend's refcount keeps a
+            # stub that is about to be told the adoption failed.
+            with contextlib.suppress(Exception):
+                await new_backend.detach_stub(stub_uuid)
+            _refuse_replacement(stub_uuid, pool_key, captured_key, late_rekey)
+    if old_surface is not None:
+        # The claim follows the SESSION, not the process that answered it. The
+        # anchor was recorded on the backend that just died; leaving it there
+        # would make this replacement anchor-less, so the NEXT respawn of this
+        # stub would have nothing to compare and would adopt blindly — the guard
+        # would cover only the first process swap in a session's life, while the
+        # client's frozen tool set is still the one from its original listing.
+        #
+        # Set after the ownership re-check above, so a refused adoption never
+        # seeds a surface onto a backend the stub is not going to use.
+        new_backend.carry_served_tool_surface(stub_uuid, old_surface)
     new_writer_task = asyncio.create_task(
         _drain_inbox_to_stub(new_inbox, writer, stub_uuid),
         name=f"mcp-gateway-stub-writer-{stub_uuid[:8]}",
@@ -3010,6 +3810,24 @@ async def _respawn_backend_for_stub(
         stub_uuid,
         new_backend.pid,
         pool_key.human_readable(),
+    )
+    # Audited HERE, not at the comparison: this is the point the replacement
+    # actually gains authority to serve the session — stub attached,
+    # subscriptions replayed, writer task live. An event emitted earlier would
+    # record authority that a later give-up revokes.
+    #
+    # An adoption with no anchor is recorded too, and says so. The alternative —
+    # audit only when a comparison ran — would leave the swap this guard exists
+    # to make visible unrecorded in exactly the case where nothing checked it.
+    _audit_replacement_validated(
+        captured_key,
+        pool_key.human_readable(),
+        "allowed",
+        (
+            f"tool set verified: {len(old_surface)} tool(s) unchanged"
+            if old_surface is not None
+            else "tool set not verified: this stub was served no listing"
+        ),
     )
     return new_backend, new_inbox, new_writer_task
 
@@ -3204,41 +4022,19 @@ def _count_open_fds() -> int:
     the count per snapshot lets us confirm or eliminate that path without
     deploying a separate tracer.
 
-    Platform implementations:
-    - Linux: ``/proc/self/fd``
-    - macOS/BSD: ``/dev/fd``
-    - Windows: ``GetProcessHandleCount`` via ctypes (handle count, not
-      fd count — the field documents this as platform-dependent)
+    Delegates to :func:`platform_compat.count_open_fds` — the one shared
+    per-platform probe (Linux ``/proc/self/fd``, macOS/BSD ``/dev/fd``,
+    Windows ``GetProcessHandleCount``), also behind the
+    ``kirocrew.process.open_fds`` gauge — so this diagnostic cannot drift
+    from the figure the metrics report. The shared probe subtracts the
+    enumeration fd on POSIX, so the value here is exactly one lower than the
+    raw count the pre-consolidation duplicate reported; immaterial for a
+    zombie-diagnostic snapshot field.
 
     Returns ``-1`` when the platform cannot provide the value.
     """
-    # Linux — preferred, most precise.
-    try:
-        return len(os.listdir("/proc/self/fd"))
-    except OSError:
-        pass
-
-    # macOS / BSD — /dev/fd is a per-process virtual directory.
-    try:
-        return len(os.listdir("/dev/fd"))
-    except OSError:
-        pass
-
-    # Windows — count kernel handles for the current process.
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-            handle_count = wintypes.DWORD()
-            current_process = kernel32.GetCurrentProcess()
-            if kernel32.GetProcessHandleCount(current_process, ctypes.byref(handle_count)):
-                return handle_count.value
-        except (OSError, AttributeError, ValueError):
-            pass
-
-    return -1
+    count = _shared_count_open_fds()
+    return -1 if count is None else count
 
 
 def _read_rss_kb() -> int:
@@ -3313,8 +4109,15 @@ def _snapshot_state(
     }
 
 
-def _write_diagnostic(path: Path, record: dict[str, Any]) -> None:
-    """Append one JSONL line to the diagnostic side-channel.
+def _write_diagnostic(path: Path, *records: dict[str, Any]) -> None:
+    """Append one JSONL line per record to the diagnostic side-channel.
+
+    Records that belong to the same event MUST be passed in a single call:
+    they share one open-append-close cycle. Back-to-back appends from
+    separate calls can collide on Windows — an open that lands while the
+    previous writer's handle is still closing fails with a sharing
+    violation — and the never-raises contract below turns that transient
+    collision into a silently dropped record.
 
     Never raises — the diagnostic task is defensive enough that a missing
     directory or EROFS on the log volume must not crash gatewayd itself.
@@ -3322,7 +4125,8 @@ def _write_diagnostic(path: Path, record: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+            for record in records:
+                fh.write(json.dumps(record, separators=(",", ":")) + "\n")
     except OSError as exc:  # pragma: no cover — defensive
         logger.warning("zombie diagnostic write failed: %s", exc)
 
@@ -3337,13 +4141,14 @@ async def _zombie_diagnostic(
 
     Every :data:`_ZOMBIE_PROBE_INTERVAL_SECS` seconds:
 
-    1. Collect a health snapshot via :func:`_snapshot_state`.
-    2. Append the snapshot to the diagnostic JSONL under the ``probe`` tag
-       so there is a continuous baseline to correlate against.
-    3. If ``server.is_serving()`` is ``False`` while ``stop_event`` is
-       still unset, the accept loop has died silently — dump every live
-       task stack, log at error level, and set ``stop_event`` so the
-       process exits cleanly and the watchdog respawns us.
+    1. Collect a health snapshot via :func:`_snapshot_state`, tagged
+       ``probe`` — the continuous baseline to correlate against.
+    2. If ``server.is_serving()`` is ``False`` while ``stop_event`` is
+       still unset, the accept loop has died silently — append the probe
+       baseline and a ``zombie_detected`` dump of every live task stack
+       through a single write, log at error level, and set ``stop_event``
+       so the process exits cleanly and the watchdog respawns us.
+    3. Otherwise append just the probe baseline.
     """
     diag_path = _zombie_diagnostic_path()
     try:
@@ -3367,23 +4172,31 @@ async def _zombie_diagnostic(
                 task_count=task_count,
             )
             snap["tag"] = "probe"
-            await asyncio.to_thread(_write_diagnostic, diag_path, snap)
 
             if snap["is_serving"] is False and not stop_event.is_set():
-                snap["tag"] = "zombie_detected"
-                snap["tasks"] = _collect_task_stacks()
-                snap["traceback"] = traceback.format_stack()
-                await asyncio.to_thread(_write_diagnostic, diag_path, snap)
+                # The accept loop died silently. The probe baseline and the
+                # zombie dump go through ONE _write_diagnostic call (a single
+                # open) — two back-to-back appends race on Windows, where the
+                # second open can hit a sharing violation while the first
+                # writer's handle is still closing, silently dropping the
+                # zombie_detected record.
+                dump = dict(snap)
+                dump["tag"] = "zombie_detected"
+                dump["tasks"] = _collect_task_stacks()
+                dump["traceback"] = traceback.format_stack()
+                await asyncio.to_thread(_write_diagnostic, diag_path, snap, dump)
                 logger.error(
                     "zombie gatewayd detected: is_serving=False while stop_event unset; "
                     "tasks=%d fd=%d rss_kb=%d — diagnostic dumped to %s; setting stop_event",
-                    snap["task_count"],
-                    snap["fd_count"],
-                    snap["rss_kb"],
+                    dump["task_count"],
+                    dump["fd_count"],
+                    dump["rss_kb"],
                     diag_path,
                 )
                 stop_event.set()
                 return
+
+            await asyncio.to_thread(_write_diagnostic, diag_path, snap)
     except asyncio.CancelledError:
         pass
 
@@ -3440,6 +4253,16 @@ def _build_argparser() -> argparse.ArgumentParser:
         "(default) disables the watcher entirely.",
     )
     p.add_argument(
+        "--owner-pid",
+        dest="owner_pid",
+        type=int,
+        default=0,
+        help="PID of the gateway process this daemon serves. When set, the daemon "
+        "exits gracefully once that process is gone (checked with its start time, "
+        "so a recycled PID does not count), instead of lingering to be adopted by "
+        "a later gateway that may run different code. 0 (default) disables it.",
+    )
+    p.add_argument(
         "--log-level",
         dest="log_level",
         default=os.environ.get("MC_GATEWAYD_LOG", "INFO"),
@@ -3458,6 +4281,13 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
     stop_event = asyncio.Event()
 
     loop = asyncio.get_running_loop()
+
+    # ── Name the default executor ──
+    # asyncio.to_thread and run_in_executor(None, ...) route onto the loop's
+    # default executor, which Python names threads anonymously.  This names
+    # them ``mc-default`` so profilers like py-spy can attribute blocking work
+    # to this gateway.  Must run BEFORE any to_thread offload.
+    configure_default_executor()
 
     # Catch exceptions that slip past per-task handlers — e.g. a
     # fire-and-forget coroutine that blows up without ``await``. Without
@@ -3511,6 +4341,7 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
             stop_event=stop_event,
             prewarm_count=args.prewarm_count,
             credential_watch_paths=[Path(p) for p in args.credential_watch_paths],
+            owner_pid=max(0, int(args.owner_pid or 0)),
         )
     except Exception:
         logger.exception("gatewayd exited with unhandled exception")

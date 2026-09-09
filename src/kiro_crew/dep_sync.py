@@ -90,6 +90,7 @@ except ImportError:  # Python 3.10, which this project still supports
     except ImportError:
         _toml = None  # type: ignore[assignment]
 
+
 #: How a caller receives this module's own messages: ``(message, is_error)``.
 #: Positional rather than keyword so a caller can pass a plain two-argument
 #: function without importing anything from here.
@@ -104,6 +105,66 @@ _NAME_END = re.compile(r"[\s<>=!~;\[(]")
 #: through, so it is the one whose staleness has to be reported rather than
 #: silently tolerated.
 _SCRIPT = "kirocrew"
+
+
+def console_script_path(target_py: Path) -> Path:
+    """The console-script file *target_py*'s venv would install for ``kirocrew``.
+
+    Platform-aware, matching the same ``sys.platform`` split ``locked_console_scripts``
+    uses: on Windows the entry point is ``Scripts\\kirocrew.exe`` beside the
+    interpreter; on POSIX it is ``bin/kirocrew``. ``Path.with_name`` keeps it in the
+    interpreter's own directory (``bin`` or ``Scripts``) without hardcoding either.
+    A pure path computation -- no filesystem or subprocess -- so callers can stat it
+    cheaply. Avoids the POSIX-only ``bin/kirocrew`` assumption in a module that
+    exists precisely for the Windows locked-``Scripts\\kirocrew.exe`` case.
+    """
+
+    if sys.platform == "win32":
+        return Path(target_py).with_name(f"{_SCRIPT}.exe")
+    return Path(target_py).with_name(_SCRIPT)
+
+
+def project_venv_python(repo: Path) -> Path:
+    """The interpreter path for this project's managed ``.venv``.
+
+    Keep the gateway repair target and the dependency sync's ownership exception
+    on one platform-aware calculation. The exception is safe only for this exact
+    lexical path; resolving it would erase a POSIX venv's symlink identity.
+    """
+    if sys.platform == "win32":
+        return Path(repo) / ".venv" / "Scripts" / "python.exe"
+    return Path(repo) / ".venv" / "bin" / "python"
+
+
+def _is_redirecting_directory(path: Path) -> bool:
+    """Return whether *path* redirects writes outside its lexical directory."""
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction and is_junction())
+    except OSError:
+        # An ownership exception must fail closed when its layout cannot be read.
+        return True
+
+
+def _is_owned_project_venv_target(repo: Path, target_py: Path) -> bool:
+    """Verify the narrow filesystem target eligible for missing-package repair.
+
+    The final interpreter is deliberately allowed to be a symlink: POSIX
+    ``python -m venv`` commonly creates it that way. The directories that contain
+    pip's writes are not; redirecting either ``.venv`` or ``bin``/``Scripts``
+    would turn the lexical path equality below into authority over another tree.
+    """
+    target = os.path.normcase(os.path.abspath(target_py))
+    expected_py = project_venv_python(repo)
+    expected = os.path.normcase(os.path.abspath(expected_py))
+    if target != expected:
+        return False
+    return not any(
+        _is_redirecting_directory(path) for path in (Path(repo) / ".venv", expected_py.parent)
+    )
+
 
 #: This project's own distribution name, normalized. Asking pip for it is the one
 #: request that would rewrite the locked console script.
@@ -369,12 +430,62 @@ def requires_python(repo: Path) -> str | None:
     return cfg.get("options", "python_requires").strip() or None
 
 
-def interpreter_version(target_py: Path) -> tuple[int, int, int] | None:
-    """``(major, minor, micro)`` of *target_py*, or ``None`` if it cannot be asked."""
-    proc = subprocess.run(
-        [str(target_py), "-c", "import sys;print('%d.%d.%d' % sys.version_info[:3])"],
+def _probe_interpreter(
+    target_py: Path, code: str, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run *code* under *target_py*, isolated from the caller's CWD and env.
+
+    Every probe here asks a question about the VENV -- where it resolves this
+    package, which interpreter version it runs, what its console script
+    dispatches to -- so the answer must not depend on the process asking.
+    Without isolation it does, by two routes: ``python -c`` puts the child's
+    CWD at ``sys.path[0]``, so a caller running from a checkout's ``src/``
+    (the Dev Fleet backend does) makes ``find_spec`` resolve this package from
+    that directory for ANY target interpreter; and the child inherits
+    ``PYTHONPATH``, which shadows site-packages the same way.
+
+    ``-I`` closes both routes at once -- no CWD entry on ``sys.path``, no
+    ``PYTHONPATH``, no user-site -- while still honoring the venv's own
+    site-packages, where an editable install's ``.pth`` lives. Because ``-I``
+    implies ``-E``, an encoding request must ride the argv rather than the
+    environment: ``-X utf8`` pins the child's stdout to UTF-8 (matching the
+    decode below) where a ``PYTHONIOENCODING`` entry would be ignored,
+    keeping a non-ASCII checkout path from mangling -- or crashing -- the
+    answer on a non-UTF-8 locale. ``cwd`` is pinned to the interpreter's own
+    directory as well: under ``-I`` the working directory is never on
+    ``sys.path``, whatever it contains, so the pin exists to keep the child's
+    working directory valid even when the caller's has been deleted. The
+    interpreter path is absolutized first (without resolving symlinks, which
+    would erase a venv's identity), because a relative path -- which
+    ``shutil.which`` can return for a relative ``PATH`` entry -- would
+    otherwise be re-resolved against the changed cwd and spawn nothing.
+
+    ``code`` MUST be a fixed literal owned by the caller: this helper is the
+    spawn-audit allowlist's designated isolated-probe entry point, and its
+    "fixed argv" justification stops holding the moment caller-derived text
+    reaches the child. ``timeout`` is forwarded to :func:`subprocess.run`
+    for callers on an interactive path (the doctor, the STT toolchain scan)
+    that must not hang on a wedged interpreter; ``None`` keeps the sync
+    path's unbounded wait.
+    """
+    target = Path(os.path.abspath(target_py))
+    return subprocess.run(
+        [str(target), "-I", "-X", "utf8", "-c", code],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=target.parent,
+        timeout=timeout,
+    )
+
+
+def interpreter_version(
+    target_py: Path, timeout: float | None = None
+) -> tuple[int, int, int] | None:
+    """``(major, minor, micro)`` of *target_py*, or ``None`` if it cannot be asked."""
+    proc = _probe_interpreter(
+        target_py, "import sys;print('%d.%d.%d' % sys.version_info[:3])", timeout=timeout
     )
     if proc.returncode != 0:
         return None
@@ -430,6 +541,12 @@ def installed_package_origin(target_py: Path) -> str | None:
     what the installed dependencies will be imported alongside, so it is the thing
     worth checking.
 
+    Runs through :func:`_probe_interpreter`, so the answer describes the venv
+    rather than the caller: an unisolated probe resolves the package from the
+    calling process's CWD (or a ``PYTHONPATH`` entry) ahead of the venv's
+    site-packages, and the consumer then refuses a perfectly healthy venv as
+    "serving a different checkout".
+
     Returns ``None`` when the package cannot be located at all -- including when
     the interpreter itself cannot be run. That case is not theoretical: the caller
     resolved this path by a filesystem check, and a venv deleted between that check
@@ -443,11 +560,7 @@ def installed_package_origin(target_py: Path) -> str | None:
         "print(os.path.abspath(s.origin) if s and s.origin else '')"
     )
     try:
-        proc = subprocess.run(
-            [str(target_py), "-c", probe],
-            capture_output=True,
-            text=True,
-        )
+        proc = _probe_interpreter(target_py, probe)
     except OSError:
         return None
     if proc.returncode != 0:
@@ -645,11 +758,7 @@ def installed_console_script_target(target_py: Path, script: str) -> str | None:
         "print(next((e.value for e in d.entry_points"
         f" if e.group=='console_scripts' and e.name=={script!r}), ''))"
     )
-    proc = subprocess.run(
-        [str(target_py), "-c", probe],
-        capture_output=True,
-        text=True,
-    )
+    proc = _probe_interpreter(target_py, probe)
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
@@ -841,6 +950,8 @@ def sync_or_reinstall(
     target_py: Path,
     emit: Emit = _print_emit,
     timeout: float | None = None,
+    *,
+    allow_missing_package_repair: bool = False,
 ) -> int:
     """Bring ``target_py``'s venv up to date with ``repo``. 0 when it succeeded.
 
@@ -865,6 +976,13 @@ def sync_or_reinstall(
     anywhere a user can see -- a dashboard progress feed, a log -- owns redacting
     it first: pip echoes index URLs, which carry credentials when the operator
     configured an authenticated index.
+
+    ``allow_missing_package_repair`` is the gateway's narrow recovery contract for
+    an interrupted rebuild: the package may be absent only when ``target_py`` is
+    exactly ``<repo>/.venv``'s platform interpreter and that interpreter can run.
+    A foreign origin is never allowed, and an absent package at any other target
+    remains unproven and refused. This keeps the general ownership guard fail-closed
+    while allowing the half-built state this repair path exists to recover.
     """
     # Establish that the venv about to be written to serves THIS checkout BEFORE
     # the branch, so both paths are covered. `sync()` asks the same question again
@@ -875,9 +993,22 @@ def sync_or_reinstall(
     #
     # Without this, the reinstall branch would repeat the exact asymmetry this
     # change fixes at the Dev Fleet endpoint -- a guarded substitute beside an
-    # unguarded reinstall -- and three of this function's four callers take the
-    # checkout from configuration, so a repointed venv is reachable on all three.
-    foreign = venv_not_mapped_to(installed_package_origin(target_py), repo)
+    # unguarded reinstall -- and four of this function's five callers take the
+    # checkout from configuration, so a repointed venv is reachable on all four.
+    origin = installed_package_origin(target_py)
+    repairing_missing_package = False
+    if (
+        allow_missing_package_repair
+        and origin is None
+        and _is_owned_project_venv_target(repo, target_py)
+    ):
+        try:
+            repairing_missing_package = interpreter_version(target_py, timeout=timeout) is not None
+        except (OSError, subprocess.TimeoutExpired):
+            # ``None`` can also mean the interpreter vanished or wedged. That
+            # is not the absent-package state this exception is allowed for.
+            repairing_missing_package = False
+    foreign = None if repairing_missing_package else venv_not_mapped_to(origin, repo)
     if foreign:
         return _refuse(
             emit,
@@ -898,6 +1029,25 @@ def sync_or_reinstall(
             False,
         )
         return sync(repo, target_py, emit, timeout=timeout)
+
+    # The same requires-python gate the dependency-only substitute applies, and
+    # for the same reason -- except here pip WOULD enforce it, by refusing the
+    # build with "Requires-Python". Refusing first turns an opaque pip failure on
+    # an already-merged revision into a named reason plus the recovery hint
+    # `_refuse` prints.
+    floor_spec = requires_python(repo)
+    floor_version = interpreter_version(target_py) if floor_spec else None
+    if floor_spec and floor_version:
+        breach = python_floor_breach(floor_spec, floor_version)
+        if breach:
+            return _refuse(
+                emit,
+                f"the merged revision requires Python {floor_spec} but the target "
+                f"venv runs {floor_version[0]}.{floor_version[1]}.{floor_version[2]}, "
+                "so pip will refuse to install it.",
+                target_py,
+                repo,
+            )
 
     # `-e <repo>` rather than `-e .` with a cwd: the target is explicit in the argv
     # instead of implied by the working directory this happens to run in.
@@ -921,13 +1071,49 @@ def sync_or_reinstall(
         # 1, not pip's own code, for the same reason as the substitute branch:
         # pip's 2 (UNKNOWN_ERROR) is REFUSED's value, and this install ran.
         return 1
+    # A full editable reinstall has one success contract: pip returned 0 AND the
+    # artifacts it promises actually landed. The locked-script branch returned
+    # through ``sync`` above, so this postcondition never asks a dependency-only
+    # substitute to rewrite the wrapper it deliberately leaves alone. Keeping the
+    # check here closes every full-reinstall caller, including auto-update -- the
+    # path whose interruption can create the half-built venv this guard repairs.
+    script = console_script_path(target_py)
+    if not os.access(script, os.X_OK):
+        emit(
+            f"dep-sync: pip install -e returned 0 but the {_SCRIPT!r} console "
+            f"script at {script} is missing or not executable",
+            True,
+        )
+        return 1
+    try:
+        importable = _probe_interpreter(target_py, "import kiro_crew", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        emit("dep-sync: kiro_crew import check timed out after the pip install", True)
+        return 1
+    if importable.returncode != 0:
+        emit(
+            "dep-sync: pip install -e returned 0 but kiro_crew is not importable "
+            "in the target venv",
+            True,
+        )
+        return 1
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 3 and args[0] == "--repair-missing-package":
+        return sync_or_reinstall(
+            Path(args[1]),
+            Path(args[2]),
+            allow_missing_package_repair=True,
+        )
     if len(args) != 2:
-        print("usage: dep_sync <repo> <target-python>", file=sys.stderr)
+        print(
+            "usage: dep_sync <repo> <target-python> | "
+            "dep_sync --repair-missing-package <repo> <target-python>",
+            file=sys.stderr,
+        )
         return REFUSED
     return sync(Path(args[0]), Path(args[1]))
 

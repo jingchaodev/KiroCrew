@@ -290,9 +290,9 @@ def draft_headings(text: str, grammar: Grammar = HEAD_GRAMMAR) -> list[str]:
     Together they leave exactly one legal shape for a changelog diff: prepend one
     new ``## [X.Y.Z] — YYYY-MM-DD`` section. There is nowhere to append a per-PR
     line, because there is no draft section to append it to and the released ones
-    cannot be edited. That is the enforcement half of AGENTS.md ->
-    "Release Changelog"; the file is written when a version is bumped and at no
-    other time.
+    cannot be edited. That is the enforcement half of
+    ``docs/build/changelog.md``; the file is written when a version is bumped and
+    at no other time.
 
     A draft section is not merely untidy. ``build_release_list`` groups by
     ``base_version``, and ``base_version("Unreleased") == "Unreleased"``, so it
@@ -417,6 +417,8 @@ def _git_show(ref: str, path: str) -> str | None:
             capture_output=True,
             check=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
@@ -633,7 +635,7 @@ def main(argv: list[str]) -> int:
                 "nothing, so the Releases page shows the running version with no "
                 "notes and hangs the whole body off a row at the bottom.\n"
                 "To see what is pending instead: git log --oneline <last-tag>..HEAD\n"
-                'See AGENTS.md -> "Release Changelog".',
+                'See docs/build/changelog.md.',
                 file=sys.stderr,
             )
             return 1
@@ -641,7 +643,7 @@ def main(argv: list[str]) -> int:
     base_ref = os.environ.get("CHANGELOG_BASE_REF", "").strip()
     if not base_ref:
         print(
-            "changelog-history: no draft sections ✓; no CHANGELOG_BASE_REF, so "
+            "changelog-history: no draft sections OK; no CHANGELOG_BASE_REF, so "
             "nothing to compare shipped history against (set it to enforce, e.g. "
             "CHANGELOG_BASE_REF=origin/main)"
         )
@@ -694,13 +696,13 @@ def main(argv: list[str]) -> int:
         print(
             "\nIf a shipped section genuinely must change (a factual "
             "correction), say so explicitly in the PR body — but prefer leaving "
-            'shipped history alone. See AGENTS.md -> "Release Changelog".',
+            'shipped history alone. See docs/build/changelog.md.',
             file=sys.stderr,
         )
         return 1
 
     kept = len(parse_sections(base_text, base_grammar))
-    print(f"changelog-history: {kept} shipped section(s) at {base_ref} are intact " f"at head ✓")
+    print(f"changelog-history: {kept} shipped section(s) at {base_ref} are intact at head OK")
     return 0
 
 

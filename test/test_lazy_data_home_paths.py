@@ -34,13 +34,15 @@ Keeping the module-level name means existing ``monkeypatch.setattr(mod,
 from __future__ import annotations
 
 import ast
+from functools import lru_cache
 from pathlib import Path
+from unittest.mock import patch
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "kiro_crew"
 PATHS_MODULE = SRC / "config" / "paths.py"
 
 
-def _path_factories() -> set[str]:
+def _path_factories() -> frozenset[str]:
     """Names of the **Path-returning** helpers declared in ``config/paths.py``.
 
     Derived from the module rather than hardcoded so a newly added factory is
@@ -57,7 +59,15 @@ def _path_factories() -> set[str]:
     and a guard that cries wolf gets weakened or deleted, which costs more than
     the bug it was written to stop.
     """
-    tree = ast.parse(PATHS_MODULE.read_text(encoding="utf-8"))
+    return _path_factories_for(PATHS_MODULE)
+
+
+@lru_cache(maxsize=None)
+def _path_factories_for(paths_module: Path) -> frozenset[str]:
+    """Cached by the actual module path, so a monkeypatched ``PATHS_MODULE``
+    (see ``TestNoImportTimePathResolution``'s fake-tree tests) gets its own
+    cache entry instead of silently reusing the real tree's result."""
+    tree = ast.parse(paths_module.read_text(encoding="utf-8"))
     out: set[str] = set()
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -67,10 +77,10 @@ def _path_factories() -> set[str]:
         # covers `Path`, `Path | None`, `Optional[Path]`, `list[Path]`
         if "Path" in ast.unparse(node.returns):
             out.add(node.name)
-    return out
+    return frozenset(out)
 
 
-def _transitive_path_factories() -> set[str]:
+def _transitive_path_factories() -> frozenset[str]:
     """Transitive closure: Path-returning functions that resolve through a paths.py factory.
 
     Extends the root set (functions declared in ``paths.py``) with every
@@ -90,13 +100,20 @@ def _transitive_path_factories() -> set[str]:
       even if they return a Path -- this excludes functions that merely
       manipulate a caller-supplied Path argument.
     """
-    roots = _path_factories()
+    return _transitive_path_factories_for(SRC, PATHS_MODULE)
+
+
+@lru_cache(maxsize=None)
+def _transitive_path_factories_for(src: Path, paths_module: Path) -> frozenset[str]:
+    """Cached by the actual (src, paths_module) pair, for the same monkeypatch
+    reason as ``_path_factories_for``."""
+    roots = _path_factories_for(paths_module)
 
     # Build a map: function_name -> set of names it calls, for every
     # Path-returning function in the tree. We only need function names (not
     # qualified paths) because the guard's detector matches bare call names.
     candidates: dict[str, set[str]] = {}  # name -> called names
-    for py in sorted(SRC.rglob("*.py")):
+    for py in sorted(src.rglob("*.py")):
         if "__pycache__" in py.parts:
             continue
         try:
@@ -130,7 +147,7 @@ def _transitive_path_factories() -> set[str]:
                 forbidden.add(name)
                 changed = True
 
-    return forbidden
+    return frozenset(forbidden)
 
 
 def _called_names(node: ast.AST) -> set[str]:
@@ -143,7 +160,7 @@ def _called_names(node: ast.AST) -> set[str]:
     return out
 
 
-def _frozen_path_constants() -> list[str]:
+def _frozen_path_constants() -> tuple[str, ...]:
     """Every import-time evaluation of a path factory (transitively).
 
     Three shapes freeze identically at import and all three are covered:
@@ -161,9 +178,16 @@ def _frozen_path_constants() -> list[str]:
     paths.py factory (e.g. ``kiro_agents_dir_path()``, ``_subagents_dir()``)
     are also forbidden at module level.
     """
-    factories = _transitive_path_factories()
+    return _frozen_path_constants_for(SRC, PATHS_MODULE)
+
+
+@lru_cache(maxsize=None)
+def _frozen_path_constants_for(src: Path, paths_module: Path) -> tuple[str, ...]:
+    """Cached by the actual (src, paths_module) pair, for the same monkeypatch
+    reason as ``_path_factories_for``."""
+    factories = _transitive_path_factories_for(src, paths_module)
     offenders: list[str] = []
-    for py in sorted(SRC.rglob("*.py")):
+    for py in sorted(src.rglob("*.py")):
         if "__pycache__" in py.parts:
             continue
         # App-internal test harnesses legitimately capture the real data-home
@@ -174,12 +198,11 @@ def _frozen_path_constants() -> list[str]:
             tree = ast.parse(py.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - syntax is enforced elsewhere
             continue
-        rel = py.relative_to(SRC)
+        rel = py.relative_to(src)
 
         def _record(node: ast.AST, targets: list[str], used: set[str], kind: str) -> None:
             offenders.append(
-                f"{rel}:{node.lineno}  [{kind}] {','.join(targets)} "
-                f"= ...{sorted(used)[0]}()"
+                f"{rel}:{node.lineno}  [{kind}] {','.join(targets)} " f"= ...{sorted(used)[0]}()"
             )
 
         for node in ast.walk(tree):
@@ -207,7 +230,7 @@ def _frozen_path_constants() -> list[str]:
                     used = _called_names(d) & factories
                     if used:
                         _record(d, [f"{node.name}() default"], used, "def-default")
-    return offenders
+    return tuple(offenders)
 
 
 class TestNoImportTimePathResolution:
@@ -251,9 +274,7 @@ class TestNoImportTimePathResolution:
         bad = ast.parse("X = kiro_agents_dir_path()").body[0]
         assert isinstance(bad, ast.Assign)
         called = _called_names(bad.value)
-        assert called & factories, (
-            "kiro_agents_dir_path should be in the transitive factory set"
-        )
+        assert called & factories, "kiro_agents_dir_path should be in the transitive factory set"
         # Also for _subagents_dir
         bad2 = ast.parse("X = _subagents_dir()").body[0]
         assert _called_names(bad2.value) & factories
@@ -349,16 +370,14 @@ class TestNoImportTimePathResolution:
             encoding="utf-8",
         )
         # A module that freezes the accessor at import time
-        (fake_src / "bad_module.py").write_text(
-            "FROZEN = _subagents_dir()\n", encoding="utf-8"
-        )
+        (fake_src / "bad_module.py").write_text("FROZEN = _subagents_dir()\n", encoding="utf-8")
         monkeypatch.setattr(mod, "SRC", fake_src)
         monkeypatch.setattr(mod, "PATHS_MODULE", fake_src / "config" / "paths.py")
 
         found = _frozen_path_constants()
-        assert any("_subagents_dir" in f for f in found), (
-            f"Transitive accessor not detected: {found}"
-        )
+        assert any(
+            "_subagents_dir" in f for f in found
+        ), f"Transitive accessor not detected: {found}"
 
 
 # (module import path, override constant, accessor) for every accessor that
@@ -509,9 +528,7 @@ class TestResolutionDoesNotRepeatStartupMaintenance:
         monkeypatch.setenv("KIROCREW_HOME", str(second))
         assert paths.data_home().resolve() == second.resolve()
 
-    def test_invalid_override_does_not_reopen_the_maintenance_path(
-        self, tmp_path, monkeypatch
-    ):
+    def test_invalid_override_does_not_reopen_the_maintenance_path(self, tmp_path, monkeypatch):
         """An override naming a system dir must NOT re-run maintenance per call.
 
         ``config_dir()`` gates the override branch on ``_valid_override_home()``
@@ -555,3 +572,78 @@ class TestResolutionDoesNotRepeatStartupMaintenance:
         monkeypatch.setenv("KIROCREW_HOME", str(good))
         assert paths._valid_override_home() is not None
         assert paths.data_home().resolve() == good.resolve()
+
+
+class TestConfigDirMemoIsNotServedAfterTheHomeIsCleared:
+    """A ``config_dir()`` memo entry must not outlive the home it was built from.
+
+    The entry is keyed on ``(raw KIROCREW_HOME, resolved home)`` and the suite's
+    autouse isolation fixture clears ``_resolved_home`` per test precisely so a
+    home resolved by one test can never be served to the next. That invalidation
+    only holds if the default path keys the entry on the home it RETURNED. Keying
+    it on a re-read of the global records ``(None, None, <that test's dir>)``
+    whenever the resolution bypassed the global — a stubbed resolver, or a reset
+    of the global landing between the resolve and the store — and then every
+    later "no override, home not yet resolved" call, which is exactly the state
+    the fixture recreates, hits that entry and gets the unrelated directory.
+
+    MEASURED: with the key re-read from the global, running
+    ``test_first_resolution_still_performs_maintenance`` (it stubs the resolver)
+    before ``test/test_mcp_core.py::TestSpawnRunSessionKeyRouting::
+    test_falls_back_to_pid_file`` in one process made the latter fail — the MCP
+    session-key fallback looked for its ``session_pid_*.txt`` under the earlier
+    test's tmp dir. Under ``-n auto`` whether the two share a worker varies per
+    run, which is what made it an intermittent CI failure rather than a
+    reproducible one.
+    """
+
+    def test_entry_from_a_bypassed_resolution_is_not_served_later(self, tmp_path, monkeypatch):
+        from kiro_crew.config import paths
+
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        stubbed = tmp_path / "stubbed"
+        # The breadcrumb is incidental to what this test asserts, and it is the
+        # one part of the default path that writes OUTSIDE the resolved home:
+        # ``_write_recovery_breadcrumb`` targets ``Path.home()`` directly, so the
+        # first phase below -- which resolves through a stubbed resolver, before
+        # ``Path.home`` is patched -- would drop a real
+        # ``~/.kirocrew.breadcrumb`` on the machine running the suite.
+        monkeypatch.setattr(paths, "_write_recovery_breadcrumb", lambda _d: None)
+
+        # A resolution that never writes ``_resolved_home`` (what a stubbed
+        # resolver does, and what a concurrent reset of the global does).
+        with monkeypatch.context() as m:
+            m.setattr(paths, "_resolved_home", None)
+            m.setattr(paths, "_resolve_default_home", lambda: stubbed)
+            assert paths.config_dir() == stubbed
+            assert paths._resolved_home is None, "precondition: global left unset"
+
+        # The next caller's state: no override, resolution cache clear.
+        monkeypatch.setattr(paths, "_resolved_home", None)
+        real_home = tmp_path / "real-home"
+        with patch("pathlib.Path.home", return_value=real_home):
+            resolved = paths.config_dir()
+
+        assert (
+            resolved == real_home / ".kiro" / "crew"
+        ), f"config_dir() served a memo entry from a foreign home: {resolved}"
+
+    def test_the_memo_still_caches_a_normal_default_resolution(self, tmp_path, monkeypatch):
+        """Negative control: the fix must not turn the memo off.
+
+        Two consecutive default-path calls must hit the entry, which is what keeps
+        the breadcrumb refresh once-per-process instead of once-per-call.
+        """
+        from kiro_crew.config import paths
+
+        monkeypatch.delenv("KIROCREW_HOME", raising=False)
+        monkeypatch.setattr(paths, "_resolved_home", None)
+        calls: list[int] = []
+        monkeypatch.setattr(paths, "_write_recovery_breadcrumb", lambda d: calls.append(1))
+
+        with patch("pathlib.Path.home", return_value=tmp_path / "home"):
+            first = paths.config_dir()
+            second = paths.config_dir()
+
+        assert first == second == tmp_path / "home" / ".kiro" / "crew"
+        assert calls == [1], f"memo did not serve the second call: {calls}"

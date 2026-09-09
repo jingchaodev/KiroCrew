@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
 import shutil
+import socket
+import struct
 import sys
 import warnings
 
@@ -13,8 +16,40 @@ import pytest
 from hypothesis import HealthCheck, settings
 
 from kiro_crew.safety_override import reset_singleton as _reset_safety_override
+from kiro_crew.safety_override import reset_yolo_policy_state as _reset_yolo_policy_state
 from kiro_crew.slack.client import SlackClientOps
 from kiro_crew.slack.handler import _PHASE_EMOJIS, _build_phase_emojis
+
+if os.name == "nt":
+
+    class _WindowsTestProactorEventLoop(asyncio.ProactorEventLoop):
+        """Close the loop wakeup socket without filling Windows' TIME_WAIT table."""
+
+        def _close_self_pipe(self) -> None:
+            # Windows implements ``socketpair`` with a localhost TCP connection.
+            # pytest-asyncio 0.20 creates two fresh loops per async test, so this
+            # 62k-test suite can consume the 16,384-port dynamic range before
+            # TIME_WAIT entries expire.  Abortive close is safe for the loop's
+            # private wakeup socket (it carries no application data) and releases
+            # the port immediately while preserving a fresh Proactor loop per test.
+            linger = struct.pack("hh", 1, 0)
+            # Only the write end gets abortive close.  ``ProactorEventLoop``
+            # cancels the pending read and normally closes ``_ssock`` first;
+            # resetting that read end itself turns otherwise-clean async-test
+            # teardown into ``ConnectionResetError``.  Resetting the peer after
+            # the read end has closed still prevents a TIME_WAIT entry.
+            write_socket = self._csock
+            if write_socket is not None:
+                try:
+                    write_socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+                except OSError:
+                    pass
+            super()._close_self_pipe()
+
+    class _WindowsTestEventLoopPolicy(asyncio.WindowsProactorEventLoopPolicy):
+        _loop_factory = _WindowsTestProactorEventLoop
+
+    asyncio.set_event_loop_policy(_WindowsTestEventLoopPolicy())
 
 # ── Hypothesis profiles ─────────────────────────────────────────────────
 # Default (CI): fast iteration.  Run ``HYPOTHESIS_PROFILE=thorough python -m pytest``
@@ -23,8 +58,6 @@ settings.register_profile("default", max_examples=20, suppress_health_check=[Hea
 settings.register_profile("thorough", max_examples=100)
 settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "default"))
 
-# Ensure .hypothesis/tmp exists (build environment may not have it)
-os.makedirs(os.path.join(os.path.dirname(__file__), "..", ".hypothesis", "tmp"), exist_ok=True)
 
 _HAS_GIT = shutil.which("git") is not None
 
@@ -63,6 +96,44 @@ requires_symlinks = pytest.mark.skipif(
     not _HAS_SYMLINKS,
     reason="creating a symlink needs SeCreateSymbolicLinkPrivilege on Windows",
 )
+
+# Captured at import, BEFORE any test can monkeypatch the constant away: tests that
+# simulate the flag's absence must not be confused with a platform that truly lacks it.
+_HAS_O_NOFOLLOW = bool(getattr(os, "O_NOFOLLOW", 0))
+
+requires_o_nofollow = pytest.mark.skipif(
+    not _HAS_O_NOFOLLOW,
+    reason=(
+        "notification import refuses outright without O_NOFOLLOW, because a by-name "
+        "reparse check followed by a by-name open is a check-to-open window; the "
+        "refusal itself is covered by TestNotificationCopyRefusalWithoutONofollow"
+    ),
+)
+
+
+def _find_posix_test_shell() -> str | None:
+    """Return a real POSIX shell without mistaking Windows' WSL launcher for one."""
+    if os.name != "nt":
+        return shutil.which("sh")
+
+    git = shutil.which("git")
+    candidates: list[pathlib.Path] = []
+    if git:
+        candidates.append(pathlib.Path(git).resolve().parents[1] / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(pathlib.Path(root) / "Git" / "bin" / "bash.exe")
+    return next((str(path) for path in candidates if path.is_file()), None)
+
+
+@pytest.fixture
+def posix_test_shell() -> str:
+    """Provide a shell for POSIX command-plumbing tests on every supported host."""
+    shell = _find_posix_test_shell()
+    if shell is None:
+        pytest.skip("a POSIX test shell is not available")
+    return shell
 
 
 # ── Windows CI ──────────────────────────────────────────────────────────
@@ -145,11 +216,11 @@ def make_dir_link(link: pathlib.Path, target: pathlib.Path) -> None:
 
 @pytest.fixture(autouse=True)
 def _windows_restrict_to_owner_stub(request, monkeypatch):
-    """On Windows, no-op the icacls secret lockdown for hermetic tests.
+    """On Windows, no-op the secret lockdown for hermetic tests.
 
-    Many tests stub ``subprocess.run`` (or strip PATH) for hermeticity;
-    ``restrict_to_owner``'s whoami/icacls spawns then fail and its
-    DELIBERATE fail-loud OSError cascades into hundreds of unrelated
+    Many tests stub ``subprocess.run`` (or strip PATH) for hermeticity, or
+    monkeypatch the SID resolver; ``restrict_to_owner``'s DELIBERATE fail-loud
+    OSError then cascades into hundreds of unrelated
     tests. The real Windows implementation keeps direct coverage in
     test_platform_compat / test_spawn_audit (exempted here) and the
     POSIX chmod path keeps full coverage on the Linux matrix. Product
@@ -160,10 +231,23 @@ def _windows_restrict_to_owner_stub(request, monkeypatch):
     ``restrict_dir_to_owner`` is stubbed alongside it and must stay that
     way: it is the directory twin that ``make_owner_only_dir`` routes
     through, so stubbing only the file helper would leave every test that
-    creates an owner-only directory spawning a real icacls.
+    creates an owner-only directory writing a real DACL.
+
+    Note the lockdown no longer spawns anything -- it applies the DACL through
+    ``advapi32`` in-process -- so the subprocess-stub collision this fixture was
+    built for is mostly gone. The stub is kept because a hermetic test that
+    patches the SID resolver or the writer seam can still trip the fail-loud
+    OSError, and narrowing it is a change to hundreds of tests' blast radius
+    rather than part of the DACL swap.
     """
     if not platform_compat.IS_WINDOWS or request.module.__name__ in (
         "test_platform_compat",
+        # Exempted for the same reason as test_platform_compat: these modules own
+        # the direct Windows-branch coverage for the owner-only lockdown, so a
+        # stub would make their assertions vacuous. They were passing on Linux
+        # (where the fixture is inert) and silently asserting nothing on Windows.
+        "test_platform_compat_coverage",
+        "test_config_rmw_preserves_settings",
         "test_spawn_audit",
     ):
         yield
@@ -171,6 +255,26 @@ def _windows_restrict_to_owner_stub(request, monkeypatch):
     monkeypatch.setattr(platform_compat, "restrict_to_owner", lambda p: None)
     monkeypatch.setattr(platform_compat, "restrict_dir_to_owner", lambda p: None)
     yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _release_source_corpus_after_module():
+    """Drop ``test/source_corpus.py``'s whole-tree caches at every module's teardown.
+
+    The corpus helper memoizes the raw and NFKC-normalized text of every module
+    under ``src/`` (~160 MB) the first time any ratchet in a module asks for it,
+    and an ``lru_cache`` global otherwise lives for the rest of the xdist
+    worker -- paid by every later test on that worker. Module scope keeps the
+    sharing the ratchets rely on (one parse per module) while bounding the
+    retention to the module that needed it. Import is deferred and tolerant so a
+    module that never touches the corpus pays nothing.
+    """
+    yield
+    try:
+        from source_corpus import _clear_caches
+    except ImportError:  # pragma: no cover - a partial checkout without the helper
+        return
+    _clear_caches()
 
 
 @pytest.fixture(autouse=True)
@@ -332,11 +436,142 @@ def pytest_internalerror(excrepr, excinfo) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_safety_override_between_tests():
-    """Reset the SafetyOverride singleton between tests to prevent state leaking."""
-    _reset_safety_override()
+def _release_stt_engine():
+    """Never let a loaded speech model outlive the test that loaded it.
+
+    ``kiro_crew.stt.engine`` keeps ONE recogniser per process on purpose: the
+    whole point of the module is that an utterance does not pay for a model load.
+    Under xdist that same property makes it cross-test state, and the instance
+    carries the idle-eviction window the first caller passed, so a later test
+    reading a different setting would silently get the earlier one.
+    """
     yield
+    from kiro_crew.stt import engine as stt_engine
+
+    stt_engine._engine = None
+
+
+def absent_sysconf(name):
+    """Stand-in for a missing ``os.sysconf`` (Windows has none).
+
+    A test that fakes ONE ``os.sysconf`` name must delegate every other name to
+    the real function -- and on Windows there is no real function to delegate to.
+    Capturing ``getattr(os, "sysconf", absent_sysconf)`` gives the delegating fake
+    the same "unavailable" answer production sees there, instead of an
+    ``AttributeError`` at capture time.
+    """
+    raise ValueError(f"os.sysconf unavailable for {name!r}")
+
+
+def drain_breadcrumb_writes(timeout: float = 5.0) -> None:
+    """Block until every queued safety-override breadcrumb publish has run.
+
+    ``safety_override.flush_breadcrumb_writes`` is production's best-effort
+    drain and reports a bool; a test that relies on the drain to prove the
+    write landed inside its own context needs certainty, so a drain that does
+    not complete raises instead of returning a value a fixture could ignore.
+    """
+    from kiro_crew.safety_override import flush_breadcrumb_writes
+
+    if not flush_breadcrumb_writes(timeout):
+        raise TimeoutError(
+            f"breadcrumb worker did not drain within {timeout}s; a queued publish "
+            "may still run after this test's fixtures tear down"
+        )
+
+
+@pytest.fixture(autouse=True)
+def _reset_safety_override_between_tests():
+    """Reset the SafetyOverride singleton between tests to prevent state leaking.
+
+    The pushed ``approval_modes`` verdict is reset WITH it, because it is the same
+    leak wearing different clothes. That verdict is a module-level flag resolved when
+    a platform context is installed, and this suite installs contexts constantly
+    (~30 files call ``set_context``/``reset_context``). A DENY pushed by an earlier
+    test therefore keeps refusing yolo arms in a later one that never configured a
+    policy, which surfaces as INTERMITTENT failures in files that never touch
+    governance — which tests share an xdist worker decides whether the stale flag is
+    present. Resetting it here makes the next reader resolve the ceiling actually
+    installed.
+    """
     _reset_safety_override()
+    _reset_yolo_policy_state()
+    yield
+    # Drained BEFORE the reset below, and (by pytest's fixture teardown order --
+    # finalizers run in reverse of setup order, so a fixture set up AFTER this
+    # one, e.g. a test's own ``monkeypatch.setenv("KIROCREW_HOME", ...)``, tears
+    # down BEFORE this line runs) while any KIROCREW_HOME the test itself set is
+    # still in effect. A publish enqueued mid-test resolves ``config_dir()`` on
+    # the CALLING thread at enqueue time (see ``_sync_breadcrumb``), but the
+    # worker that runs the write is on its own thread and can still be
+    # mid-flight when the test function returns. Waiting here for that worker to
+    # finish, before this fixture's own KIROCREW_HOME-independent state reset,
+    # closes the window that let a delayed write land on the real operator home
+    # instead of the test's temp dir (found in review).
+    drain_breadcrumb_writes()
+    _reset_safety_override()
+    _reset_yolo_policy_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_degraded_config_observations():
+    """Forget the loader's process-sticky malformed-config observations.
+
+    ``kiro_crew.config.loader`` remembers every malformed config section it has
+    ever seen for the LIFE OF THE PROCESS (deliberately: ``load()``'s migration
+    repairs the file on first read, so the observation is the only surviving
+    evidence, and the publish gate fails closed on it). Tests share one
+    interpreter, so without this reset any test that writes a malformed
+    ``config.json`` — loader error-path tests do — makes the publish/deploy
+    gate deny in every LATER test in the same worker, failing tests in files
+    that never touched the config (seen as ``TestPending`` 4xx refusals in
+    ``test_deploy_handlers_coverage.py`` under random orderings).
+
+    ``reset_degraded_observations`` documents tests as its only legitimate
+    caller; this fixture is that caller.
+    """
+    from kiro_crew.config.loader import reset_degraded_observations
+
+    reset_degraded_observations()
+    yield
+    reset_degraded_observations()
+
+
+@pytest.fixture(autouse=True)
+def _restore_autonudge_singleton():
+    """Floor under ``autonudge._INSTANCE`` — the process-global service reference.
+
+    ``AutoNudgeService.start()`` publishes itself here and ``stop()`` clears it, so a test
+    that starts the service (or drives a dashboard handler that does) leaves a live
+    instance behind, holding timer TASKS created on that test's event loop. Every later
+    test in the same worker then reaches those tasks through the singleton, on a loop that
+    has since closed — which is how `test_dashboard_chat.py`'s
+    ``TestCloseBroadcastDurability`` came to answer 500 with no production-code change,
+    from a leak in a file that has nothing to do with it.
+
+    Restores what the test INHERITED rather than a pristine ``None``, so a leak from an
+    earlier test is not re-reported against every test after it. Restores silently rather
+    than failing: production really does publish this singleton, and a test driving that
+    code cannot avoid inheriting it — the damage is to other tests, and stopping it
+    propagating is the part that is never optional.
+
+    Retiring the leaked instance's timers goes through ``_cancel_timer``, which is the one
+    place that knows a task on a closed loop must be dropped rather than cancelled.
+    """
+    from kiro_crew import autonudge as _an
+
+    inherited = _an._INSTANCE
+    try:
+        yield
+    finally:
+        leaked = _an._INSTANCE
+        if leaked is not None and leaked is not inherited:
+            for loop_id in list(getattr(leaked, "_timers", {})):
+                try:
+                    leaked._cancel_timer(loop_id)
+                except Exception:  # noqa: BLE001 - teardown must not mask the test result
+                    pass
+        _an._INSTANCE = inherited
 
 
 @pytest.fixture(autouse=True)
@@ -375,7 +610,7 @@ def _disable_dev_fleet_background_tasks(monkeypatch):
     still be running when the test's client tears down, and cancelling it then
     is what leaked into unrelated tests and flaked ``Gateway Tests (macOS)``
     (issue #1832). A test that wants the real refresher overrides this itself
-    via ``monkeypatch.setattr(mod, "_background_tasks_disabled", lambda: False)``.
+    via ``monkeypatch.setattr(worktree_ops, "_background_tasks_disabled", lambda: False)``.
     """
     monkeypatch.setenv("KIROCREW_DEVFLEET_NO_BACKGROUND", "1")
 
@@ -435,16 +670,25 @@ def _isolate_message_entry_cache():
 
     The byte counter is part of the same state, so resetting only the dict would
     leave the memory ceiling mis-accounted and evict a healthy cache.
+
+    The memoised config bounds are reset for the same reason: they are resolved
+    once per process from whatever KIROCREW_HOME the first caller saw, so a test
+    that resolved them under its own home would otherwise leak its bounds into
+    every later test's cache behaviour.
     """
     from kiro_crew.dashboard import chat_persistence as _cp
 
     _cp._entry_cache.clear()
     _cp._entry_cache_bytes = 0
+    _cp._entry_cache_bounds_cached = None
+    _cp._entry_cache_bounds_read_warned = False
     try:
         yield
     finally:
         _cp._entry_cache.clear()
         _cp._entry_cache_bytes = 0
+        _cp._entry_cache_bounds_cached = None
+        _cp._entry_cache_bounds_read_warned = False
 
 
 @pytest.fixture(autouse=True)
@@ -525,12 +769,29 @@ def _ensure_event_loop():
         ``run_until_complete`` blows up with ``RuntimeError: Event loop is closed``. We
         detect a closed/absent loop and install a fresh open one so each test starts clean.
     """
+    created_loop = None
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            created_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(created_loop)
     except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+        created_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(created_loop)
+
+    yield
+
+    # ``asyncio.run`` clears the policy's current loop, so the next test needs a
+    # replacement.  On Windows each ProactorEventLoop owns a socketpair; leaving
+    # every replacement open eventually exhausts the ephemeral-port range and
+    # makes ``new_event_loop()`` hang until pytest kills every xdist worker.
+    if created_loop is not None and not created_loop.is_closed():
+        created_loop.close()
+    try:
+        if asyncio.get_event_loop() is created_loop:
+            asyncio.set_event_loop(None)
+    except RuntimeError:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -1007,3 +1268,213 @@ def named_cron_caller(monkeypatch):
     key = "dashboard:conftest-slot"
     monkeypatch.setenv("KIROCREW_SESSION_KEY", key)
     return key
+
+
+#: Comfortably clear of both memory guards ``SubagentManager.spawn`` runs: the
+#: absolute floor (``agent.spawn_min_memory_gb``, 4 GB) and the posture tier
+#: (``agent.resource_critical_gb``, 2 GB).
+_HEALTHY_AVAILABLE_GB = 8.0
+
+
+@pytest.fixture
+def healthy_host_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the host-memory readings ``SubagentManager.spawn`` consults.
+
+    ``spawn`` refuses -- returning before it registers anything in ``_tasks`` --
+    whenever the machine looks short of memory, and it does so twice: an
+    absolute floor (``check_memory_available`` against
+    ``agent.spawn_min_memory_gb``) and the posture tier
+    (``cached_admission_check``, which refuses while the cgroup-clamped reading
+    is CRITICAL). Both read the host the suite happens to be running on, so
+    without this the verdict is the operator's machine rather than the test's
+    own input.
+
+    The failure it produces is misleading, which is why it is worth a shared
+    fixture: a refusal IS a ``SubagentInfo`` -- a done one carrying ``error`` --
+    so ``assert info is not None`` still passes and the test dies one line later
+    on ``mgr._tasks[info.id]`` with a bare ``KeyError``. Measured on a CI runner
+    with ~0.5 GB free.
+
+    Only the HOST reading is pinned: a caller that names its own ``path`` is
+    feeding the ``/proc/meminfo`` parser a fixture file rather than asking about
+    this machine, so it still runs the real function and a parser regression
+    still goes red. A test that is actually ABOUT either guard patches it in its
+    own body, which lands on top of this and reverts to it.
+    """
+    import kiro_crew.resource_status as resource_status
+    import kiro_crew.subagent as subagent
+
+    real_check = subagent.check_memory_available
+
+    def _pinned_check(
+        min_gb: float | None = None, path: str | None = None
+    ) -> tuple[bool, float]:
+        if path is None:
+            return (True, _HEALTHY_AVAILABLE_GB)
+        if min_gb is None:
+            return real_check(path=path)
+        return real_check(min_gb=min_gb, path=path)
+
+    def _admit() -> resource_status.AdmissionDecision:
+        return resource_status.AdmissionDecision(
+            admitted=True,
+            posture=resource_status.POSTURE_AMPLE,
+            available_gb=_HEALTHY_AVAILABLE_GB,
+        )
+
+    monkeypatch.setattr(subagent, "check_memory_available", _pinned_check)
+    # Also keeps the 5s-TTL refresh thread behind the cached verdict from
+    # starting, so no test leaves one probing the host after it ends.
+    monkeypatch.setattr(subagent, "cached_admission_check", _admit)
+
+
+@pytest.fixture(autouse=True)
+def _reset_create_rate_limit_buckets():
+    """Clear the session/folder creation rate limiter between tests.
+
+    ``kiro_crew.dashboard.create_rate_limit`` keeps its per-(verb, caller)
+    buckets in MODULE-LEVEL state (deliberately: the production guard needs no
+    durable state), so every session-creating test in a pytest process
+    accumulates timestamps under shared caller keys. A shard whose test
+    composition performs more than the per-window budget of creates within one
+    wall-clock window then refuses a legitimate test create with
+    ``create_rate_limited`` — a pass/fail outcome decided by shard composition
+    and runner speed, not the code under test (#7836; observed twice on the
+    Windows shard in one day, on PRs touching neither the limiter nor
+    session_control). The limiter's own direct tests build their scenarios on
+    top of a clean slate, so clearing between tests changes nothing for them.
+    """
+    from kiro_crew.dashboard import create_rate_limit
+
+    with create_rate_limit._lock:
+        create_rate_limit._buckets.clear()
+    yield
+    with create_rate_limit._lock:
+        create_rate_limit._buckets.clear()
+
+
+#: Test modules that own direct coverage of ``mcp_core``'s HTTP plumbing itself.
+#: They call the real ``_post`` (or drive a tool through it) with the transport
+#: patched BELOW it (``loopback_urlopen`` / ``_api_urlopen``), so a recorder
+#: stub above ``_post`` would blind exactly the assertions those modules exist
+#: to make. An exemption is NOT permission to reach the network: the fixture
+#: below leaves ``_post`` real for these modules but replaces the transport
+#: with a refuser, so a test here that forgets its own transport patch gets a
+#: deterministic local failure instead of dialling the operator's gateway.
+_REAL_MCP_POST_MODULES = frozenset(
+    {
+        "test_ephemeral_sessions",
+        "test_mcp_api_base_resolution",
+        "test_mcp_core",
+        "test_mcp_core_coverage",
+        "test_mcp_internal_caller",
+    }
+)
+
+
+class _InertGatewayPosts(list):
+    """What an exempt module sees if it requests ``gateway_posts`` by name.
+
+    No recorder ever appends here, so an equality check would pass vacuously
+    (``== []``) or fail for a reason unrelated to the code under test. Refusing
+    the comparison turns that silent vacuity into an immediate, named failure.
+    """
+
+    def __eq__(self, other: object) -> bool:  # pragma: no cover - failure path
+        raise AssertionError(
+            "gateway_posts is inert in a _REAL_MCP_POST_MODULES module: the"
+            " recorder is not installed there, so nothing is ever appended."
+            " Assert against your own transport patch instead."
+        )
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+@pytest.fixture(autouse=True)
+def gateway_posts(request, monkeypatch):
+    """Record ``mcp_core._post`` calls instead of letting them reach a gateway.
+
+    ``mcp_tools.control._emit_directive`` publishes every directive out of band
+    via ``mcp_core._post("/api/session-directive", ...)`` on the resolved API
+    port and swallows every exception — so a test that emits a directive
+    without stubbing ``_post`` makes a REAL request to whatever is listening
+    there, silently. On a developer machine that is the operator's own live
+    gateway, and the request carries a real-looking session key. The suite only
+    avoided a live write because this conftest's ``KIROCREW_HOME`` pin makes
+    the client read a different instance credential, so the gateway refuses the
+    call — an unrelated guard no test is entitled to rely on. Stubbing here
+    makes reaching the network opt-in for the whole suite rather than opt-out.
+
+    A RECORDER rather than a black hole, so the stub also buys coverage: the
+    out-of-band publish is half of the directive contract (marker + parked
+    record), and a test can request this fixture by name and assert on the
+    ``(path, payload)`` records. The payload is round-tripped through JSON so a
+    non-serializable body fails HERE — the point where the real ``_post`` would
+    have failed (and ``_emit_directive`` would have silently swallowed it). The
+    stub returns ``{}``: falsy for ``.get("ok")`` readers and free of
+    ``"error"``, it invents no success shape the real ``_post`` never promised.
+
+    Opting back in stays explicit and layered: a test's own
+    ``monkeypatch.setattr(mcp_core, "_post", ...)`` simply replaces this stub
+    for that test, and a module that owns direct coverage of ``_post``'s own
+    plumbing lists itself in ``_REAL_MCP_POST_MODULES``. For those modules the
+    transport is replaced with a refuser instead (their per-test transport
+    patches override it), so the no-traffic property holds per test rather
+    than resting on every future test remembering its own patch.
+    """
+    from kiro_crew import mcp_core
+
+    if getattr(request.module, "__name__", "") in _REAL_MCP_POST_MODULES:
+
+        def _refuse_network(*args, **kwargs):
+            raise AssertionError(
+                "test reached mcp_core's real transport: patch"
+                " loopback_urlopen/_api_urlopen (or _post) in the test itself"
+            )
+
+        monkeypatch.setattr(mcp_core, "loopback_urlopen", _refuse_network)
+        yield _InertGatewayPosts()
+        return
+
+    posted: list[tuple[str, dict | None]] = []
+
+    def _capture(path: str, body: dict | None = None, **kwargs) -> dict:
+        posted.append((path, json.loads(json.dumps(body)) if body is not None else None))
+        return {}
+
+    monkeypatch.setattr(mcp_core, "_post", _capture)
+    yield posted
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_interleave_hook():
+    """Fail a test that INHERITED a set ``chat_handlers._test_interleave``.
+
+    The seam suspends a session teardown mid-pop, so a leaked hook does not
+    merely pollute state -- it re-enters an unrelated test's teardown path and
+    can await an event that test will never set, which under ``-n auto`` reads as
+    a timeout in a file that never mentioned the seam. Nothing legitimately
+    leaves it set, so this restores AND fails.
+
+    Checked on the way IN, not at teardown, and that is not a preference. The
+    supported way to set the hook is ``monkeypatch``, whose undo is registered
+    against the shared ``monkeypatch`` fixture -- and that fixture is built early,
+    as a dependency of an autouse fixture above, so its teardown runs AFTER this
+    one. A teardown-side check therefore cannot tell a pending undo from a real
+    leak and fails every legitimate test. Entry-side, the only thing that can
+    still be set is a raw assignment, which is exactly the leak worth catching.
+    The cost is that the report names the test that inherited the hook rather
+    than the one that leaked it, so the message says so.
+
+    Read through ``sys.modules`` rather than an import: a test that never touches
+    the dashboard pays one dict lookup and does not drag ``chat_handlers`` and its
+    import graph into every worker's collection.
+    """
+    mod = sys.modules.get("kiro_crew.dashboard.chat_handlers")
+    if mod is not None and mod._test_interleave is not None:
+        mod._test_interleave = None
+        pytest.fail(
+            "chat_handlers._test_interleave was already set on entry, so an "
+            "earlier test leaked it (this test is the victim, not the cause). "
+            "Set it with monkeypatch.setattr so it reverts even on failure."
+        )

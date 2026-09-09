@@ -37,9 +37,9 @@ import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from stat import S_ISREG
 from typing import TypedDict
 
+from kiro_crew import mcp_grant
 from kiro_crew.config.loader import data_home
 from kiro_crew.connections.registry import Provider, get_visible_providers
 
@@ -126,9 +126,7 @@ def _load_connected_since() -> dict[str, str] | None:
     """
     try:
         raw = json.loads(_connection_state_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except ValueError:
+    except (FileNotFoundError, ValueError):
         return {}
     except OSError:
         return None
@@ -272,8 +270,9 @@ def _reconcile_connected_since_locked(statuses: list[ConnectionStatus], now: str
     if fresh:
         # The credential-store observation this module ACTS on: a first-observed
         # grant became a persisted timestamp and a Connected badge. Mirrors the
-        # mint engine's ``_grant_observed`` convention -- audited on the acted-on
-        # observation only (not once per poll sweep), best-effort rather than
+        # shared ``mcp_grant.grant_observed`` convention -- audited on the acted-on
+        # observation only (this module polls, so not once per sweep), best-effort
+        # rather than
         # fail-closed because nothing sensitive crosses this boundary (the
         # artifacts are stat-ed, never opened); an SEL outage must not turn the
         # status read into an error, but it does leave a warning behind.
@@ -287,11 +286,25 @@ def _reconcile_connected_since_locked(statuses: list[ConnectionStatus], now: str
     return recorded
 
 
-def _classify(granted: bool | None, mint_state: str) -> tuple[str, str]:
-    """The authorization verdict for one provider, from local facts only."""
+def _classify(granted: bool | None, mint_state: str, *, shared: bool = False) -> tuple[str, str]:
+    """The authorization verdict for one provider, from local facts only.
+
+    ``shared`` marks an UNCLAIMED premint -- a row the warm table minted ahead of any
+    click (:mod:`kiro_crew.connections.warm`), holding a URL nobody has asked for. It
+    must not read as consent in flight: the page folds every ``awaiting_consent`` slug
+    into its waiting set, so one premint sweep flipped EVERY mintable card to the
+    in-flight-consent rendering with no user action at all.
+
+    An unclaimed row therefore falls THROUGH to the grant branches rather than
+    reporting a status of its own. That is deliberate: the honest verdict for a URL
+    nobody claimed is the verdict the card would get with no row at all, and a fourth
+    status would be one the frontend has no rendering for. The row is not lost -- it is
+    what a Connect ADOPTS (``warm.adopt_shared_mint``), and adoption clears ``shared``,
+    at which point the same row reads as awaiting consent because now it truly is.
+    """
     if granted:
         return STATUS_CONNECTED, "grant_present"
-    if mint_state in ("minting", "waiting"):
+    if mint_state in ("minting", "waiting") and not shared:
         return STATUS_AWAITING_CONSENT, "mint_in_flight"
     if granted is None:
         # Not a claim that nothing is connected -- a statement that the grant
@@ -301,35 +314,16 @@ def _classify(granted: bool | None, mint_state: str) -> tuple[str, str]:
     return STATUS_NOT_CONNECTED, "no_grant"
 
 
-def _artifact_presence(path: Path) -> bool | None:
-    """One stat, three answers: present, definitively absent, or unknowable."""
-    try:
-        mode = path.stat().st_mode
-    except (FileNotFoundError, NotADirectoryError):
-        return False  # ENOENT-family: an answer (nothing was written), not an error
-    except OSError:
-        return None  # EACCES/EIO/stalled mount: nothing knowable right now
-    return S_ISREG(mode)
-
-
 def _provider_grant_presence(mcp_url: str) -> bool | None:
-    """Tri-state grant presence from ONE stat pass per paired artifact.
+    """Tri-state grant presence, resolved by the shared leaf module.
 
-    Deliberately not ``grant_present()`` followed by a diagnostic re-stat: two
-    passes race, and a transient failure that clears between them reads as a
-    definitive absence -- which prunes a persisted timestamp nothing can
-    reconstruct. Each artifact is stat-ed exactly once and the pair combines:
-    either artifact definitively absent decides the pair (both must exist), any
-    remaining failed stat makes the pair unknowable, otherwise present.
+    The derivation lives in :func:`mcp_grant.grant_presence` rather than here
+    because the remote probe renders the same three answers, and two spellings of
+    "present, absent, or unknowable" over the same artifacts is how one of them
+    silently loses the middle one. Here the middle answer is what keeps a
+    persisted timestamp that nothing could reconstruct.
     """
-    from kiro_crew.connections.mint import grant_artifact_paths
-
-    verdicts = [_artifact_presence(path) for path in grant_artifact_paths(mcp_url)]
-    if False in verdicts:
-        return False
-    if None in verdicts:
-        return None
-    return True
+    return mcp_grant.grant_presence(mcp_url)
 
 
 def _grant_presence_map(providers: list[Provider]) -> dict[str, bool | None]:
@@ -374,9 +368,15 @@ async def collect_connection_statuses() -> list[ConnectionStatus]:
     # Read on the loop: the mint table is guarded by an asyncio lock, so it must
     # not be touched from a worker thread.
     mint_states: dict[str, str] = {}
+    #: Slugs whose row is an UNCLAIMED premint. Carried alongside the state rather
+    #: than folded into it, because the row's state is genuinely ``waiting`` -- what
+    #: differs is whose wait it is, and only the classifier needs that distinction.
+    unclaimed: set[str] = set()
     for provider in providers:
         view = pending_mint_for(provider["slug"])
         mint_states[provider["slug"]] = str(view.get("state") or "") if view else ""
+        if view and view.get("shared"):
+            unclaimed.add(str(provider["slug"]))
 
     grants = await asyncio.to_thread(_grant_presence_map, providers)
 
@@ -384,7 +384,7 @@ async def collect_connection_statuses() -> list[ConnectionStatus]:
     for provider in providers:
         slug = provider["slug"]
         granted = grants.get(slug, False)
-        status, reason = _classify(granted, mint_states[slug])
+        status, reason = _classify(granted, mint_states[slug], shared=slug in unclaimed)
         entry: ConnectionStatus = {
             "slug": slug,
             "status": status,

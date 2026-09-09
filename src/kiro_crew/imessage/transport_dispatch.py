@@ -13,9 +13,11 @@ Webex/WeCom transport dispatch:
     -> renderer.close() + session release   # in finally
 
 iMessage has no interactive buttons, so the dispatcher runs the driver
-``decider``-less (deny-by-default for ``INTERACTIVE`` mode; ``auto``/``trust``
-still work). Every message this module sends is plain text, because iMessage
-renders no markup.
+``decider``-less. That alone would leave the ``INTERACTIVE`` ladder denying
+every tool, so ``ChannelTurn.auto_approve_session`` carries the process-global
+safety-override grant (``auto``/``trust`` modes still auto-approve on their
+own). Every message this module sends is plain text, because iMessage renders no
+markup.
 
 Dependency direction is ``imessage -> messaging`` (allowed).
 """
@@ -23,17 +25,25 @@ Dependency direction is ``imessage -> messaging`` (allowed).
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew.history import mint_row_mid
 from kiro_crew.imessage.client import redact_handle
 from kiro_crew.imessage.commands import HELP_TEXT, ConversationState, parse_command
 from kiro_crew.imessage.renderer import IMessageRenderer
 from kiro_crew.imessage.rpc import RpcError, RpcTransportError
 from kiro_crew.imessage.transport import IMESSAGE_CAPABILITIES
-from kiro_crew.messaging.dispatch import ChannelTurn, drive_turn, inbound_permitted
+from kiro_crew.messaging.commands import compact_unsupported_backend
+from kiro_crew.messaging.dispatch import (
+    ChannelTurn,
+    build_directive_consumer,
+    drive_turn,
+    inbound_permitted,
+)
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE
 from kiro_crew.messaging.link import build_dm_session_key, seed_generation
+from kiro_crew.messaging.pre_turn import resolve_pre_turn
+from kiro_crew.safety_override import safety_override
 
 if TYPE_CHECKING:
     from kiro_crew.config.loader import KiroCrewConfig
@@ -129,22 +139,19 @@ class IMessageDispatcher:
             await self._notify(handle, HELP_TEXT)
             return
 
-        # -- Mid-turn concurrency: check the CURRENT-generation key for an
-        # in-flight turn BEFORE any idle/daily rotation (rotating first could
-        # mint a new key and miss the running turn, letting a second concurrent
-        # turn bypass steer). Fold the message into the running turn via steer.
-        session_key = self._session_key(handle)
-        if self.sessions.is_busy(session_key):
-            await self._handle_busy(inbound, session_key)
-            return
-
-        self._conv.maybe_rotate(
-            handle,
-            time.time(),
+        # Busy check, then rotation, then a re-derived key -- the ordering and the
+        # reasons it matters live in messaging.pre_turn.
+        session_key = await resolve_pre_turn(
+            conv=self._conv,
+            sessions=self.sessions,
+            key=handle,
+            session_key_for=self._session_key,
             idle_minutes=self.cfg.messaging.idle_reset_minutes,
             daily_reset_hour=self.cfg.messaging.daily_reset_hour,
+            on_busy=lambda sk: self._handle_busy(inbound, sk),
         )
-        session_key = self._session_key(handle)
+        if session_key is None:
+            return  # folded into the running turn
         conversation_id = f"imessage:{handle}"
         agent = self._resolve_agent()
 
@@ -171,12 +178,32 @@ class IMessageDispatcher:
             ChannelTurn(
                 channel_type="imessage",
                 session_key=session_key,
+                # Session-directive consumer: monitor_start / autonudge_stop /
+                # ... return a marker TurnDriver decodes; apply it against THIS
+                # turn's session key (dashboard-only directives stay refused
+                # for channel sessions).
+                directive_consumer=build_directive_consumer(
+                    session_key=session_key, sessions=self.sessions, dispatcher=self
+                ),
                 conversation_id=conversation_id,
                 agent=agent,
                 user_text=text,
                 renderer=renderer,
                 approval_mode=self.approval_mode,
                 decider=None,  # iMessage can't render approve/deny buttons
+                # No buttons means no way to approve a tool in band, so without
+                # an out-of-band grant the INTERACTIVE ladder denies every tool
+                # and the agent can only talk. This is the SAME process-global
+                # grant the dashboard toggle and Slack's `/kirocrew yolo` drive,
+                # so it needs no iMessage command of its own and it still
+                # expires. Read per request, not captured at boot, so arming it
+                # (or letting it lapse) takes effect on the next tool rather than
+                # after a gateway restart. It does NOT weaken the PreToolUse
+                # gate: TurnDriver runs the sensitive-path keystone, the
+                # governance ceiling and the deny-list ahead of this rung, so a
+                # hard deny still wins. With no grant the predicate is False and
+                # every tool still needs an approval this channel cannot give.
+                auto_approve_session=lambda: safety_override().is_active(),
                 persist=lambda user_text, reply, is_new: self._persist_turn(
                     session_key, user_text, reply, is_new, agent
                 ),
@@ -262,9 +289,11 @@ class IMessageDispatcher:
         """
         if self.conv_log is None:
             return
-        self.conv_log.append(session_key, "user", user_text, agent=agent)
+        self.conv_log.append(session_key, "user", user_text, agent=agent, mid=mint_row_mid())
         if reply_text:
-            self.conv_log.append(session_key, "assistant", reply_text, agent=agent)
+            self.conv_log.append(
+                session_key, "assistant", reply_text, agent=agent, mid=mint_row_mid()
+            )
         if is_new:
             title = (user_text or "").strip().replace("\n", " ")[:40] or "iMessage"
             self.conv_log.set_title(session_key, title)
@@ -282,6 +311,14 @@ class IMessageDispatcher:
         assert self.client is not None
         handle = inbound.handle
         pct = self.sessions.check_context_usage(session_key, provider)
+        if pct >= self.cfg.imessage.soft_threshold_pct:
+            # Capability gate (#8156): no forced compaction to run and the
+            # soft nudge's /compact advice cannot work — the backend compacts
+            # on its own as context fills.
+            unsupported = compact_unsupported_backend(provider)
+            if unsupported:
+                logger.debug("imessage: context notice skipped — %s compacts itself", unsupported)
+                return
         if pct >= self.cfg.imessage.hard_threshold_pct:
             self._conv.clear_awaiting(handle)
             try:
@@ -323,6 +360,20 @@ class IMessageDispatcher:
             provider = self.sessions.get_provider(session_key)
             if provider is None:
                 await self._notify(handle, "ℹ️ There's no conversation to compact yet.")
+                return
+            # Capability gate (#8156, mirroring the dashboard's #7800 gate): a
+            # backend that cannot serve a manual /compact treats the prompt as
+            # ordinary text and never answers, so dispatching would strand the
+            # unbounded wait below. Informational, never an error — and plain
+            # text, because iMessage speech carries no markdown.
+            unsupported = compact_unsupported_backend(provider)
+            if unsupported:
+                await self._notify(
+                    handle,
+                    "ℹ️ This backend manages compaction automatically — it "
+                    "summarizes the conversation on its own as context fills, "
+                    "so manual /compact isn't needed (and isn't supported) here.",
+                )
                 return
             await provider.compact()
             await provider.wait_for_compaction()

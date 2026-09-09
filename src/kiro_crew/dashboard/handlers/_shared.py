@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import fnmatch
+import importlib.util
 import json
 import logging
 import os
+import sys
+import sysconfig
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 import aiohttp
 from aiohttp import web
 
+from kiro_crew import extras, platform_compat
 from kiro_crew.agent_discovery import (
     SKILL_URI_PREFIX,
     expand_skill_uri,
@@ -20,13 +25,18 @@ from kiro_crew.agent_discovery import (
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.config.paths import kiro_agents_dir
 from kiro_crew.dashboard.state import VALID_MEMORY_MODES, DashboardState
-from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
-from kiro_crew.skills import skills_dir
-from kiro_crew.slack.handler import (
-    _hydrate_conv_flags,
-    is_thread_incognito,
-    is_thread_temporary,
+from kiro_crew.dashboard.token_auth import (
+    MAX_SESSION_TTL_SECS,
+    _b64url_decode,
+    required_peer_key_unverified,
 )
+from kiro_crew.messaging.link import is_channel_session_key
+from kiro_crew.messaging.privacy_mode import hydrate as _hydrate_conv_flags
+from kiro_crew.messaging.privacy_mode import is_incognito as is_thread_incognito
+from kiro_crew.messaging.privacy_mode import is_temporary as is_thread_temporary
+from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_crew.skill_trust import is_project_trusted as _is_project_trusted
+from kiro_crew.skills import skills_dir
 
 if TYPE_CHECKING:
     from kiro_crew.platform.interfaces import CapabilityManager
@@ -54,6 +64,23 @@ def _redact_memory_field(val: object) -> object:
     return val
 
 
+#: The session-search row fields carrying LLM-authored or peer-supplied prose,
+#: which every pass returning such a row must put through
+#: :func:`kiro_crew.security.redact` before egress.
+#:
+#: Three passes return these rows -- ``api_sessions_search``, and
+#: ``api_instances_search_sessions``' local-row and peer-row passes -- and each
+#: used to hand-copy both the redaction chain AND this field list. The chain
+#: already had an owner (``security.redact`` composes the exfiltration-URL and
+#: credential passes in that order); this tuple gives the field list one too, so
+#: a caller cannot redact ``title`` and quietly forget ``snippet``. That is the
+#: drift half of #3940 follow-up 3, and the quieter half: a missing field reads
+#: as correct at the call site.
+#:
+#: Order is irrelevant; membership is the contract.
+SESSION_SEARCH_TEXT_FIELDS: tuple[str, ...] = ("title", "snippet")
+
+
 # Shared body cap for the small JSON-object endpoints that must bound the
 # request BEFORE decoding (the strict-internal notification routes). Kept
 # module-level and in one place so the security-relevant cap cannot drift
@@ -63,39 +90,101 @@ _MAX_BODY_BYTES = 64 * 1024
 
 
 async def read_bounded_json(
-    request: web.Request, max_bytes: int = _MAX_BODY_BYTES
+    request: web.Request,
+    max_bytes: int | None = _MAX_BODY_BYTES,
+    *,
+    allow_absent: bool = False,
 ) -> tuple[dict[str, Any] | None, web.Response | None]:
     """Read and parse a JSON *object* request body, capped at *max_bytes*.
 
     Returns ``(body, None)`` on success, or ``(None, error_response)`` when the
-    caller should return early. The cap is enforced BEFORE decoding: a
-    Content-Length precheck rejects an oversized declared body, and the stream
-    is then read incrementally so a chunked body (which carries no
-    Content-Length) cannot buffer past ``max_bytes + one chunk`` on the
-    event-loop thread. Consolidates the previously-duplicated block in
-    ``messaging.api_notification_agent_push`` and
-    ``notifications_push.api_push_notification`` so the cap and the 413/400
-    contract stay identical across both (issue #490).
+    caller should return early. This owns the parse-and-shape guard for the
+    endpoints routed through it: ``await request.json()`` happily returns a
+    list, string, or number for a body that is valid JSON but not an object, and
+    a handler that then calls ``.get()`` on the result turns a client mistake
+    into a 500 (issue #5587).
+
+    NOT yet the dashboard's only such guard. Four siblings survive and diverge:
+    ``handlers_channel._json_object`` (same ``invalid_json``/``body_not_object``
+    codes, but raises ``HTTPBadRequest`` instead of returning the response),
+    ``handlers/hooks.py::_json_object`` (``default_empty=True`` collapses a
+    MALFORMED body to defaults -- the defect this issue fixed in
+    ``api_memory_promote``), ``handlers/session_storage.py::_json_body``
+    (deliberately different: an empty body is legitimate there, and it
+    documents why), and ``handlers/artifacts.py::_read_json_body`` (raises
+    ``ArtifactValidationError``, carries its own cap). Folding or narrowing each
+    is tracked on issue #5587 alongside the remaining handler sweep -- claiming
+    one owner before that is done would be a claim the tree does not support.
+
+    The cap is enforced BEFORE decoding: a Content-Length precheck rejects an
+    oversized declared body, and the stream is then read incrementally so a
+    chunked body (which carries no Content-Length) cannot buffer past
+    ``max_bytes + one chunk`` on the event-loop thread. That bound is the point
+    of the helper for the strict-internal notification routes (issue #490).
+
+    ``max_bytes=None`` reads the body whole with no pre-decode ceiling, for the
+    endpoints that have no principled byte limit today (a knowledge bundle
+    import has no defensible maximum size). It is deliberately explicit rather
+    than the default: an endpoint opting out of the cap should say so at the
+    call site, and giving one of those endpoints a real ceiling later is then a
+    one-argument change here instead of a re-plumb.
+
+    Which one a converting caller wants is a real choice, not a default to
+    inherit: take the cap when the body is a fixed set of control fields (an
+    identifier, a flag, a number), and ``None`` only when the body legitimately
+    carries user content of unbounded size (file contents, an export, a fetched
+    document). Note that switching a site TO the cap also moves it off
+    ``request.json()`` onto the streaming read, so that handler's unit tests
+    must feed ``content``/``content_length`` rather than mocking ``json``.
+
+    *allow_absent* treats a request with no readable body as an empty object,
+    for endpoints whose fields all have defaults. A body that is *present but
+    malformed* is still a 400 -- "the client sent nothing" and "the client sent
+    garbage" are different facts, and only the first one can be defaulted.
+
+    Decoding matches ``request.json()`` on both paths -- ``decode(charset or
+    utf-8)`` then ``loads`` -- so the two differ only in whether the read is
+    bounded, and the declared ``charset=`` is honoured either way. The uncapped
+    path calls ``request.json()`` itself rather than reimplementing it, which is
+    what makes converting a ``try: await request.json()`` site a drop-in: no
+    handler and no test harness sees a different read.
+
+    The catch is narrowed to the three client-input failures -- ``ValueError``
+    (which covers ``json.JSONDecodeError`` and ``UnicodeDecodeError``),
+    ``LookupError`` (an unknown ``charset=`` codec), and ``RecursionError`` (a
+    deeply nested document blowing the parser's stack). Transport failures (a
+    disconnect mid-body, a read timeout) deliberately propagate: they are not a
+    client JSON mistake and keep their 500 status class.
     """
-    if request.content_length and request.content_length > max_bytes:
-        return None, web.json_response(
-            {"error": "payload too large", "code": "payload_too_large"}, status=413
-        )
-    chunks: list[bytes] = []
-    received = 0
-    async for chunk in request.content.iter_chunked(8192):
-        received += len(chunk)
-        if received > max_bytes:
+    if allow_absent and not request.can_read_body:
+        return {}, None
+    if max_bytes is None:
+        try:
+            body = await request.json()
+        except (LookupError, RecursionError, ValueError):
+            return None, web.json_response(
+                {"error": "invalid JSON", "code": "invalid_json"}, status=400
+            )
+    else:
+        if request.content_length and request.content_length > max_bytes:
             return None, web.json_response(
                 {"error": "payload too large", "code": "payload_too_large"}, status=413
             )
-        chunks.append(chunk)
-    try:
-        body = json.loads(b"".join(chunks))
-    except Exception:
-        return None, web.json_response(
-            {"error": "invalid JSON body", "code": "invalid_json"}, status=400
-        )
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.content.iter_chunked(8192):
+            received += len(chunk)
+            if received > max_bytes:
+                return None, web.json_response(
+                    {"error": "payload too large", "code": "payload_too_large"}, status=413
+                )
+            chunks.append(chunk)
+        try:
+            body = json.loads(b"".join(chunks).decode(request.charset or "utf-8"))
+        except (LookupError, RecursionError, ValueError):
+            return None, web.json_response(
+                {"error": "invalid JSON", "code": "invalid_json"}, status=400
+            )
     if not isinstance(body, dict):
         return None, web.json_response(
             {"error": "body must be a JSON object", "code": "body_not_object"}, status=400
@@ -182,8 +271,9 @@ def _admits(surface: str, resource: str, probe: "Callable[[], bool]") -> bool:
     rather than silently gaining unaudited egress.
 
     SYNCHRONOUS BY DESIGN, and callers on the event loop must run it in a worker
-    thread. SEL initialization can shell out (``icacls`` on a fresh Windows
-    gateway), so calling this inline from a coroutine would stall every request.
+    thread. SEL initialization does blocking filesystem work (trust-dir creation,
+    key validation, and on Windows an owner-only DACL), so calling this inline
+    from a coroutine would stall every request.
     """
     from kiro_crew.platform.context import safe_context_call
 
@@ -358,9 +448,7 @@ def _canonical_skill_roots() -> list[Path]:
         # ``skill://`` URI would then resolve against whatever cwd the next
         # kiro-cli session starts in — silently loading a different skill, or
         # none. A skill root must be a stable absolute location.
-        out.extend(
-            Path(p).expanduser().resolve() for p in KiroCrewConfig.load().skills.extra_paths
-        )
+        out.extend(Path(p).expanduser().resolve() for p in KiroCrewConfig.load().skills.extra_paths)
     except Exception:
         logger.debug("failed to load extra skill paths from config", exc_info=True)
     return out
@@ -481,9 +569,7 @@ def _resolve_package_skill_path(name: str, canonical: set[Path] | None = None) -
     return None
 
 
-def active_project_state(
-    state: DashboardState, session_key: str = ""
-) -> tuple[Path | None, str]:
+def active_project_state(state: DashboardState, session_key: str = "") -> tuple[Path | None, str]:
     """Resolve the workspace project AND why it is absent when it is.
 
     Returns ``(project, state)`` where *state* is one of:
@@ -544,8 +630,39 @@ def active_project_dir(state: DashboardState, session_key: str = "") -> Path | N
     the wrong project.  Failing closed makes the caller surface the ambiguity
     instead — :func:`active_project_state` reports which of the two "no answer"
     cases produced the ``None``.
+
+    Step 2 is what makes this the WRONG helper for a per-chat resource. It
+    answers for a chat that has no project of its own, so a caller that must
+    agree with what one chat will actually load — the skills catalog, and the
+    consent grant that admits those skills — would resolve a directory that chat
+    is not bound to. Those callers use :func:`requesting_slot_project` instead.
+    Reach for this one only when the resource really is global.
     """
     return _resolve_active_project(state, session_key)
+
+
+def requesting_slot_project(state: DashboardState, session_key: str = "") -> Path | None:
+    """The project bound to THIS chat slot, with no cross-slot fallback.
+
+    :func:`active_project_dir` answers "which project should a global surface
+    act on", and falls back to the single project shared by the open slots.
+    This answers the narrower question the skills loader asks: "which project
+    is THIS chat bound to". ``SkillsLoader`` resolves project skills from
+    ``_ChatSlot.project`` verbatim, so a caller that must agree with what the
+    loader will actually load -- the catalog, and the consent grant that admits
+    it -- has to ask the same question, not the broader one.
+
+    Returns ``None`` when this slot has no project, which is a meaningful
+    answer: there is no directory for this chat to list, trust, or load from.
+    """
+    slots = getattr(state, "_slots", {}) or {}
+    if not session_key:
+        return None
+    slot_name = session_key.split(":", 1)[-1] if ":" in session_key else session_key
+    slot = slots.get(slot_name)
+    if slot is None:
+        return None
+    return _slot_project(slot)
 
 
 def _resolve_active_project(state: DashboardState, session_key: str) -> Path | None:
@@ -647,15 +764,17 @@ def list_kiro_skills(project_dir: Path | None = None) -> list[dict[str, Any]]:
             if not skill_md.is_file():
                 continue
             desc, always = _parse_skill_description(skill_md)
-            out.append({
-                "key": f"{source}/{entry.name}",
-                "name": entry.name,
-                "description": desc,
-                "path": str(skill_md),
-                "dir": str(entry),
-                "always": always,
-                "source": source,
-            })
+            out.append(
+                {
+                    "key": f"{source}/{entry.name}",
+                    "name": entry.name,
+                    "description": desc,
+                    "path": str(skill_md),
+                    "dir": str(entry),
+                    "always": always,
+                    "source": source,
+                }
+            )
     return out
 
 
@@ -740,9 +859,7 @@ def _agents_loading_skill(
     """Return names of agents whose pre-expanded globs match *skill_md*."""
     target = str(skill_md)
     return [
-        name
-        for name, globs in expanded_agents
-        if any(fnmatch.fnmatch(target, g) for g in globs)
+        name for name, globs in expanded_agents if any(fnmatch.fnmatch(target, g) for g in globs)
     ]
 
 
@@ -839,10 +956,10 @@ def collect_skills_blocking(
     This is the synchronous core behind ``GET /api/skills``. It performs
     every filesystem-heavy step in one call so the caller can offload the
     whole thing to a thread via ``run_in_executor``. ``list_skills()`` (os.walk +
-    per-file frontmatter reads) and ``list_kiro_skills()`` (per-skill resolve +
-    read) are filesystem-heavy enough to stall the event loop past the
-    loop-stall watchdog on large catalogs, so they run in the thread too rather
-    than inline.
+    per-file frontmatter reads), ``list_kiro_skills()`` (per-skill resolve +
+    read), and the confined project catalog are filesystem-heavy enough to
+    stall the event loop past the loop-stall watchdog on large catalogs, so
+    they run in the thread too rather than inline.
 
     Steps, in the same order the handler used inline:
 
@@ -850,7 +967,8 @@ def collect_skills_blocking(
     2. ``package_skills`` — edition/package skills already fetched (structured
        rows) from ``CapabilityManager.list_skills()``; the manager owns their
        parsing, so nothing is parsed here.
-    3. ``list_kiro_skills(project_dir)`` — open-standard kiro-cli skills.
+    3. Global open-standard kiro-cli skills plus project rows from the loader's
+       confined no-follow catalog.
     4. ``annotate_skills_with_agents(...)`` — ``loaded_by_agents`` per skill.
 
     The capability-manager fetch is intentionally NOT done here (it is async);
@@ -861,7 +979,34 @@ def collect_skills_blocking(
         s.setdefault("source", "kirocrew")
     _warn_skills_outside_roots(package_skills)
     result.extend(package_skills)
-    result.extend(list_kiro_skills(project_dir))
+    # The legacy scanner is valid for the operator-owned global Kiro directory,
+    # but it resolves and reads project link targets before containment can be
+    # checked. Never pass the project to it: pre-consent project rows must come
+    # from the loader's confined no-follow enumeration below.
+    workspace_rows = list_kiro_skills()
+    if project_dir is not None:
+        # A workspace row is LISTABLE without consent but only USABLE with it:
+        # $token expansion and context injection both resolve through
+        # SkillsLoader, which gates the project root on the operator's grant.
+        # Marking the row lets the picker offer that consent instead of handing
+        # back a token that silently expands to nothing.
+        trusted = _is_project_trusted(project_dir)
+
+        # The loader's containment-only catalog IS the definition of what
+        # consent could make loadable. It intentionally bypasses trust
+        # enforcement so genuine untrusted rows remain visible, while its
+        # confined no-follow read keeps linked targets untouched.
+        try:
+            project_rows = skills_loader.catalog_project_skills(project_dir)
+        except Exception:  # noqa: BLE001 — a listing must not die on enumeration
+            logger.warning("skills catalog: enumeration failed; listing no workspace rows")
+            project_rows = []
+        for row in project_rows:
+            row["key"] = f"kiro-workspace/{row.get('key', '')}"
+            row["source"] = "kiro-workspace"
+            row["trusted"] = trusted
+        workspace_rows.extend(project_rows)
+    result.extend(workspace_rows)
     annotate_skills_with_agents(result)
     return result
 
@@ -942,6 +1087,13 @@ def _resolve_skill_root(name: str, state: DashboardState, session_key: str = "")
         root = Path.home() / ".kiro" / "skills"
     elif name.startswith("kiro-workspace/"):
         rel = name[len("kiro-workspace/") :]
+        # NOT trust-gated, deliberately: reading a SKILL.md is how the operator
+        # decides whether to grant trust in the first place, so requiring the
+        # grant to view the file would make the consent decision blind. The
+        # boundary that matters -- an unconsented project skill never reaching the
+        # agent's context -- is enforced in SkillsLoader. Uses the permissive
+        # resolver so the documented keyless single-project fallback and the
+        # #2457 two-project behaviour stay as they are.
         proj = active_project_dir(state, session_key)
         if proj is None:
             return None
@@ -1356,7 +1508,6 @@ def list_skill_tree(skill_root: Path) -> list[dict[str, Any]]:
     real path escapes *skill_root* are omitted.
     """
     out: list[dict[str, Any]] = []
-    skipped = 0
     for dirpath, dirnames, filenames in os.walk(skill_root, followlinks=False):
         # Stable order — reproducible across runs / tests.
         dirnames.sort()
@@ -1373,18 +1524,15 @@ def list_skill_tree(skill_root: Path) -> list[dict[str, Any]]:
         for f in filenames:
             full = Path(dirpath) / f
             if is_sensitive_path(str(full)):
-                skipped += 1
                 continue
             try:
                 if full.is_symlink():
                     real = full.resolve(strict=True)
                     real.relative_to(skill_root.resolve(strict=True))
                     if is_sensitive_path(str(real)):
-                        skipped += 1
                         continue
                 stat = full.stat()
             except (OSError, ValueError):
-                skipped += 1
                 continue
             rel = full.relative_to(skill_root).as_posix()
             out.append({"path": rel, "type": "file", "size": int(stat.st_size)})
@@ -1436,6 +1584,78 @@ def _read_session_key(request: "Any") -> str:
     return request.headers.get("X-Session-Key", "").strip()
 
 
+def _caller_bounds(request: web.Request) -> tuple[dict[str, str], int]:
+    """Read the caller's own session bounds from the token that authenticated it.
+
+    Shared by every handler that mints a NEW credential on the authority of an
+    existing dashboard session (the mobile login link and the tailnet QR mint),
+    so the two mint surfaces cannot drift apart on the invariant: the minted
+    credential must never out-scope the session authorizing it.
+
+    Returns ``(carried_claims, ttl_ceiling_seconds)``. ``ttl_ceiling`` is ``0``
+    when the caller has no lifetime left to lend, which the handler refuses
+    rather than minting against. Claims are carried, never re-derived: ``boot``
+    copied verbatim (same rule as the link→session exchange in ``token_auth``),
+    ``no_refresh`` copied so the recipient session never grows a refresh chain,
+    and the remaining ``session_exp`` becomes the TTL ceiling so a short-lived
+    caller cannot mint a longer-lived credential. ``require_peer`` and its
+    signed ``peer_key`` move as one inseparable device bound. Fail-closed on an
+    unreadable payload: a caller whose bounds cannot be established gets a
+    bounded (no-refresh, default-TTL-capped) link rather than an unbounded one.
+
+    **Read the credential the middleware VALIDATED, not a re-extracted one.**
+    Only that credential has a verified signature; the other one was never
+    checked. ``token_auth`` publishes it as ``request["auth_token"]`` for
+    exactly this reason: its own extraction prefers ``?token=`` but falls back
+    to the session cookie when the query token is invalid, so re-deriving with
+    a fixed query-then-cookie order could pick the credential that was NOT
+    validated — letting a request that authenticated with a bounded cookie have
+    its bounds read from an unverified, attacker-settable query token, dropping
+    ``no_refresh`` and raising the TTL ceiling to the full maximum, which is
+    precisely the ceiling-escape this function exists to prevent. When no
+    credential was published (a surface that authenticated by another means),
+    the mint is bounded fail-closed the same way an unreadable payload is.
+
+    **A non-positive remaining lifetime is never rounded up.** Clamping it to a
+    floor of one second would let a caller whose own session has just run out
+    mint a link that outlives it, and the exchange the recipient performs starts
+    a fresh window — so repeating the mint would walk the expiry forward
+    indefinitely from a session that should already be dead. Report ``0`` and
+    let the caller be refused.
+    """
+    published = request.get("auth_token", "")
+    token = published if isinstance(published, str) else ""
+    carried: dict[str, str] = {}
+    ttl_ceiling = MAX_SESSION_TTL_SECS
+    if not token:
+        # Authenticated without a readable token (unexpected on this surface):
+        # fail closed by bounding the mint rather than trusting it.
+        return {"no_refresh": "1"}, ttl_ceiling
+    try:
+        data = json.loads(_b64url_decode(token.split(".", 1)[0]))
+        boot = str(data.get("boot", ""))
+        if boot:
+            carried["boot"] = boot
+        if str(data.get("no_refresh", "")) == "1":
+            carried["no_refresh"] = "1"
+        if str(data.get("require_peer", "")) == "1":
+            carried["require_peer"] = "1"
+            # Middleware refuses a claimless require_peer cookie, so the
+            # fallback is unreachable on a real authenticated request. Keep it
+            # fail-closed for direct test doubles or future alternate auth:
+            # an impossible key mints an unusable child instead of widening it.
+            carried["peer_key"] = required_peer_key_unverified(token) or "unverified"
+        session_exp = float(data.get("session_exp", 0.0))
+        if session_exp:
+            remaining = int(session_exp - time.time())
+            if remaining <= 0:
+                return carried, 0
+            ttl_ceiling = min(ttl_ceiling, remaining)
+    except Exception:
+        return {"no_refresh": "1"}, ttl_ceiling
+    return carried, ttl_ceiling
+
+
 def _is_restricted_session(state: DashboardState, request: "Any") -> bool:
     """Check if request comes from an ephemeral (incognito) or temporary (guest) session.
 
@@ -1453,17 +1673,23 @@ def _is_restricted_session(state: DashboardState, request: "Any") -> bool:
     slot = state._slots.get(slot_name)
     if slot and slot.is_restricted:
         return True
-    if sk.startswith("slack:"):
-        # Restore the DURABLE flags before consulting the in-memory maps.
-        # ``_thread_incognito``/``_thread_temporary`` are process-local and are
-        # only populated by ``_hydrate_conv_flags`` on an INBOUND Slack message,
-        # so a turn that no inbound message drove — a cron with
-        # session="origin", a webhook-resumed session, a monitor/autonudge
-        # re-injection, a subagent — reaches this gate with empty maps after a
-        # gateway restart even though the user's !incognito is on disk. Calling
-        # the canonical restore (rather than reading the SessionMap directly)
-        # keeps one source of truth and self-heals the process-local view.
-        # Idempotent and allocation-free for unflagged keys.
+    if is_channel_session_key(sk):
+        # Restore the DURABLE flags before consulting the in-memory maps. The
+        # privacy trackers are process-local and are only populated by
+        # ``privacy_mode.hydrate`` on an INBOUND channel message, so a turn that
+        # no inbound message drove — a cron with session="origin", a
+        # webhook-resumed session, a monitor/autonudge re-injection, a subagent —
+        # reaches this gate with empty maps after a gateway restart even though
+        # the user's !incognito is on disk. Calling the canonical restore (rather
+        # than reading the SessionMap directly) keeps one source of truth and
+        # self-heals the process-local view. Idempotent and allocation-free for
+        # unflagged keys.
+        #
+        # Namespace-agnostic on purpose. A ``startswith("slack:")`` test made this
+        # branch structurally unreachable for every other channel, so a
+        # ``telegram:{agent}:direct:{user}`` session the user marked incognito
+        # could never enter it and the ~30 dashboard mutations gated on this
+        # predicate stayed open for it.
         _hydrate_conv_flags(state.sessions, sk)
         if is_thread_temporary(sk) or is_thread_incognito(sk):
             return True
@@ -1485,9 +1711,10 @@ def _blocks_reads_session(state: DashboardState, request: "Any") -> bool:
     slot = state._slots.get(slot_name)
     if slot and slot.blocks_reads:
         return True
-    if sk.startswith("slack:"):
-        # Same durable-flag restore as _is_restricted_session: a temporary
-        # thread whose flags this process never hydrated must not serve reads.
+    if is_channel_session_key(sk):
+        # Same durable-flag restore, and the same namespace-agnostic reach, as
+        # _is_restricted_session: a temporary conversation whose flags this
+        # process never hydrated must not serve reads, on any channel.
         _hydrate_conv_flags(state.sessions, sk)
         if is_thread_temporary(sk):
             return True
@@ -1655,7 +1882,7 @@ def _read_memory_mode(path: "Path") -> str | None:
     first, _sep, _rest = head.partition(b"\n")
     try:
         d = json.loads(first.decode("utf-8", "replace"))
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return None
     if not isinstance(d, dict) or d.get("_type") != "metadata":
         return None
@@ -1675,6 +1902,80 @@ def _read_memory_mode(path: "Path") -> str | None:
     if normalized not in VALID_MEMORY_MODES:
         return None
     return normalized
+
+
+async def require_owner_dashboard_request(
+    request: web.Request, operation: str
+) -> web.Response | None:
+    """Owner gate shared across dashboard handler modules.
+
+    Returns ``None`` when the caller IS the dashboard owner, allowing the
+    request to proceed.  Otherwise audits the denial via SEL (an enqueue —
+    the singleton is warmed at startup, see ``sel.warm_sel_singleton``),
+    checks for a stale pre-owner bootstrap subject (relabelling the denial
+    to a 401), and falls back to a 403 with the standard ``owner_only`` code.
+
+    Imports ``is_owner_dashboard_request`` and ``stale_owner_session_response``
+    inside the function body to avoid a circular import: ``source_providers``
+    imports chat-state helpers that reach back into sibling handler modules.
+    """
+    from kiro_crew.dashboard.handlers.source_providers import (
+        is_owner_dashboard_request,
+    )
+
+    if is_owner_dashboard_request(request):
+        return None
+
+    # SEL is warmed at gateway startup (sel.warm_sel_singleton), so this
+    # ``log_api_access`` only enqueues to the writer thread — no thread hop
+    # needed (#8608). Guarded because a FAILED warm leaves construction to
+    # retry here and possibly raise.
+    caller = str(request.get("user") or "unknown")
+    try:
+        from kiro_crew.sel import sel as _sel
+
+        _sel().log_api_access(
+            caller=caller,
+            operation=operation,
+            outcome="denied",
+            source="dashboard",
+            resources="non_owner_block",
+        )
+    except Exception:  # pragma: no cover - audit must never change the outcome
+        logger.debug("SEL audit for non-owner %s failed", operation, exc_info=True)
+
+    # Deny decision made above; only the response label changes for a signed
+    # pre-owner bootstrap subject (see stale_owner_session_response).
+    return _owner_denial_response(request)
+
+
+def _owner_denial_response(
+    request: web.Request,
+    error_message: str = "owner authorization required",
+    error_code: str = "owner_only",
+) -> web.Response:
+    """Stale-session relabel + 403 denial -- the tail of every owner gate.
+
+    Synchronous: ``stale_owner_session_response`` is a pure predicate over
+    request attributes, so no I/O is involved.  Domain-specific wrappers that
+    perform their own SEL/audit logging before reaching the denial response can
+    call this directly instead of going through the full async
+    ``require_owner_dashboard_request`` helper.
+
+    Imports ``stale_owner_session_response`` inside the function body to avoid
+    a circular import (same reason as the async helper above).
+    """
+    from kiro_crew.dashboard.handlers.source_providers import (
+        stale_owner_session_response,
+    )
+
+    stale = stale_owner_session_response(request)
+    if stale is not None:
+        return stale
+    return web.json_response(
+        {"error": error_message, "code": error_code},
+        status=403,
+    )
 
 
 def _probe_persisted_session(slot_name: str) -> tuple[bool, str | None]:
@@ -1699,3 +2000,60 @@ def _probe_persisted_session(slot_name: str) -> tuple[bool, str | None]:
     if len(matches) > 1:
         return True, None
     return True, _read_memory_mode(matches[0])
+
+
+# ── Optional-extra install advice ──
+# Two handler modules need these: `core` for the [voice] extra behind
+# Speech-to-Text, and `messaging` for the per-channel SDK extras ([feishu] ->
+# lark-oapi, [teams] -> PyJWT, [whatsapp] -> neonize). They live here rather than
+# in either one so neither handler module has to import the other.
+
+
+def _pip_install_channel_available() -> bool:
+    """True when ``<gateway python> -m pip install`` can plausibly succeed.
+
+    Three environments make that command a guaranteed dead end, and surfacing
+    it there recreates the press-and-nothing-changes failure this surface
+    exists to avoid:
+
+    - the desktop app's bundled interpreter (see
+      :func:`platform_compat.is_bundled_interpreter`): pip may exist, but a
+      pip install writes into the code-signed bundle — breaking launches and
+      updates — and is discarded on every app update;
+    - an interpreter without the ``pip`` module (uv tool installs, some
+      pipx layouts);
+    - a PEP 668 externally-managed interpreter (distro/brew pythons), where
+      pip refuses to install. Checked only outside a venv: inside one, pip
+      works and deliberately ignores the marker, so a venv returns True.
+
+    Touches the filesystem (``find_spec``, then the marker file), so call it
+    from a worker thread on an async path.
+    """
+    if platform_compat.is_bundled_interpreter():
+        return False
+    if importlib.util.find_spec("pip") is None:
+        return False
+    # PEP 668 applies to the environment pip would install into. Inside a venv
+    # pip deliberately ignores the marker, and `sysconfig.get_path("stdlib")`
+    # resolves to the BASE interpreter's directory — where distro/brew pythons
+    # place it — so checking it from a venv would misfire on the recommended
+    # install layout (venv on a Debian/Ubuntu/Homebrew python).
+    if sys.prefix != sys.base_prefix:
+        return True
+    return not (Path(sysconfig.get_path("stdlib")) / "EXTERNALLY-MANAGED").exists()
+
+
+def pip_extra_install_command(extra: str) -> str:
+    """The command that installs *extra*'s dependencies into THIS gateway's python.
+
+    Thin wrapper over :func:`kiro_crew.extras.pip_install_command`, which owns
+    the two things that make this string correct: it names the extra's real
+    distributions rather than ``kirocrew[extra]`` (this project is not on any
+    index, so that form cannot resolve for anyone), and it spells out the
+    interpreter so the install cannot land in a different environment than the
+    one that has to import it.
+
+    Empty for an extra this build does not declare -- callers already treat an
+    empty command as "no install channel" and show the unsupported notice.
+    """
+    return extras.pip_install_command(extra)

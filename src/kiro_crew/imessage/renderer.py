@@ -23,14 +23,21 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from kiro_crew.constants import OPTIONS_RE_TRAILER
 from kiro_crew.imessage.client import redact_handle
 from kiro_crew.imessage.plaintext import chunk_plaintext, to_plaintext
 from kiro_crew.imessage.rpc import RpcError, RpcTransportError
 from kiro_crew.messaging.display_safety import redact_for_display
-from kiro_crew.messaging.renderer import Renderer
+from kiro_crew.messaging.renderer import (
+    Renderer,
+    credential_redaction_notice,
+    render_options_as_text,
+)
 from kiro_crew.messaging.transport import TransportCapabilities
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import (
+    CREDENTIAL_REDACTION_TAGS,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 
 if TYPE_CHECKING:
     from kiro_crew.imessage.client import IMessageClient
@@ -44,13 +51,6 @@ _TYPING_THROTTLE_S = 4.0
 
 _ERROR_TEXT = "⚠️ Something went wrong — please try again."
 
-#: Trailing "[OPTIONS: a | b | c]" chip trailer (a dashboard convention with no
-#: iMessage equivalent -- there are no tappable choices). Matched only at the
-#: very END of the message, so use the DOTALL/trailer canonical parser defined
-#: once in constants.py; see OPTIONS_RE_TRAILER for the ReDoS-hardening
-#: rationale.
-_OPTIONS_RE = OPTIONS_RE_TRAILER
-
 
 def _default_redactor(text: str) -> str:
     """The same pair ``TurnDriver`` streams provider text through.
@@ -63,22 +63,6 @@ def _default_redactor(text: str) -> str:
     out, _ = redact_exfiltration_urls(text or "")
     out, _ = redact_credentials(out)
     return out
-
-
-def _strip_options(text: str) -> str:
-    """Remove a trailing ``[OPTIONS: a | b | c]`` chip trailer.
-
-    iMessage has no tappable chips, so the trailer is dropped entirely -- the
-    user just replies naturally. Also hides a partial ``[OPTIONS...`` fragment
-    (no closing ``]``) so it never lands as raw text.
-    """
-    m = _OPTIONS_RE.search(text)
-    if m:
-        return text[: m.start()].rstrip()
-    idx = text.rfind("[OPTIONS")
-    if idx != -1 and "]" not in text[idx:]:
-        return text[:idx].rstrip()
-    return text
 
 
 class IMessageRenderer(Renderer):
@@ -134,7 +118,14 @@ class IMessageRenderer(Renderer):
         """
         await self._poke_typing()
 
-    async def on_prompt_choice(self, options: list[dict[str, Any]], request_id: str | int) -> None:
+    async def on_prompt_choice(
+        self,
+        options: list[dict[str, Any]],
+        request_id: str | int,
+        tool_title: str = "",
+        tool_purpose: str = "",
+        tool_input: str = "",
+    ) -> None:
         # The driver only dispatches prompt_choice for INTERACTIVE + a decider,
         # and iMessage runs decider-less (deny-by-default), so this is never
         # reached -- kept as a safe no-op per the Renderer contract.
@@ -174,6 +165,35 @@ class IMessageRenderer(Renderer):
                 )
                 raise
 
+        # The answer shipped. If credential redaction rewrote it, the reader is
+        # holding a command that will not run when pasted. A sent iMessage cannot
+        # be edited and the transport carries no annotation channel, so -- unlike
+        # the dashboard, which appends a notice row to the same segment -- the only
+        # way to say so is an ADDITIONAL follow-up message.
+        #
+        # Count from the TAG in the delivered text rather than from the redactor's
+        # warnings list, which `_default_redactor` drops: each chunk is redacted on
+        # the way out, so re-redacting the assembled answer reports nothing while
+        # the placeholders are plainly visible. Sum every tag the redactor can emit
+        # (`CREDENTIAL_REDACTION_TAGS`) so an encoded-credential-only answer is not
+        # missed.
+        #
+        # Best-effort AFTER the answer succeeded: a failure to deliver the notice
+        # must NOT re-raise and convert an already-delivered answer into a failed
+        # turn. That trade is deliberate -- the answer is out; losing the notice
+        # is a degraded warning, losing the turn would discard a delivered reply.
+        _cred_redactions = sum(content.count(tag) for tag in CREDENTIAL_REDACTION_TAGS)
+        if _cred_redactions > 0:
+            try:
+                await self._client.send(self._handle, credential_redaction_notice(_cred_redactions))
+            except (RpcError, RpcTransportError) as exc:
+                logger.warning(
+                    "imessage: could not deliver the redaction notice to %s "
+                    "(answer already sent): %s",
+                    redact_handle(self._handle),
+                    exc,
+                )
+
     async def close(self) -> None:
         """Idempotent teardown: finalize the turn if it never reached on_done.
 
@@ -195,8 +215,8 @@ class IMessageRenderer(Renderer):
 
     # -- helpers ------------------------------------------------------------
     def text(self) -> str:
-        """The turn's visible answer so far, as markdown with OPTIONS stripped."""
-        return _strip_options("".join(self._buf).strip())
+        """The turn's answer as markdown, with ``[OPTIONS:]`` as numbered text."""
+        return render_options_as_text("".join(self._buf).strip(), self.capabilities)
 
     def delivery_text(self) -> str:
         """The answer flattened for a surface that renders no markup.

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import requires_symlinks
 from kiro_crew.agent_discovery import (
     _extract_skills,
     agent_skill_globs,
@@ -49,7 +50,7 @@ def _owner_caller(monkeypatch):
     its own enumerate-the-invariant coverage in
     test_agents_endpoints_owner_auth.py."""
     monkeypatch.setattr(
-        "kiro_crew.dashboard.handlers.agents.is_owner_dashboard_request",
+        "kiro_crew.dashboard.handlers.source_providers.is_owner_dashboard_request",
         lambda request: True,
     )
 
@@ -248,6 +249,7 @@ class TestSkillKeyRoundTrip:
             == "kiro-user/utils/tiny-url"
         )
 
+    @requires_symlinks
     def test_symlinked_skill_dir_inverts_to_the_same_key(self, fake_home):
         """An AIM ``--local`` install symlinks ``~/.kiro/skills/<name>`` to a
         directory elsewhere. The written URI and its inversion must agree, or the

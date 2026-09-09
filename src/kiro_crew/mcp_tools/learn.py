@@ -184,9 +184,92 @@ def learn_add(name: str, args: dict[str, Any]) -> str:
         # sentence naming the instance mix-up -- so every tool gets that copy,
         # not just this one.
         return f"Error: {err_val}"
-    if repo_scope:
-        return f"Saved lesson (applies only in {repo_scope}): {rule}"
-    return f"Saved lesson: {rule}"
+    scope_note = f" (applies only in {repo_scope})" if repo_scope else ""
+    # The route used to answer ``{"ok": true}`` on every success path, so this tool
+    # reported "Saved lesson" even when the store had REFUSED the value or a dedup
+    # rule had dropped it -- the model was told its correction was persisted when
+    # nothing had been. ``outcome`` names what actually happened; an older gateway
+    # that does not send it falls through to the saved wording, which is what this
+    # tool said unconditionally before.
+    outcome = d.get("outcome")
+    reason = d.get("reason")
+    detail = f" ({reason})" if isinstance(reason, str) and reason else ""
+    # What this write DESTROYED, which no wording below could report before. The
+    # store's dedup rules delete a stored lesson when the submitted rule contains it
+    # or overlaps it heavily, and the route reported a plain success -- so teaching a
+    # narrower rule ("when a release is in progress, never force push...") retired
+    # the general one it contains ("never force push...") and the model was told the
+    # save succeeded. Deleting is the designed behaviour; not saying so was not.
+    #
+    # Filtered to strings from a list rather than trusted: this crosses HTTP, and an
+    # older or a hand-rolled gateway can send anything or nothing. Absent reads as
+    # "none reported", which is what every gateway said before this field existed.
+    raw_superseded = d.get("superseded")
+    dropped = (
+        [s for s in raw_superseded if isinstance(s, str) and s.strip()]
+        if isinstance(raw_superseded, list)
+        else []
+    )
+    lost = ""
+    if dropped:
+        # Named in full, not counted and not truncated to a preview: the point of
+        # this sentence is that the user can get the rule back, and a rule the model
+        # cannot read out is a rule nobody can restore -- the row is a tombstone, so
+        # this text is the last copy anything can reach.
+        shown = "".join(f"\n  - {s}" for s in dropped)
+        lost = (
+            f"\n\nWARNING -- saving this REMOVED {len(dropped)} stored "
+            f"lesson{'s' if len(dropped) != 1 else ''} whose wording this rule "
+            f"contains or overlaps:{shown}\n"
+            "Those are no longer in effect and will not appear in learn_list. Tell the "
+            "user which ones were dropped. A verbatim re-add is DECLINED while this "
+            "rule is stored, so restoring one exactly means removing this rule first; "
+            "wording that shares few significant words with it can coexist."
+        )
+    if outcome == "refused":
+        return (
+            f"Lesson was NOT saved{scope_note}: the memory store refused this "
+            f"value{detail}. Nothing was stored, so the correction is not in effect. "
+            "Re-state it in plainer wording, or tell the user it could not be saved."
+            f"{lost}"
+        )
+    if outcome == "deduped":
+        return (
+            f"Lesson was NOT saved as a new entry{detail}: an existing stored lesson "
+            f"already covers it, and that lesson stays in effect. Rule: {rule}{lost}"
+        )
+    if outcome == "unchanged":
+        # No exact-match claim here, because ``unchanged`` does not mean the stored row
+        # equals the submission. It means nothing was WRITTEN, and the store keeps
+        # several fields on a re-submit rather than rewriting them: the category is
+        # write-once (correcting it means delete then re-add), and a bare re-submit
+        # keeps a stored NOT-clause instead of deleting it. So a re-submit carrying a
+        # NEW category, or omitting a clause that is stored, still lands here -- and
+        # telling the caller it was saved "exactly as submitted" would be false in
+        # both cases. Name what was kept instead, so the model knows why the value it
+        # sent did not take effect.
+        if reason == "kept_stored_clause":
+            return (
+                f"Lesson was already stored{scope_note}, and it carries a NOT-clause "
+                f"this submission did not include -- the stored clause was kept, not "
+                f"removed. Nothing was written, and the lesson remains in effect: {rule}"
+                f"{lost}"
+            )
+        return (
+            f"Lesson was already stored{scope_note} and nothing was written. A "
+            f"re-submit does not rewrite the stored category or NOT-clause, so those "
+            f"keep the values they already had -- changing one means removing the "
+            f"lesson and adding it again. It remains in effect: {rule}{lost}"
+        )
+    if outcome == "enriched":
+        return f"Updated the stored lesson{scope_note} with the new clause: {rule}{lost}"
+    # ``lost`` is interpolated on EVERY branch, including the two that cannot carry it
+    # (``unchanged`` and ``enriched`` are decided before the dedup scan runs, so they
+    # delete nothing). It renders to the empty string when nothing was superseded, so
+    # the uniform interpolation costs nothing and means no future outcome can drop the
+    # warning by being added to a branch that forgot it -- which is the mistake that
+    # made this field necessary in the first place.
+    return f"Saved lesson{scope_note}: {rule}{lost}"
 
 
 def learn_list(name: str, args: dict[str, Any]) -> str:

@@ -22,7 +22,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kiro_crew._sqlite_compat import FTS5_UNAVAILABLE_HINT, fts5_available, sqlite3
+from kiro_crew._sqlite_compat import (
+    FTS5_UNAVAILABLE_HINT,
+    fts5_available,
+    fts5_quote_tokens,
+    sqlite3,
+)
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import config_dir
 from kiro_crew.hooks import (
@@ -32,7 +37,7 @@ from kiro_crew.hooks import (
     unc_probe_allowed,
 )
 from kiro_crew.metrics.db_metrics import timed, timed_query
-from kiro_crew.platform_compat import file_lock, is_link_or_junction
+from kiro_crew.platform_compat import file_lock, first_linked_ancestor, is_link_or_junction
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -135,6 +140,21 @@ def legacy_memory_present() -> bool:
 # ── MemoryStore ──
 
 
+def _fts5_literal_query(query: str) -> str:
+    """Turn user words into an FTS5 expression that matches them literally.
+
+    Tokens are quoted by the shared :func:`fts5_quote_tokens` primitive and
+    joined with FTS5's implicit AND: every word the user typed must appear. That
+    differs deliberately from knowledge retrieval, which drops stopwords and ORs
+    for natural-language recall -- a hand-typed memory query is precise, so
+    widening it would bury the both-words hit under single-word noise.
+
+    Returns "" when the query holds no tokens, which the caller treats as no
+    match rather than handing FTS5 an empty expression to reject.
+    """
+    return " ".join(fts5_quote_tokens(query))
+
+
 class MemoryStore:
     """Structured memory: preferences.md, projects.md, daily history, FTS5 search."""
 
@@ -166,7 +186,8 @@ class MemoryStore:
         surface enforces in :meth:`_read_root_guard`: no filesystem syscall
         may touch a path whose workspace, memory-root, or history-dir
         component is a link/junction (or an untrusted UNC workspace on
-        Windows).
+        Windows; on Windows the workspace's ancestor chain is walked too,
+        while POSIX ancestors are deliberately excluded — see the read gate).
 
         The write surface previously accumulated point defenses (hardened
         temp files, symlink-safe lock opens) while each writer still trusted
@@ -574,17 +595,28 @@ class MemoryStore:
         """Single admission gate for the structured read surface.
 
         INVARIANT: no filesystem syscall in this surface may touch a path
-        that has not passed this gate, and no component of a touched path may
-        be a link. That one property makes the whole finding class
+        that has not passed this gate, and no component of a touched path
+        may be a link -- on Windows including ancestors; on POSIX ancestors
+        are deliberately excluded (see the gate comment below). That one
+        property makes the whole REPARSE-POINT finding class
         (symlink/junction escapes, UNC credential probes, special-file reads)
-        unreachable instead of patching instances:
+        unreachable instead of patching instances. A mapped network drive or
+        ``subst`` target (a ``Z:`` drive letter bound to a network share) is
+        a residual outside this class: not UNC-shaped, no reparse point
+        anywhere, resolved only at ``realpath`` time. The gates here do not
+        screen it.
+
+        Two gates enforce the invariant:
 
         1. Windows UNC gate — purely LEXICAL, evaluated before any syscall
            (``stat``/``glob``/``exists`` on a UNC path is itself the outbound
            SMB credential probe). Mirrors ``hooks.validate_file_path``.
         2. Reparse-point gate — the memory root and history dir must not be
            symlinks or Windows junctions (``lstat``-based check that never
-           traverses the link). Leaf files get the same check in
+           traverses the link). On Windows the workspace's ANCESTOR chain is
+           walked root-first before any leaf lstat runs, because an lstat
+           resolves every ancestor even when it does not follow the final
+           component. Leaf files get the same check in
            :meth:`_guarded_entry`, so every component of every touched path
            is verified link-free.
         """
@@ -593,13 +625,31 @@ class MemoryStore:
             logger.warning("memory read refused (untrusted UNC workspace): %s", root)
             self._audit_read_refusal("unc_workspace", root, "untrusted UNC workspace")
             return False
-        # The workspace leaf is checked FIRST: a workspace swapped for a
-        # link/junction would make the two descendant checks below traverse it
-        # and validate paths inside the link's target instead of the admitted
-        # tree. lstat-based, so the link itself is never followed. (Linked
-        # ANCESTORS of the workspace are deliberately not rejected — resolving
-        # the whole chain would refuse legitimate setups like a symlinked
-        # /home, and those components are not agent-writable.)
+        # On Windows a linked ANCESTOR of the workspace defeats the lexical
+        # UNC gate above: the workspace path is not itself UNC-shaped -- only
+        # the link's target is -- and the lstat-based leaf checks below
+        # resolve every ancestor, so the probe itself would traverse the link
+        # and open the SMB connection. The walk is root-first and runs before
+        # any leaf lstat. On POSIX linked ancestors remain deliberately
+        # unrejected: resolving the whole chain would refuse legitimate
+        # setups like a symlinked /home, those components are not
+        # agent-writable, and stat-ing through a symlink is harmless there --
+        # the same Windows-only rationale as the themes wiring
+        # (dashboard/handlers/themes.py::_resolve_local_source). The walk
+        # assumes the operator-configured workspace is absolute (every
+        # in-tree constructor passes one); a relative workspace would walk
+        # only the components the path itself names.
+        if os.name == "nt" and first_linked_ancestor(self._workspace) is not None:
+            logger.warning("memory read refused (workspace ancestor is a link): %s", root)
+            self._audit_read_refusal(
+                "workspace_linked_ancestor", root, "a workspace ancestor is a link"
+            )
+            return False
+        # The workspace leaf is checked FIRST among the lstat probes: a
+        # workspace swapped for a link/junction would make the two descendant
+        # checks below traverse it and validate paths inside the link's
+        # target instead of the admitted tree. lstat-based, so the link
+        # itself is never followed.
         if (
             is_link_or_junction(self._workspace)
             or is_link_or_junction(self._memory_dir)
@@ -962,8 +1012,37 @@ class MemoryStore:
                 conn.close()
         return len(files)
 
+    def index_row_count(self) -> int | None:
+        """Rows in the FTS index, or ``None`` when the index cannot be read.
+
+        Lets a caller tell three states apart that :meth:`search` collapses into
+        one empty list: the index is unreadable, the index is empty, or the query
+        genuinely has no match. Without this, a corrupt or not-yet-built index
+        reports as "you never wrote about this", which is the one answer a memory
+        search must never give wrongly.
+        """
+        conn = None
+        try:
+            conn = self._get_db()
+            row = conn.execute("SELECT count(*) FROM memory_fts").fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            logger.debug("FTS index count failed", exc_info=True)
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
     def search(self, query: str, limit: int = 5) -> list[dict]:
-        """Search memory using FTS5. Returns [{path, snippet, rank}]."""
+        """Search memory for the literal words in ``query``.
+
+        Returns ``[{path, snippet, rank}]``. The query is treated as literal
+        text, not FTS5 expression syntax, because callers pass words a user
+        typed: a ticket id, a filename, a hyphenated term. Unescaped, ``-``
+        ``.`` and a bare ``AND`` are FTS5 syntax, so ``PROJ-123`` raises inside
+        the driver and the ``except`` below turns it into ``[]`` -- a silent
+        "you never wrote about this" for one of the likeliest queries.
+        """
         conn = None
         try:
             # Inside the try, not around it: this method handles its own errors
@@ -971,11 +1050,14 @@ class MemoryStore:
             # every failure as a success. Here a raising query is tagged
             # outcome=error before the except below swallows it.
             with timed_query("memory", "search"):
+                match = _fts5_literal_query(query)
+                if not match:
+                    return []
                 conn = self._get_db()
                 cursor = conn.execute(
                     "SELECT path, snippet(memory_fts, 1, '>>>', '<<<', '...', 32), rank "
                     "FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-                    (query, limit),
+                    (match, limit),
                 )
                 results = [
                     {"path": row[0], "snippet": row[1], "rank": row[2]} for row in cursor.fetchall()

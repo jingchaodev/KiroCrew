@@ -5,15 +5,17 @@
  * of them resolve their options through `./config` — the single place the
  * look/behavior of code and diff rendering is decided.
  */
-import { useMemo } from 'react'
+import { useId, useMemo } from 'react'
 import type { BaseCodeOptions, FileContents, SupportedLanguages } from '@pierre/diffs'
 import { EXTENSION_TO_FILE_FORMAT, parsePatchFiles, setCustomExtension } from '@pierre/diffs'
 import { File, FileDiff, MultiFileDiff, Virtualizer, WorkerPoolContext } from '@pierre/diffs/react'
 import { getOrCreateWorkerPoolSingleton } from '@pierre/diffs/worker'
 import { useIsDark } from '../hooks/useIsDark'
+import { usePlainDiff } from '../hooks/usePlainDiff'
 import { PlainCodeFallback } from './PlainCodeFallback'
 import {
   PIERRE_EXTENSION_OVERRIDES,
+  PIERRE_REGEX_ENGINE,
   PIERRE_THEMES,
   PIERRE_VIRTUALIZER_CONFIG,
   PIERRE_WORKER_POOL_SIZE,
@@ -22,6 +24,7 @@ import {
   pierreThemeType,
   type PierreDiffOptions,
 } from './config'
+import { markWorkerPoolBroken, useWorkerPoolBroken } from './workerHealth'
 
 // Registered once, at the only module that loads the library, so every surface
 // that resolves a language from a FILENAME picks the override up. Fence tags go
@@ -64,11 +67,22 @@ export function fenceLanguage(tag?: string): SupportedLanguages {
  *  NAME and caches highlight results by it, so two renders of the same file
  *  name with different text (a streaming patch, a live-edited buffer) would
  *  serve the first render's cached tokens forever. Keying on content keeps the
- *  cache correct while still deduping identical re-renders. */
-export function contentCacheKey(name: string, contents: string): string {
+ *  cache correct while still deduping identical re-renders.
+ *
+ *  `surface` identifies the MOUNTED SURFACE INSTANCE for the churn accounting
+ *  ONLY — it never enters the returned key, so cache identity is unchanged. It
+ *  must be instance-qualified (each caller prefixes a React `useId()`), because
+ *  every content-derived proxy identity admits collisions: a filename conflates
+ *  a diff's two sides, and a surface KIND still conflates two same-named fences
+ *  rendered independently. Only the component instance is the true unit of
+ *  tokenization — two instances can never share a `useId`, while a streaming
+ *  block is one instance re-rendering, so churn attribution is exact in both
+ *  directions. */
+export function contentCacheKey(name: string, contents: string, _surface = 'file'): string {
   let h = 5381
   for (let i = 0; i < contents.length; i++) h = ((h << 5) + h + contents.charCodeAt(i)) | 0
-  return `${name}:${contents.length}:${(h >>> 0).toString(36)}`
+  const key = `${name}:${contents.length}:${(h >>> 0).toString(36)}`
+  return key
 }
 
 /** Rewrites hand-written patches into ones Pierre's parser accepts.
@@ -217,35 +231,72 @@ export function normalizePatchHunks(patch: string): string {
   return changed ? lines.join('\n') : patch
 }
 
-/** One highlight worker pool for the whole tab, created on first Pierre
- *  surface and never torn down. Deliberately NOT `WorkerPoolContextProvider`:
- *  that provider terminates the shared singleton when the LAST provider
- *  unmounts, and chat surfaces live in virtualized lists where every instance
- *  can scroll out at once — remounting blocks would then queue highlights
- *  into a dead pool and paint nothing. */
-const workerPool = typeof window === 'undefined' || typeof Worker === 'undefined'
-  ? undefined
-  : getOrCreateWorkerPoolSingleton({
-      poolOptions: {
-        poolSize: PIERRE_WORKER_POOL_SIZE,
-        // worker-portable is the self-contained bundle: the plain worker.js
-        // entry carries bare package imports, which resolve when Rollup
-        // bundles the worker for production but NOT when the vite dev server
-        // serves it — the worker then errors at load and every surface waits
-        // on a pool that never initializes.
-        workerFactory: () =>
-          new Worker(new URL('@pierre/diffs/worker/worker-portable.js', import.meta.url), {
-            type: 'module',
-          }),
+/** One highlight worker pool for the whole tab, built by the first surface that
+ *  actually intends to highlight and never torn down. Deliberately NOT
+ *  `WorkerPoolContextProvider`: that provider terminates the shared singleton
+ *  when the LAST provider unmounts, and chat surfaces live in virtualized lists
+ *  where every instance can scroll out at once — remounting blocks would then
+ *  queue highlights into a dead pool and paint nothing.
+ *
+ *  On DEMAND rather than at module scope, because the pool is not cheap: every
+ *  worker spawns eagerly at init and loads its own highlighter bundle plus the
+ *  WASM regex engine (see `PIERRE_WORKER_POOL_SIZE`). A module-level call
+ *  charged that to anyone who merely LOADED this chunk — including a surface
+ *  that then decides it wants no highlighting at all, which is exactly what
+ *  plain-diff mode produces. Resolved once and memoized (including the
+ *  no-Worker environments, which memoize `undefined`), so the repeated
+ *  render-phase calls below stay idempotent. */
+let workerPool: ReturnType<typeof getOrCreateWorkerPoolSingleton> | undefined
+let workerPoolResolved = false
+
+function highlightWorkerPool(): typeof workerPool {
+  if (workerPoolResolved) return workerPool
+  workerPoolResolved = true
+  if (typeof window === 'undefined' || typeof Worker === 'undefined') return undefined
+  workerPool = getOrCreateWorkerPoolSingleton({
+    poolOptions: {
+      poolSize: PIERRE_WORKER_POOL_SIZE,
+      // worker-portable is the self-contained bundle: the plain worker.js
+      // entry carries bare package imports, which resolve when Rollup
+      // bundles the worker for production but NOT when the vite dev server
+      // serves it — the worker then errors at load and every surface waits
+      // on a pool that never initializes.
+      // The listeners are the ONLY error detection this pool has: the
+      // manager's own handler logs and returns, leaving the request that was
+      // in flight pending forever (see ./workerHealth). Attached here
+      // because the factory is the one place we hold the Worker object.
+      workerFactory: () => {
+        const worker = new Worker(new URL('@pierre/diffs/worker/worker-portable.js', import.meta.url), {
+          type: 'module',
+        })
+        // `error` covers both a worker that throws and a worker module that
+        // fails to load; `messageerror` covers a reply that cannot be
+        // deserialized, which strands the same request just as silently.
+        worker.addEventListener('error', event => markWorkerPoolBroken(event.message || event))
+        worker.addEventListener('messageerror', () => markWorkerPoolBroken('worker message could not be deserialized'))
+        return worker
       },
-      highlighterOptions: { theme: PIERRE_THEMES },
-    })
+    },
+    highlighterOptions: { theme: PIERRE_THEMES, preferredHighlighter: PIERRE_REGEX_ENGINE },
+  })
+  return workerPool
+}
 
 /** Hands every descendant the shared pool. Exported because the editor surface
  *  lives in a sibling module and needs the same one — without it Pierre falls
- *  back to `workerManager === undefined` and tokenizes on the main thread. */
-export function PierreShell({ children }: { children: React.ReactNode }) {
-  return <WorkerPoolContext.Provider value={workerPool}>{children}</WorkerPoolContext.Provider>
+ *  back to `workerManager === undefined` and tokenizes on the main thread.
+ *
+ *  `disabled` selects that main-thread fallback ON PURPOSE, for a surface no
+ *  worker can help: a pool already known broken, or a plain (uncoloured) diff
+ *  whose sides tokenize as plain text. It also means the pool is never BUILT for
+ *  such a surface — the saving, not just the bypass — so a tab that only ever
+ *  shows plain diffs spawns no workers at all. */
+export function PierreShell({ children, disabled }: { children: React.ReactNode; disabled?: boolean }) {
+  return (
+    <WorkerPoolContext.Provider value={disabled ? undefined : highlightWorkerPool()}>
+      {children}
+    </WorkerPoolContext.Provider>
+  )
 }
 
 export function PierreCodeImpl({ file, options, className, langHint, scrollClassName }: {
@@ -264,6 +315,11 @@ export function PierreCodeImpl({ file, options, className, langHint, scrollClass
   scrollClassName?: string
 }) {
   const dark = useIsDark()
+  const poolBroken = useWorkerPoolBroken()
+  // Instance identity for churn accounting: two independently mounted blocks —
+  // even with identical fence names — must never share an identity, while this
+  // one instance re-rendering with streamed content must keep its own.
+  const surfaceId = useId()
   const resolved = useMemo(
     () => pierreFileOptions({ themeType: pierreThemeType(dark), ...options }),
     [dark, options],
@@ -272,11 +328,15 @@ export function PierreCodeImpl({ file, options, className, langHint, scrollClass
     const withLang = file.lang || !langHint ? file : { ...file, lang: fenceLanguage(langHint) }
     return withLang.cacheKey
       ? withLang
-      : { ...withLang, cacheKey: contentCacheKey(withLang.name, withLang.contents) }
-  }, [file, langHint])
-  const code = <File className={className} file={resolvedFile} options={resolved} />
+      : { ...withLang, cacheKey: contentCacheKey(withLang.name, withLang.contents, surfaceId + ':file') }
+  }, [file, langHint, surfaceId])
+  const code = <File className={className} file={resolvedFile} options={resolved} disableWorkerPool={poolBroken} />
+  // Not gated on the plain-diff preference: this is a whole-FILE surface, and
+  // "plain diffs" is a choice about diffs. Its highlighting is also the case
+  // workers earn their keep on, so switching them off here would move the
+  // grammar work onto the main thread rather than remove it.
   return (
-    <PierreShell>
+    <PierreShell disabled={poolBroken}>
       {scrollClassName
         ? <Virtualizer config={PIERRE_VIRTUALIZER_CONFIG} className={scrollClassName}>{code}</Virtualizer>
         : code}
@@ -291,10 +351,12 @@ export function PierrePatchImpl({ patch, options, className, renderHeaderMetadat
   renderHeaderMetadata?: () => React.ReactNode
 }) {
   const dark = useIsDark()
+  const surfaceId = useId()
   const resolved = useMemo(
     () => pierreDiffOptions({ themeType: pierreThemeType(dark), ...options }),
     [dark, options],
   )
+  const poolBroken = useWorkerPoolBroken()
   // Parse here rather than using <PatchDiff>: that component ASSERTS exactly
   // one complete file diff and throws otherwise, but chat patches stream
   // through partial frames (bare headers, unterminated hunks) and may carry
@@ -311,13 +373,13 @@ export function PierrePatchImpl({ patch, options, className, renderHeaderMetadat
           const prev = f.prevName.slice(2)
           f.prevName = prev === f.name ? undefined : prev
         }
-        f.cacheKey = contentCacheKey(f.name ?? '', patch)
+        f.cacheKey = contentCacheKey(f.name ?? '', patch, surfaceId + ':patch')
       }
       return parsed
     } catch {
       return []
     }
-  }, [patch])
+  }, [patch, surfaceId])
   // Zero files is an outright parse failure. Zero HUNKS across every file is
   // the subtler one: Pierre reads that as a pure rename and draws a header with
   // `+0 −0` and no rows — so when the raw text plainly carries changes, treat
@@ -327,14 +389,20 @@ export function PierrePatchImpl({ patch, options, className, renderHeaderMetadat
   const noHunks = files.length > 0 && files.every(f => (f.hunks?.length ?? 0) === 0)
   const looksLikeChanges = /^[+-](?![+-][+-] )/m.test(patch)
   if (files.length === 0 || (noHunks && looksLikeChanges)) return <PlainCodeFallback text={patch} />
+  // No plain-diff gate needed: `PierrePatch` returns the raw patch text before
+  // it ever requests this chunk in that mode, so reaching here means colour is
+  // on. That early return is the strongest form of the saving — the module, the
+  // pool and the workers are all skipped — and is why the gate below lives on
+  // the file-PAIR surface, which has no raw patch to fall back to.
   return (
-    <PierreShell>
+    <PierreShell disabled={poolBroken}>
       {files.map((fileDiff, i) => (
         <FileDiff
           key={`${fileDiff.name ?? ''}:${i}`}
           className={className}
           fileDiff={fileDiff}
           options={resolved}
+          disableWorkerPool={poolBroken}
           renderHeaderMetadata={i === 0 && renderHeaderMetadata ? renderHeaderMetadata : undefined}
         />
       ))}
@@ -358,20 +426,44 @@ export function PierreFilePairImpl({ oldFile, newFile, options, className, rende
   renderHeaderFilenameSuffix?: () => React.ReactNode
 }) {
   const dark = useIsDark()
+  const surfaceId = useId()
   const resolved = useMemo(
     () => pierreDiffOptions({ themeType: pierreThemeType(dark), ...options }),
     [dark, options],
   )
+  const poolBroken = useWorkerPoolBroken()
+  const [plain] = usePlainDiff()
+  // Plain mode (Settings → Chat → Messages → Plain diffs) reaches this surface
+  // too, but it cannot arrive the way it does at `PierrePatch`: a file PAIR is
+  // handed two bodies and no patch, so the diff still has to be COMPUTED here —
+  // printing raw text would mean implementing a diff algorithm, which is not a
+  // rendering choice. What plain mode drops instead is the colour: both sides
+  // are declared `text`, Pierre's plaintext grammar, so the rows, gutters and ±
+  // markers all survive and only the tokenization goes away.
+  //
+  // Which is also why the workers go with it rather than merely being bypassed.
+  // Plain text has nothing to tokenize, so a worker would be spawned to do no
+  // work — and `disabled` here means the pool is never CONSTRUCTED, so a tab
+  // whose only Pierre surfaces are plain diffs pays for no workers at all. Note
+  // this is the opposite reasoning from `disableWorkerPool={poolBroken}`, which
+  // moves REAL grammar work to the main thread as a last resort.
+  const noWorkers = plain || poolBroken
+  const plainLang: SupportedLanguages | undefined = plain ? 'text' : undefined
   // MultiFileDiff requires at least one populated side; both-null cannot
   // happen from our call sites (DiffPanel banners the identical case away and
   // new/deleted files carry one side), but the type demands the narrowing.
+  //
+  // The cacheKey carries the mode: Pierre caches tokens by that key, so without
+  // the suffix a live toggle (`usePersistedBool` re-renders every surface in the
+  // tab) would serve the coloured render's cached tokens to the plain one and
+  // vice versa.
   const keyedOld = useMemo(
-    () => (oldFile ? { ...oldFile, cacheKey: contentCacheKey(oldFile.name, oldFile.contents) } : null),
-    [oldFile],
+    () => (oldFile ? { ...oldFile, lang: plainLang ?? oldFile.lang, cacheKey: contentCacheKey(oldFile.name, oldFile.contents, surfaceId + ':diff-old') + (plain ? ':plain' : '') } : null),
+    [oldFile, surfaceId, plain, plainLang],
   )
   const keyedNew = useMemo(
-    () => (newFile ? { ...newFile, cacheKey: contentCacheKey(newFile.name, newFile.contents) } : null),
-    [newFile],
+    () => (newFile ? { ...newFile, lang: plainLang ?? newFile.lang, cacheKey: contentCacheKey(newFile.name, newFile.contents, surfaceId + ':diff-new') + (plain ? ':plain' : '') } : null),
+    [newFile, surfaceId, plain, plainLang],
   )
   if (!keyedOld && !keyedNew) return null
   const input = (keyedOld && keyedNew
@@ -380,8 +472,8 @@ export function PierreFilePairImpl({ oldFile, newFile, options, className, rende
       ? { oldFile: keyedOld, newFile: null }
       : { oldFile: null, newFile: keyedNew as FileContents })
   return (
-    <PierreShell>
-      <MultiFileDiff className={className} {...input} options={resolved} renderHeaderMetadata={renderHeaderMetadata} renderHeaderPrefix={renderHeaderPrefix} renderHeaderFilenameSuffix={renderHeaderFilenameSuffix} />
+    <PierreShell disabled={noWorkers}>
+      <MultiFileDiff className={className} {...input} options={resolved} disableWorkerPool={noWorkers} renderHeaderMetadata={renderHeaderMetadata} renderHeaderPrefix={renderHeaderPrefix} renderHeaderFilenameSuffix={renderHeaderFilenameSuffix} />
     </PierreShell>
   )
 }

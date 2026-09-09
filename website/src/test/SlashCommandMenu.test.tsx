@@ -11,7 +11,8 @@ import SlashCommandMenu from '../components/SlashCommandMenu'
 
 // Commands distinct from the component's FALLBACK set, so findByText waits for
 // the resolved query (not the transient FALLBACK render) before we navigate.
-// Include /kb so FRONTEND_COMMANDS adds nothing extra → list is exactly these.
+// Include /kb so the only extra FRONTEND_COMMANDS row is /plain — a quick prompt
+// the backend never reports, asserted below.
 const CMDS = [
   { name: '/aa', description: 'Alpha command' },
   { name: '/bb', description: 'Beta command' },
@@ -47,8 +48,16 @@ describe('SlashCommandMenu (shared-hook migration)', () => {
     expect(screen.getByText('/cc')).toBeInTheDocument()
   })
 
-  it('renders each command description from the API', async () => {
+  // /plain is a quick prompt: a backend MACRO, so GET /api/slash-commands never
+  // reports it. It reaches the menu only through FRONTEND_COMMANDS, which is the
+  // one thing that makes it discoverable at all.
+  it('offers /plain even though the API does not report it', async () => {
     render(<Harness input="/" />)
+    expect(await screen.findByText('/aa')).toBeInTheDocument()
+    expect(screen.getByText('/plain')).toBeInTheDocument()
+  })
+
+  it('renders each command description from the API', async () => {    render(<Harness input="/" />)
     // Wait for the resolved query, then assert the description column renders.
     expect(await screen.findByText('Alpha command')).toBeInTheDocument()
     expect(screen.getByText('Beta command')).toBeInTheDocument()
@@ -95,7 +104,7 @@ describe('SlashCommandMenu offline fallback (blocked commands hidden)', () => {
   // would advertise a gesture the dashboard rejects (/tangent regressed this
   // way once), so pin its absence on the API-failure path where the fallback
   // is what the user actually sees.
-  const BLOCKED = ['/tangent', '/quit', '/exit', '/q', '/chat', '/paste', '/reply', '/editor']
+  const BLOCKED = ['/tangent', '/quit', '/exit', '/q', '/chat', '/paste', '/reply', '/editor', '/todos']
 
   it('renders no blocked command when the API query fails', async () => {
     mockApi.slashCommands.mockRejectedValue(new Error('offline'))
@@ -112,9 +121,9 @@ describe('SlashCommandMenu offline fallback (blocked commands hidden)', () => {
     mockApi.slashCommands.mockRejectedValue(new Error('offline'))
     render(<Harness input="/tan" />)
     // Nothing in the fallback matches the /tan prefix. Once the query settles
-    // (error counts as settled), the menu shows the zero-match empty state —
-    // announcing that Enter now sends — rather than an inert /tangent row.
-    expect(await screen.findByText(/No matching commands — Enter sends the message/)).toBeInTheDocument()
+    // (error counts as settled), the menu announces that Enter now sends —
+    // naming the failed load, not a zero-match, and never an inert /tangent.
+    expect(await screen.findByText(/Couldn't load commands — Enter sends the message/)).toBeInTheDocument()
     expect(screen.queryByText('/tangent')).not.toBeInTheDocument()
     expect(screen.queryByRole('option')).not.toBeInTheDocument()
   })
@@ -150,7 +159,7 @@ describe('SlashCommandMenu zero-match key release', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('while the commands fetch is in flight, Enter stays swallowed and no empty state shows yet', async () => {
+  it('while the commands fetch is in flight, Enter stays swallowed and the menu names the wait', async () => {
     // Before the remote list replaces the synchronous fallback, a
     // server-only command like "/xyz" is transiently a zero-match; releasing
     // there would send the half-typed command as a chat message.
@@ -159,7 +168,8 @@ describe('SlashCommandMenu zero-match key release', () => {
     const onClose = vi.fn()
     render(<Harness input="/xyz" onSelect={onSelect} onClose={onClose} />)
     await waitFor(() => expect(mockApi.slashCommands).toHaveBeenCalled())
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(await screen.findByText(/Loading commands…/)).toBeInTheDocument()
+    expect(screen.queryByText(/No matching commands/)).not.toBeInTheDocument()
     expect(fireEvent.keyDown(document, { key: 'Enter' })).toBe(false)
     expect(onClose).not.toHaveBeenCalled()
     expect(onSelect).not.toHaveBeenCalled()

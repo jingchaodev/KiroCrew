@@ -68,10 +68,17 @@ from functools import partial, wraps
 
 from aiohttp import web
 
-from kiro_crew.apps.builtins.issue_radar.backend import github_client, provider, store, watch
+from kiro_crew.apps.builtins.issue_radar.backend import (
+    github_client,
+    pipeline_routes,
+    provider,
+    store,
+    watch,
+)
 from kiro_crew.apps.manager import is_app_enabled
 from kiro_crew.config.loader import KiroCrewConfig
-from kiro_crew.context import ui_language_tag
+from kiro_crew.context import normalize_ui_language_tag, ui_language_tag
+from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.sel import sel
 
 logger = logging.getLogger("kirocrew.app.issue-radar")
@@ -79,9 +86,17 @@ logger = logging.getLogger("kirocrew.app.issue-radar")
 # Re-exported so the module's own `except GhCliError` clauses read
 # as provider-neutral, which they now are: both clients raise these exact classes
 # (see backend/errors.py — they are aliases, not parallel hierarchies).
+#
+# PrSearchError is listed for the same reason, and ONLY for that reason: it was
+# already caught as `github_client.PrSearchError`, which is not a bug — it is
+# literally the same class object every client raises (`errors.PrSearchError`,
+# re-exported by name), so the clause already caught GitLab's and will catch
+# Azure's. Reading it off one provider's module only made a provider-neutral catch
+# look provider-specific.
 GhCliError = github_client.GhCliError
 GhPermissionError = github_client.GhPermissionError
 GhSetupError = github_client.GhSetupError
+PrSearchError = github_client.PrSearchError
 # The provider rejected a VALUE in the request (an unassignable login). A subclass
 # of GhCliError, so it must be caught BEFORE the generic clause or it lands in the
 # 502 branch it exists to avoid.
@@ -98,9 +113,7 @@ def _account_key(request: web.Request) -> provider.RepoKey:
     allowlist at the spawn boundary, which is what stops a crafted host reaching
     an arbitrary GitLab instance on an endpoint that has no connected-repo gate.
     """
-    return provider.key_from_parts(
-        "", "", request.query.get("provider"), request.query.get("host")
-    )
+    return provider.key_from_parts("", "", request.query.get("provider"), request.query.get("host"))
 
 
 def _key_from_request(request: web.Request) -> provider.RepoKey:
@@ -191,9 +204,7 @@ def _identity(key: provider.RepoKey) -> dict[str, str]:
 
 def _connected(key: provider.RepoKey) -> bool:
     """Whether ``key`` is a connected repo (the authorization gate)."""
-    return store.is_repo_connected(
-        key.owner, key.repo, provider=key.provider, host=key.host
-    )
+    return store.is_repo_connected(key.owner, key.repo, provider=key.provider, host=key.host)
 
 
 def _require_enabled(handler):
@@ -202,6 +213,7 @@ def _require_enabled(handler):
     otherwise stay callable. ``is_app_enabled`` is a synchronous installed.json
     read, so it runs off the event loop (same as watch.py / the dashboard
     notifications_push handler)."""
+
     @wraps(handler)
     async def _wrapped(request: web.Request) -> web.Response:
         if not await asyncio.to_thread(is_app_enabled, store.APP_NAME):
@@ -281,7 +293,8 @@ def _load_members(key: provider.RepoKey) -> tuple[list[dict], str]:
         collaborators = client.list_repo_collaborators(owner, repo, **pkw)
         members = [
             {"login": c["login"], "role": c.get("role_name") or "member"}
-            for c in collaborators if c.get("login")
+            for c in collaborators
+            if c.get("login")
         ]
         members.sort(key=lambda m: m["login"].lower())
         source = "collaborators"
@@ -351,12 +364,14 @@ async def _handle_connect(request: web.Request) -> web.Response:
         )
     )
 
-    return web.json_response({
-        **_identity(key),
-        "full_name": summary.get("full_name", f"{owner}/{repo}"),
-        "private": summary.get("private", False),
-        "open_issues_count": summary.get("open_issues_count", 0),
-    })
+    return web.json_response(
+        {
+            **_identity(key),
+            "full_name": summary.get("full_name", f"{owner}/{repo}"),
+            "private": summary.get("private", False),
+            "open_issues_count": summary.get("open_issues_count", 0),
+        }
+    )
 
 
 # Hard ceiling on how long a poll may keep answering from the cache without a
@@ -398,7 +413,7 @@ _probe_inflight: dict[_ProbeKey, "asyncio.Future[dict]"] = {}
 # Guards the two maps ONLY. It is deliberately never held across the probe call
 # itself: a global lock around a 20s-timeout `gh` invocation would make one slow
 # repo's probe stall every other repo's and kind's poll response.
-_probe_lock = asyncio.Lock()
+_probe_lock = LoopBoundLock()
 
 
 def _remember_probe(key: _ProbeKey, task: "asyncio.Future[dict]") -> None:
@@ -428,13 +443,20 @@ async def _coalesced_probe(repo_key: provider.RepoKey, kind: str) -> dict:
     be served as another's and a list be declared unchanged on the strength of a
     different server's answer.
 
+    The name segments are folded to the PROVIDER's own case semantics
+    (``store.name_compare_key``) rather than lowercased outright. Lowercasing is
+    the same confusion one level down: on a case-sensitive provider
+    ``group/Project`` and ``group/project`` are different projects, and a shared
+    memo key would answer one of them with the other's probe -- declaring a list
+    unchanged on a reading that was never taken of it.
+
     Raises :class:`GhCliError` like the underlying call.
     """
     key = (
         repo_key.provider,
         repo_key.host,
-        repo_key.owner.lower(),
-        repo_key.repo.lower(),
+        store.name_compare_key(repo_key.owner, repo_key.provider),
+        store.name_compare_key(repo_key.repo, repo_key.provider),
         kind,
     )
     async with _probe_lock:
@@ -543,8 +565,10 @@ async def _handle_issues(request: web.Request) -> web.Response:
 
     force_refresh = request.query.get("refresh") == "1"
     is_poll = request.query.get("poll") == "1"
-    snapshot = None if force_refresh else await _st(
-        key, store.read_issues_snapshot, owner, repo, state=state
+    snapshot = (
+        None
+        if force_refresh
+        else await _st(key, store.read_issues_snapshot, owner, repo, state=state)
     )
     probe: dict | None = None
     if snapshot is not None and is_poll:
@@ -552,10 +576,14 @@ async def _handle_issues(request: web.Request) -> web.Response:
         if not serve_cache:
             snapshot = None
     if snapshot is not None:
-        return web.json_response({
-            **_identity(key), "state": state,
-            "issues": snapshot["rows"], "from_cache": True,
-        })
+        return web.json_response(
+            {
+                **_identity(key),
+                "state": state,
+                "issues": snapshot["rows"],
+                "from_cache": True,
+            }
+        )
 
     fetch = client.list_open_issues if state == "open" else client.list_closed_issues
     try:
@@ -564,8 +592,13 @@ async def _handle_issues(request: web.Request) -> web.Response:
         # just made would vanish from the list (see store.refresh_issues_cache).
         # The poll fingerprint rides along so rows and probe land in one write.
         issues = await _st(
-            key, store.refresh_issues_cache, owner, repo,
-            lambda: fetch(owner, repo, **pkw), state=state, probe=probe,
+            key,
+            store.refresh_issues_cache,
+            owner,
+            repo,
+            lambda: fetch(owner, repo, **pkw),
+            state=state,
+            probe=probe,
         )
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
@@ -594,20 +627,33 @@ async def _handle_issues_first_page(
     owner, repo = key.owner, key.repo
     snapshot = await _st(key, store.read_issues_snapshot, owner, repo, state="open")
     if snapshot is not None:
-        return web.json_response({
-            **_identity(key), "state": "open",
-            "issues": snapshot["rows"], "from_cache": True, "partial": False,
-        })
+        return web.json_response(
+            {
+                **_identity(key),
+                "state": "open",
+                "issues": snapshot["rows"],
+                "from_cache": True,
+                "partial": False,
+            }
+        )
     try:
         issues = await asyncio.to_thread(
             partial(client.list_open_issues_first_page, owner, repo, **pkw)
         )
     except GhCliError as exc:
-        return web.json_response({"error": str(exc), "code": "provider_error"}, status=502)
-    return web.json_response({
-        **_identity(key), "state": "open",
-        "issues": issues, "from_cache": False, "partial": True,
-    })
+        logger.warning("issue-radar list_open_issues provider error: %s", exc)
+        return web.json_response(
+            {"error": "upstream provider error", "code": "provider_error"}, status=502
+        )
+    return web.json_response(
+        {
+            **_identity(key),
+            "state": "open",
+            "issues": issues,
+            "from_cache": False,
+            "partial": True,
+        }
+    )
 
 
 async def _handle_labels(request: web.Request) -> web.Response:
@@ -632,14 +678,19 @@ async def _handle_labels(request: web.Request) -> web.Response:
     force_refresh = request.query.get("refresh") == "1"
     cached = None if force_refresh else await _st(key, store.read_labels_cache, owner, repo)
     if cached is not None:
-        return web.json_response({"owner": owner, "repo": repo, "labels": cached, "from_cache": True})
+        return web.json_response(
+            {"owner": owner, "repo": repo, "labels": cached, "from_cache": True}
+        )
 
     try:
         # Fetch and store under ONE lock, so a label created between the two cannot
         # be overwritten by this pre-fetch snapshot and left invisible in every
         # picker (see store.refresh_labels_cache).
         labels = await _st(
-            key, store.refresh_labels_cache, owner, repo,
+            key,
+            store.refresh_labels_cache,
+            owner,
+            repo,
             lambda: client.list_repo_labels(owner, repo, **pkw),
         )
     except GhCliError as exc:
@@ -670,18 +721,29 @@ async def _handle_members(request: web.Request) -> web.Response:
     force_refresh = request.query.get("refresh") == "1"
     cached = None if force_refresh else await _st(key, store.read_members_cache, owner, repo)
     if cached is not None:
-        return web.json_response({
-            "owner": owner, "repo": repo,
-            "members": cached["members"], "source": cached.get("source"), "from_cache": True,
-        })
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "members": cached["members"],
+                "source": cached.get("source"),
+                "from_cache": True,
+            }
+        )
 
     try:
         members, source = await asyncio.to_thread(_load_members, key)
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
-    return web.json_response({
-        "owner": owner, "repo": repo, "members": members, "source": source, "from_cache": False,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "members": members,
+            "source": source,
+            "from_cache": False,
+        }
+    )
 
 
 async def _handle_repos(request: web.Request) -> web.Response:
@@ -707,7 +769,10 @@ async def _handle_repos(request: web.Request) -> web.Response:
             # switcher self-heals every row against the right server rather than
             # asking GitHub about a GitLab project.
             entry_key = provider.key_from_parts(
-                str(r.get("owner") or ""), str(r.get("repo") or ""), r.get("provider"), r.get("host")
+                str(r.get("owner") or ""),
+                str(r.get("repo") or ""),
+                r.get("provider"),
+                r.get("host"),
             )
             entry_client = provider.client_for(entry_key)
             async with sem:
@@ -786,18 +851,24 @@ async def _handle_recent_repos(request: web.Request) -> web.Response:
     key = _account_key(request)
     client = provider.client_for(key)
     pkw = provider.call_kwargs(key)
+    # Both windows come off the DISPATCHED client, not github_client: they are that
+    # provider's own bounds (its feed horizon, its accepted range), and reading
+    # GitHub's would apply one provider's limits to another's request. Same
+    # reasoning as _pr_merge_method_field.
+    contrib_window_days = client.CONTRIB_WINDOW_DAYS  # type: ignore[attr-defined]
+    max_window_days = client.MAX_WINDOW_DAYS  # type: ignore[attr-defined]
     raw_days = (request.query.get("days") or "").strip()
     try:
-        days = int(raw_days) if raw_days else github_client.CONTRIB_WINDOW_DAYS
+        days = int(raw_days) if raw_days else contrib_window_days
     except ValueError:
         return web.json_response({"error": "days must be an integer"}, status=400)
     # Bounded before it reaches timedelta(days=...): an arbitrarily large value
     # raises OverflowError there, which would surface as a 500. 0 stays legal
     # (it disables the window); MAX_WINDOW_DAYS is far beyond the event feed's
     # own ~90-day horizon, so the cap costs nothing in practice.
-    if not 0 <= days <= github_client.MAX_WINDOW_DAYS:
+    if not 0 <= days <= max_window_days:
         return web.json_response(
-            {"error": f"days must be between 0 and {github_client.MAX_WINDOW_DAYS}"},
+            {"error": f"days must be between 0 and {max_window_days}"},
             status=400,
         )
 
@@ -807,9 +878,7 @@ async def _handle_recent_repos(request: web.Request) -> web.Response:
         # Host isn't set up (no gh, or no session). Not an error the user can
         # retry away — answer 200 with a reason so the dialog can render install
         # / `gh auth login` instructions and keep the manual URL field usable.
-        return web.json_response(
-            {"repos": [], "setup_required": exc.reason, "error": str(exc)}
-        )
+        return web.json_response({"repos": [], "setup_required": exc.reason, "error": str(exc)})
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
     if not login:
@@ -822,19 +891,24 @@ async def _handle_recent_repos(request: web.Request) -> web.Response:
             partial(client.list_contributed_repos, login, within_days=days, **pkw)
         )
     except GhSetupError as exc:
-        return web.json_response(
-            {"repos": [], "setup_required": exc.reason, "error": str(exc)}
-        )
+        return web.json_response({"repos": [], "setup_required": exc.reason, "error": str(exc)})
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
 
-    # Case-INSENSITIVE identity: GitHub owner/repo names are case-preserving
-    # but not case-sensitive, and the event feed can spell a repo differently
-    # from the stored config (`Owner/Repo` vs `owner/repo`). A case-sensitive
-    # compare would mark an already-connected repo as connectable and let the
-    # user create a duplicate config + cache entry for the same repo.
+    # Name identity follows the PROVIDER's case semantics, via the same helper the
+    # authorization gate uses (store._name_matches is defined in terms of it). On
+    # GitHub the names are case-preserving but not case-sensitive, and the event
+    # feed can spell a repo differently from the stored config (`Owner/Repo` vs
+    # `owner/repo`); a case-sensitive compare there would mark an
+    # already-connected repo as connectable and let the user create a duplicate
+    # config + cache entry for the same repo. Casefolding UNCONDITIONALLY has the
+    # opposite failure on a case-sensitive provider: two genuinely distinct
+    # projects collapse, and one is shown as already connected when it is not.
     def _key(owner: object, repo: object) -> tuple[str, str]:
-        return (str(owner or "").casefold(), str(repo or "").casefold())
+        return (
+            store.name_compare_key(str(owner or ""), key.provider),
+            store.name_compare_key(str(repo or ""), key.provider),
+        )
 
     connected = {
         _key(r.get("owner"), r.get("repo"))
@@ -908,8 +982,10 @@ async def _handle_put_settings(request: web.Request) -> web.Response:
     expected = settings.get("revision")
     if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
         return web.json_response(
-            {"error": "'settings.revision' is required (send the revision you read, "
-                      "so a write built on stale settings can be refused)"},
+            {
+                "error": "'settings.revision' is required (send the revision you read, "
+                "so a write built on stale settings can be refused)"
+            },
             status=400,
         )
 
@@ -929,7 +1005,7 @@ async def _handle_put_settings(request: web.Request) -> web.Response:
         return web.json_response(
             {
                 "error": "These settings changed in another tab while you were editing. "
-                         "Reload to pick up the newer version, then re-apply your change.",
+                "Reload to pick up the newer version, then re-apply your change.",
                 "settings": conflict.current,
             },
             status=409,
@@ -984,18 +1060,27 @@ async def _handle_issue_detail(request: web.Request) -> web.Response:
         )
 
     force_refresh = request.query.get("refresh") == "1"
-    cached = None if force_refresh else await _st(
-        key, store.read_issue_detail_cache, owner, repo, number
+    cached = (
+        None
+        if force_refresh
+        else await _st(key, store.read_issue_detail_cache, owner, repo, number)
     )
     if cached is not None and cached.get("detail") is not None:
-        return web.json_response({
-            "owner": owner, "repo": repo, "number": number,
-            "detail": cached["detail"], "timeline": cached.get("timeline", []),
-            "from_cache": True,
-        })
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "number": number,
+                "detail": cached["detail"],
+                "timeline": cached.get("timeline", []),
+                "from_cache": True,
+            }
+        )
 
     try:
-        detail = await asyncio.to_thread(partial(client.get_issue_detail, owner, repo, number, **pkw))
+        detail = await asyncio.to_thread(
+            partial(client.get_issue_detail, owner, repo, number, **pkw)
+        )
         timeline = await asyncio.to_thread(
             partial(client.list_issue_timeline, owner, repo, number, **pkw)
         )
@@ -1003,10 +1088,16 @@ async def _handle_issue_detail(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=502)
 
     await _st(key, store.write_issue_detail_cache, owner, repo, number, detail, timeline)
-    return web.json_response({
-        "owner": owner, "repo": repo, "number": number,
-        "detail": detail, "timeline": timeline, "from_cache": False,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "detail": detail,
+            "timeline": timeline,
+            "from_cache": False,
+        }
+    )
 
 
 # ── pull requests (read-only list + detail) ─────────────────────────────────
@@ -1051,8 +1142,10 @@ async def _handle_pulls(request: web.Request) -> web.Response:
 
     force_refresh = request.query.get("refresh") == "1"
     is_poll = request.query.get("poll") == "1"
-    snapshot = None if force_refresh else await _st(
-        key, store.read_pulls_snapshot, owner, repo, state=state
+    snapshot = (
+        None
+        if force_refresh
+        else await _st(key, store.read_pulls_snapshot, owner, repo, state=state)
     )
     probe: dict | None = None
     if snapshot is not None and is_poll:
@@ -1060,11 +1153,15 @@ async def _handle_pulls(request: web.Request) -> web.Response:
         if not serve_cache:
             snapshot = None
     if snapshot is not None:
-        return web.json_response({
-            **_identity(key), "state": state,
-            "pulls": snapshot["rows"], "from_cache": True,
-            "bulk_max": _BULK_PR_MAX,
-        })
+        return web.json_response(
+            {
+                **_identity(key),
+                "state": state,
+                "pulls": snapshot["rows"],
+                "from_cache": True,
+                "bulk_max": _BULK_PR_MAX,
+            }
+        )
 
     fetch = client.list_open_pulls if state == "open" else client.list_closed_pulls
     try:
@@ -1089,8 +1186,13 @@ async def _handle_pulls(request: web.Request) -> web.Response:
     else:
         await _st(key, store.drop_pulls_cache, owner, repo, state)
     return web.json_response(
-        {**_identity(key), "state": state, "pulls": pulls, "from_cache": False,
-         "bulk_max": _BULK_PR_MAX}
+        {
+            **_identity(key),
+            "state": state,
+            "pulls": pulls,
+            "from_cache": False,
+            "bulk_max": _BULK_PR_MAX,
+        }
     )
 
 
@@ -1121,22 +1223,35 @@ async def _handle_pulls_first_page(
     owner, repo = key.owner, key.repo
     snapshot = await _st(key, store.read_pulls_snapshot, owner, repo, state="open")
     if snapshot is not None:
-        return web.json_response({
-            **_identity(key), "state": "open",
-            "pulls": snapshot["rows"], "from_cache": True, "partial": False,
-            "bulk_max": _BULK_PR_MAX,
-        })
+        return web.json_response(
+            {
+                **_identity(key),
+                "state": "open",
+                "pulls": snapshot["rows"],
+                "from_cache": True,
+                "partial": False,
+                "bulk_max": _BULK_PR_MAX,
+            }
+        )
     try:
         pulls = await asyncio.to_thread(
             partial(client.list_open_pulls_first_page, owner, repo, **pkw)
         )
     except GhCliError as exc:
-        return web.json_response({"error": str(exc), "code": "provider_error"}, status=502)
-    return web.json_response({
-        **_identity(key), "state": "open",
-        "pulls": pulls, "from_cache": False, "partial": True,
-        "bulk_max": _BULK_PR_MAX,
-    })
+        logger.warning("issue-radar list_open_pulls provider error: %s", exc)
+        return web.json_response(
+            {"error": "upstream provider error", "code": "provider_error"}, status=502
+        )
+    return web.json_response(
+        {
+            **_identity(key),
+            "state": "open",
+            "pulls": pulls,
+            "from_cache": False,
+            "partial": True,
+            "bulk_max": _BULK_PR_MAX,
+        }
+    )
 
 
 async def _handle_pulls_search(request: web.Request) -> web.Response:
@@ -1168,23 +1283,31 @@ async def _handle_pulls_search(request: web.Request) -> web.Response:
             {"error": f"{owner}/{repo} is not connected — call /connect first"}, status=404
         )
 
+    # The search cap is the DISPATCHED client's own (it is that CLI's paging
+    # ceiling), not GitHub's — see _pr_merge_method_field for the same reasoning.
+    # It is read once and reused, so the ceiling requested, the truncation test
+    # and the number reported to the UI cannot disagree.
+    search_max = client.PR_SEARCH_MAX  # type: ignore[attr-defined]
     try:
         pulls = await asyncio.to_thread(
-            partial(client.search_pulls, owner, repo, **pkw), state=state, author=author,
-            assignee=assignee, review_requested=review_requested,
+            partial(client.search_pulls, owner, repo, **pkw),
+            state=state,
+            author=author,
+            assignee=assignee,
+            review_requested=review_requested,
             # One MORE than we will return, so "was anything left out?" is answered
             # by fact rather than by `len(rows) == cap` — a person with exactly the
             # cap's worth of matches omits nothing and must not be labelled capped.
-            limit=github_client.PR_SEARCH_MAX + 1,
+            limit=search_max + 1,
         )
-    except github_client.PrSearchError as exc:
+    except PrSearchError as exc:
         # Bad state / invalid login / no person qualifier — a client input error.
         return web.json_response({"error": str(exc)}, status=400)
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
 
-    truncated = len(pulls) > github_client.PR_SEARCH_MAX
-    pulls = pulls[:github_client.PR_SEARCH_MAX]
+    truncated = len(pulls) > search_max
+    pulls = pulls[:search_max]
 
     # Search rows carry no diff size or check state, so the cards would lose their
     # bottom row the moment a person filter is on. Enrich BY NUMBER (not by state)
@@ -1193,16 +1316,22 @@ async def _handle_pulls_search(request: web.Request) -> web.Response:
         partial(client.enrich_pulls_by_number, owner, repo, pulls, **pkw)
     )
 
-    return web.json_response({
-        "owner": owner, "repo": repo, "state": state,
-        "pulls": pulls, "from_cache": False, "bulk_max": _BULK_PR_MAX,
-        # The search is capped (PR_SEARCH_MAX). Saying so lets the UI stop
-        # implying "this is every PR of yours in the repo" when it is the newest N —
-        # the whole point of this route is escaping the list's page cap, so
-        # silently imposing another one would undo that claim.
-        "truncated": truncated,
-        "limit": github_client.PR_SEARCH_MAX,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "state": state,
+            "pulls": pulls,
+            "from_cache": False,
+            "bulk_max": _BULK_PR_MAX,
+            # The search is capped (PR_SEARCH_MAX). Saying so lets the UI stop
+            # implying "this is every PR of yours in the repo" when it is the newest N —
+            # the whole point of this route is escaping the list's page cap, so
+            # silently imposing another one would undo that claim.
+            "truncated": truncated,
+            "limit": search_max,
+        }
+    )
 
 
 async def _handle_pull_detail(request: web.Request) -> web.Response:
@@ -1235,18 +1364,31 @@ async def _handle_pull_detail(request: web.Request) -> web.Response:
         )
 
     force_refresh = request.query.get("refresh") == "1"
-    cached = None if force_refresh else await _st(
-        key, store.read_pr_detail_cache, owner, repo, number,
-        max_age_sec=store.PR_DETAIL_CACHE_TTL_SEC,
+    cached = (
+        None
+        if force_refresh
+        else await _st(
+            key,
+            store.read_pr_detail_cache,
+            owner,
+            repo,
+            number,
+            max_age_sec=store.PR_DETAIL_CACHE_TTL_SEC,
+        )
     )
     if cached is not None and cached.get("detail") is not None:
-        return web.json_response({
-            "owner": owner, "repo": repo, "number": number,
-            "detail": cached["detail"], "timeline": cached.get("timeline", []),
-            "checks": cached.get("checks", []),
-            "checks_summary": client.summarize_checks(cached.get("checks") or []),
-            "from_cache": True,
-        })
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "number": number,
+                "detail": cached["detail"],
+                "timeline": cached.get("timeline", []),
+                "checks": cached.get("checks", []),
+                "checks_summary": client.summarize_checks(cached.get("checks") or []),
+                "from_cache": True,
+            }
+        )
 
     try:
         # The detail fetch usually pays a deliberate retry for mergeability (GitHub
@@ -1265,7 +1407,8 @@ async def _handle_pull_detail(request: web.Request) -> web.Response:
         head_sha = detail.get("head_sha")
         checks = (
             await asyncio.to_thread(partial(client.list_pr_checks, owner, repo, head_sha, **pkw))
-            if head_sha else []
+            if head_sha
+            else []
         )
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
@@ -1276,17 +1419,21 @@ async def _handle_pull_detail(request: web.Request) -> web.Response:
     # couple of minutes, and without this the card kept whatever the last list
     # refresh computed.
     checks_summary = client.summarize_checks(checks)
-    await _st(
-        key, store.apply_pr_checks_to_list_cache, owner, repo, number, checks_summary
+    await _st(key, store.apply_pr_checks_to_list_cache, owner, repo, number, checks_summary)
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "detail": detail,
+            "timeline": timeline,
+            "checks": checks,
+            # Echoed so the client can patch its cached list row without refetching
+            # the whole list (the card's tally + dot come from exactly these rows).
+            "checks_summary": checks_summary,
+            "from_cache": False,
+        }
     )
-    return web.json_response({
-        "owner": owner, "repo": repo, "number": number,
-        "detail": detail, "timeline": timeline, "checks": checks,
-        # Echoed so the client can patch its cached list row without refetching
-        # the whole list (the card's tally + dot come from exactly these rows).
-        "checks_summary": checks_summary,
-        "from_cache": False,
-    })
 
 
 async def _handle_ref_summary(request: web.Request) -> web.Response:
@@ -1323,15 +1470,30 @@ async def _handle_ref_summary(request: web.Request) -> web.Response:
         )
 
     force_refresh = request.query.get("refresh") == "1"
-    cached = None if force_refresh else await _st(
-        key, store.read_ref_summary_cache, owner, repo, number,
-        max_age_sec=store.REF_SUMMARY_CACHE_TTL_SEC,
+    cached = (
+        None
+        if force_refresh
+        else await _st(
+            key,
+            store.read_ref_summary_cache,
+            owner,
+            repo,
+            number,
+            max_age_sec=store.REF_SUMMARY_CACHE_TTL_SEC,
+        )
     )
     if cached is not None:
-        return web.json_response({
-            "owner": owner, "repo": repo, "provider": key.provider, "host": key.host,
-            "number": number, "summary": cached, "from_cache": True,
-        })
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "provider": key.provider,
+                "host": key.host,
+                "number": number,
+                "summary": cached,
+                "from_cache": True,
+            }
+        )
 
     try:
         summary = await asyncio.to_thread(
@@ -1341,10 +1503,316 @@ async def _handle_ref_summary(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=502)
 
     await _st(key, store.write_ref_summary_cache, owner, repo, number, summary)
-    return web.json_response({
-        "owner": owner, "repo": repo, "provider": key.provider, "host": key.host,
-        "number": number, "summary": summary, "from_cache": False,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "provider": key.provider,
+            "host": key.host,
+            "number": number,
+            "summary": summary,
+            "from_cache": False,
+        }
+    )
+
+
+def _deps_node_hints(
+    key: provider.RepoKey, issues: list[dict], pulls: list[dict]
+) -> dict[int, dict]:
+    """Seed ``number -> {kind, state, title}`` from the issues/pulls list caches.
+
+    Every open item already in a cache costs NO extra API call when building the
+    graph — only a number that appears in an edge yet is in neither cache falls
+    back to a per-node ``get_ref_summary`` inside the fetcher. A PR carrying a
+    ``merged_at`` is recorded as ``merged`` so the graph and the unlock semantics
+    agree on merged-vs-closed.
+    """
+    hints: dict[int, dict] = {}
+    for row in issues or []:
+        num = row.get("number") if isinstance(row, dict) else None
+        if isinstance(num, int) and num > 0:
+            hints[num] = {
+                "kind": "issue",
+                "state": github_client._dep_node_state(row.get("state")),
+                "title": str(row.get("title") or ""),
+            }
+    for row in pulls or []:
+        num = row.get("number") if isinstance(row, dict) else None
+        if isinstance(num, int) and num > 0:
+            hints[num] = {
+                "kind": "pull",
+                "state": github_client._dep_node_state(row.get("state"), row.get("merged_at")),
+                "title": str(row.get("title") or ""),
+            }
+    return hints
+
+
+# ── /deps serve-stale-revalidate-behind ─────────────────────────────────────
+#
+# App-state key under which the in-flight background deps-refresh tasks live, one
+# per repo. A typed ``web.AppKey`` (same pattern as spec_builder) so the registry
+# shares the app's lifetime and shutdown can cancel every outstanding task — see
+# ``_stop_deps_refreshes`` (registered as an ``on_cleanup`` hook).
+_DepsRefreshTasks = dict[str, "asyncio.Task"]
+_DEPS_REFRESH_TASKS_APP_KEY: web.AppKey[_DepsRefreshTasks] = web.AppKey(
+    "issue_radar_deps_refresh_tasks", dict
+)
+
+# Per-repo rebuild mutex. Coalescing (above) only stops a SECOND BACKGROUND
+# refresh; it cannot order a background rebuild against a synchronous one, and
+# ``write_deps_cache`` stamps ``fetched_at`` at WRITE time. Without this lock:
+# a stale GET starts background rebuild A, an edge changes, ``refresh=1`` starts
+# synchronous rebuild B, B writes the fresh graph -- and then the slower A lands
+# on top with its older edges and stamps them fresh for a full TTL. Serializing
+# every rebuild for a repo makes the last write the last FETCH, which is the
+# property the cache's freshness stamp claims. Two concurrent ``refresh=1``
+# calls are ordered by the same lock.
+_DepsRebuildLocks = dict[str, "asyncio.Lock"]
+_DEPS_REBUILD_LOCKS_APP_KEY: web.AppKey[_DepsRebuildLocks] = web.AppKey(
+    "issue_radar_deps_rebuild_locks", dict
+)
+
+
+def _deps_reg_key(key: provider.RepoKey) -> str:
+    """The per-repo registry key shared by the refresh-task and lock registries."""
+    return f"{key.provider}:{key.host}:{key.owner}/{key.repo}"
+
+
+def _deps_refresh_registry(app: web.Application) -> _DepsRefreshTasks:
+    """The per-app ``repo-key -> in-flight refresh Task`` map, created on first use."""
+    reg = app.get(_DEPS_REFRESH_TASKS_APP_KEY)
+    if reg is None:
+        reg = {}
+        app[_DEPS_REFRESH_TASKS_APP_KEY] = reg
+    return reg
+
+
+def _deps_rebuild_lock(app: web.Application, key: provider.RepoKey) -> "asyncio.Lock":
+    """The per-repo rebuild mutex, created on first use.
+
+    Bound to the app (hence to one event loop), so this is a plain
+    :class:`asyncio.Lock` rather than a loop-bound one: it is never a module
+    global shared across loops.
+    """
+    locks = app.get(_DEPS_REBUILD_LOCKS_APP_KEY)
+    if locks is None:
+        locks = {}
+        app[_DEPS_REBUILD_LOCKS_APP_KEY] = locks
+    reg_key = _deps_reg_key(key)
+    lock = locks.get(reg_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[reg_key] = lock
+    return lock
+
+
+class _DepsScopeUnavailable(GhCliError):
+    """The open-issue scope a deps rebuild needs could not be read.
+
+    A dedicated type rather than a message pattern: the route maps this to the
+    ``deps_issue_scope_unavailable`` code and a plain :class:`GhCliError` to
+    ``deps_fetch_failed``. Both failures used to be told apart by which of two
+    ``try`` blocks caught them; now that one helper owns the whole build, the
+    distinction has to travel with the exception, and sniffing the message text
+    would silently reclassify every scope failure whose wording does not happen
+    to mention issues (``gh api ... failed`` mentions neither).
+    """
+
+
+async def _rebuild_deps(app: web.Application, key: provider.RepoKey) -> dict:
+    """Rebuild the dependency graph for ``key`` and persist it, returning the
+    normalized stored shape ``{"edges", "nodes", ...}``.
+
+    The single build path shared by the synchronous route (cold cache /
+    ``refresh=1``) and the background revalidation. Reads the open issues (the
+    graph's scope) plus the open pulls (node hints) from the caches the app
+    already keeps, syncs the native + inferred edges via
+    ``github_client.fetch_dependency_edges``, writes the deps cache, and re-reads
+    it so the caller gets the normalized/deduped shape a later cache hit would.
+
+    Holds the repo's rebuild mutex across fetch AND write, so a slow rebuild can
+    never land on top of a newer one and re-stamp older edges as fresh.
+
+    Raises :class:`_DepsScopeUnavailable` when the issue scope cannot be read and
+    a plain ``GhCliError`` when the edge fetch fails, so the synchronous caller
+    can keep the two 502 codes callers already see; the background caller catches
+    every exception instead (a background failure must leave the previous good
+    cache intact).
+    """
+    owner, repo = key.owner, key.repo
+    async with _deps_rebuild_lock(app, key):
+        try:
+            issues = await _load_open_issues_for_reco(key)
+        except GhCliError as exc:
+            raise _DepsScopeUnavailable(str(exc)) from exc
+        pulls = await _st(key, store.read_pulls_cache, owner, repo, state="open") or []
+        hints = _deps_node_hints(key, issues, pulls)
+        edges, nodes = await asyncio.to_thread(
+            partial(github_client.fetch_dependency_edges, owner, repo, issues, hints)
+        )
+        await _st(key, store.write_deps_cache, owner, repo, edges, nodes)
+        stored = await _st(key, store.read_deps_cache, owner, repo)
+    if stored is not None:
+        return stored
+    return {"edges": edges, "nodes": nodes}
+
+
+def _schedule_deps_refresh(app: web.Application, key: provider.RepoKey) -> None:
+    """Kick a background deps rebuild for ``key``, at most one in flight per repo.
+
+    Coalesces concurrent stale callers: while a refresh is running, later stale
+    requests see the live task in the registry and do NOT spawn a second — they
+    just serve their own stale copy. The task removes itself from the registry
+    when it finishes (in a ``finally`` so a crash cannot wedge the slot), and a
+    failure is logged and swallowed so the previous good cache stays intact. The
+    task is registered on ``app`` so shutdown can cancel it (no leaked task).
+    """
+    registry = _deps_refresh_registry(app)
+    reg_key = _deps_reg_key(key)
+    existing = registry.get(reg_key)
+    if existing is not None and not existing.done():
+        return  # a refresh for this repo is already in flight — coalesce
+
+    async def _run() -> None:
+        try:
+            await _rebuild_deps(app, key)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # never crash the loop; keep the prior good cache
+            logger.debug(
+                "issue-radar: background deps refresh failed for %s/%s; keeping cached graph",
+                key.owner,
+                key.repo,
+                exc_info=True,
+            )
+        finally:
+            # Drop ourselves only if we are still the registered task (a cancel
+            # during shutdown may have already cleared the slot).
+            if registry.get(reg_key) is task:
+                registry.pop(reg_key, None)
+
+    task = asyncio.create_task(_run(), name=f"issue-radar-deps-refresh:{reg_key}")
+    registry[reg_key] = task
+
+
+async def _stop_deps_refreshes(app: web.Application) -> None:
+    """``app.on_cleanup`` hook — cancel any outstanding background deps refreshes
+    on gateway shutdown so no unawaited task outlives the app."""
+    registry = app.get(_DEPS_REFRESH_TASKS_APP_KEY)
+    if not registry:
+        return
+    tasks = [t for t in registry.values() if not t.done()]
+    registry.clear()
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("issue-radar deps-refresh shutdown raised", exc_info=True)
+
+
+async def _handle_deps(request: web.Request) -> web.Response:
+    """GET /deps?owner=<o>&repo=<r>[&refresh=1] — the repo's dependency graph.
+
+    Returns ``{owner, repo, provider, host, edges, nodes, from_cache}`` where an
+    edge is ``{blocked, blocker, source: "native"|"inferred"}`` and ``nodes`` maps
+    every number appearing in an edge to ``{kind, state, title}``.
+
+    Cache-first, serve-stale-revalidate-behind: a FRESH cache (younger than
+    ``store.DEPS_CACHE_TTL_SEC``) is served as-is; a STALE cache is served
+    IMMEDIATELY while a single coalesced background refresh rebuilds it off the
+    request path — the ~11s rebuild never blocks a user. Only a genuinely
+    never-synced repo (no cache at all) still blocks on a build. ``refresh=1``
+    forces a SYNCHRONOUS rebuild so a user-initiated refresh returns fresh data.
+    A rebuild reads the open issues (the graph's scope) plus the pulls cache
+    (node hints) and syncs the native + inferred edges via
+    ``github_client.fetch_dependency_edges``.
+
+    The response shape is deliberately UNCHANGED by serve-stale. Whether the
+    served graph was fresh or aged is not reported, because no client reads such
+    a signal today; staleness stays an internal scheduling decision rather than
+    part of the contract.
+
+    Dependency edges are a GitHub-native feature (the ``dependencies`` API);
+    non-GitHub providers answer an empty graph rather than an error, so the M1
+    frontend can call ``/deps`` uniformly and simply render nothing for a GitLab
+    project (cross-provider parity is out of scope for M1).
+    """
+    key = _key_from_request(request)
+    owner, repo = key.owner, key.repo
+    if not owner or not repo:
+        return web.json_response(
+            {"error": "missing ?owner= and ?repo=", "code": "missing_repo_params"},
+            status=400,
+        )
+
+    if not await asyncio.to_thread(_connected, key):
+        return web.json_response(
+            {
+                "error": f"{owner}/{repo} is not connected — call /connect first",
+                "code": "repo_not_connected",
+            },
+            status=404,
+        )
+
+    # GitHub-native only in M1. A non-GitHub key returns an empty graph so the
+    # client renders an empty dependency surface instead of an error.
+    if key.provider != provider.GITHUB:
+        return web.json_response(
+            {
+                **_identity(key),
+                "edges": [],
+                "nodes": {},
+                "from_cache": False,
+            }
+        )
+
+    force_refresh = request.query.get("refresh") == "1"
+    if not force_refresh:
+        cached = await _st(key, store.read_deps_cache, owner, repo)
+        if cached is not None:
+            fresh = (time.time() - cached["fetched_at"]) < store.DEPS_CACHE_TTL_SEC
+            if not fresh:
+                # Serve stale, revalidate behind: hand back the aged graph now and
+                # kick a single coalesced background rebuild. The ~11s fetch never
+                # blocks this request; a subsequent visit gets the refreshed graph.
+                _schedule_deps_refresh(request.app, key)
+            return web.json_response(
+                {
+                    **_identity(key),
+                    "edges": cached["edges"],
+                    "nodes": cached["nodes"],
+                    "from_cache": True,
+                }
+            )
+
+    # No cache at all (a never-synced repo) or a forced refresh: build inline.
+    # Build from the caches the app already keeps: open issues are the graph's
+    # scope, and both lists seed the node hints so a cached item costs no API call.
+    # A MISSING issues cache is unknown, not empty: building from it would persist
+    # a wrong-empty graph for the TTL. ``_load_open_issues_for_reco`` is the
+    # existing cache-first loader (fetch + cache on miss, provider-routed) the
+    # tagging queue uses; a cold repo's first /deps call warms both caches.
+    try:
+        stored = await _rebuild_deps(request.app, key)
+    except _DepsScopeUnavailable as exc:
+        return web.json_response(
+            {"error": str(exc), "code": "deps_issue_scope_unavailable"}, status=502
+        )
+    except GhCliError as exc:
+        return web.json_response({"error": str(exc), "code": "deps_fetch_failed"}, status=502)
+
+    return web.json_response(
+        {
+            **_identity(key),
+            "edges": stored["edges"],
+            "nodes": stored["nodes"],
+            "from_cache": False,
+        }
+    )
 
 
 # ── write-permission gate (label + state edits) ─────────────────────────────
@@ -1427,6 +1895,60 @@ def _ui_language() -> str:
         return ""
 
 
+#: Query param (GET) and body field (POST) the SPA rides its resolved language on.
+_LANG_HINT_FIELD = "lang"
+
+
+def _hint_language(raw: object) -> str:
+    """A browser-resolved UI language handed over on the request, or ``""``.
+
+    The dashboard's default is "follow the browser", which the SPA resolves
+    client-side in ``resolveLanguage()``. The backend has no locale transport of
+    its own — ``Accept-Language`` is read nowhere — so it cannot reach that
+    answer by itself, and every prose surface stays English on an install that
+    never set a language explicitly. The SPA therefore sends the tag it ALREADY
+    resolved as a per-request hint.
+
+    Per-request and NOT persisted is the whole point. "Auto" is browser-relative,
+    so writing a resolved tag into ``dashboard.language`` would tell a *different*
+    browser, with different ``navigator.languages``, to discard its own explicit
+    pick — the incoherence ``website/src/i18n/LanguageProvider.tsx`` is written to
+    prevent. A hint dies with its request, so each browser steers only its own
+    prose. It also keeps the catalog matcher in ONE language: the SPA sends a
+    concrete tag, so nothing here re-implements ``detect.ts``.
+
+    Validated through the same gate as the configured value
+    (:func:`kiro_crew.context.normalize_ui_language_tag`) — this value arrives
+    from the client on every AI call, so a malformed or unshipped tag must append
+    nothing rather than paste client-supplied text into a model prompt.
+
+    An ``en`` hint resolves to ``""`` deliberately. The directive-free prompt
+    already produces English, so an English browser's hint carries no
+    information — while honouring it would restamp every unconfigured install's
+    caches from ``""`` to ``"en"`` on upgrade, discarding summaries whose prose is
+    already in the right language. Suppressing it keeps the default install
+    byte-identical, prompts and caches alike, and still reaches every
+    non-English implicit locale.
+    """
+    tag = normalize_ui_language_tag(raw, source="issue-radar language hint")
+    return "" if tag == "en" else tag
+
+
+def _resolve_ui_language(hint: object = "") -> str:
+    """The language AI prose is written in: the configured tag, else the hint.
+
+    An explicit ``dashboard.language`` is a workspace-wide instruction and
+    outranks whatever a browser resolved for itself, so the hint is consulted
+    ONLY on the ``""`` path (see :func:`_ui_language`). A request that carries no
+    hint resolves exactly as it always did, which keeps non-SPA callers and older
+    clients on byte-identical prompts.
+
+    **Call this OFF the event loop** (``asyncio.to_thread``): it reads config via
+    :func:`_ui_language`. The hint half is pure.
+    """
+    return _ui_language() or _hint_language(hint)
+
+
 def _language_directive(ui_language: str, fields: str) -> str:
     """The output-language instruction appended to a one-shot AI prompt.
 
@@ -1454,8 +1976,13 @@ def _language_directive(ui_language: str, fields: str) -> str:
 
 
 def _build_ai_prompt(
-    owner: str, repo: str, detail: dict, labels: list[dict], current_names: list[str],
-    *, ui_language: str = "",
+    owner: str,
+    repo: str,
+    detail: dict,
+    labels: list[dict],
+    current_names: list[str],
+    *,
+    ui_language: str = "",
 ) -> str:
     """Assemble the single-call triage prompt.
 
@@ -1475,10 +2002,14 @@ def _build_ai_prompt(
     if len(body) > _AI_BODY_MAX_CHARS:
         body = body[:_AI_BODY_MAX_CHARS] + "\n…(truncated)"
     number = detail.get("number")
-    label_lines = "\n".join(
-        f"- {lab.get('name')}" + (f": {lab.get('description')}" if lab.get("description") else "")
-        for lab in labels
-    ) or "(this repo defines no labels)"
+    label_lines = (
+        "\n".join(
+            f"- {lab.get('name')}"
+            + (f": {lab.get('description')}" if lab.get("description") else "")
+            for lab in labels
+        )
+        or "(this repo defines no labels)"
+    )
     current = ", ".join(current_names) if current_names else "(none)"
     return (
         "You are a triage assistant for GitHub issues. You are given ONE issue "
@@ -1546,8 +2077,14 @@ async def _run_oneshot_model(request: web.Request, key: str, prompt: str) -> str
 
 
 async def _compute_issue_ai(
-    request: web.Request, owner: str, repo: str, number: int, detail: dict, labels: list[dict],
-    *, ui_language: str = "",
+    request: web.Request,
+    owner: str,
+    repo: str,
+    number: int,
+    detail: dict,
+    labels: list[dict],
+    *,
+    ui_language: str = "",
 ) -> dict:
     """Run the one-shot triage model call and return ``{"summary", "suggested_labels"}``.
 
@@ -1619,7 +2156,10 @@ async def _load_labels_for_ai(key: provider.RepoKey) -> list[dict]:
     # Fetch and store under ONE lock, so a label created between the two cannot be
     # overwritten by this pre-fetch snapshot and left invisible in every picker.
     labels = await _st(
-        key, store.refresh_labels_cache, owner, repo,
+        key,
+        store.refresh_labels_cache,
+        owner,
+        repo,
         lambda: client.list_repo_labels(owner, repo, **pkw),
     )
     return labels
@@ -1651,27 +2191,32 @@ async def _handle_issue_ai(request: web.Request) -> web.Response:
     force_refresh = request.query.get("refresh") == "1"
     # Resolved once per request, off-loop (config-file I/O — see _ui_language),
     # and used BOTH to validate the cache hit and to steer a fresh generation.
-    lang = await asyncio.to_thread(_ui_language)
-    cached = None if force_refresh else await _st(
-        key, store.read_issue_ai_cache, owner, repo, number
+    # The query hint carries the language THIS browser resolved for itself, and
+    # is consulted only when nothing is configured (see _resolve_ui_language).
+    lang = await asyncio.to_thread(_resolve_ui_language, request.query.get(_LANG_HINT_FIELD))
+    cached = (
+        None
+        if force_refresh
+        else await _st(key, store.read_issue_ai_cache, owner, repo, number, ui_language=lang)
     )
-    # A cached summary is only servable if it was generated for the CURRENT
-    # dashboard language — otherwise a language switch would keep rendering the
-    # old-language card indefinitely (the pull-ai path gets this from its
-    # fingerprint; this cache has no fingerprint, so the tag is stored beside
-    # the payload and compared here). Legacy entries carry no tag and read as
-    # "" — identical to the unconfigured sentinel — so installs that never set
-    # a language keep every cached entry across the upgrade.
-    if cached is not None and str(cached.get("ui_language") or "") != lang:
-        cached = None
+    # The cache is PARTITIONED by output language rather than gated on it, so a
+    # summary written in another language is simply absent here. Partitioning is
+    # what makes a per-browser language safe: one slot per issue would have two
+    # browsers regenerate over each other on every open, paying a model call each
+    # time and never keeping a usable entry. A legacy cache lives at the "" path,
+    # which is the partition an install that never configured a language reads.
     if cached is not None:
-        return web.json_response({
-            "owner": owner, "repo": repo, "number": number,
-            "summary": cached.get("summary", ""),
-            "suggested_labels": cached.get("suggested_labels", []),
-            "generated_at": cached.get("generated_at"),
-            "from_cache": True,
-        })
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "number": number,
+                "summary": cached.get("summary", ""),
+                "suggested_labels": cached.get("suggested_labels", []),
+                "generated_at": cached.get("generated_at"),
+                "from_cache": True,
+            }
+        )
 
     try:
         detail = await _load_detail_for_ai(key, number)
@@ -1694,16 +2239,26 @@ async def _handle_issue_ai(request: web.Request) -> web.Response:
     # regenerate, so instead we skip the cache and let the next open retry.
     if ai.get("summary") or ai.get("suggested_labels"):
         await _st(
-            key, store.write_issue_ai_cache, owner, repo, number,
-            {**ai, "ui_language": lang},
+            key,
+            store.write_issue_ai_cache,
+            owner,
+            repo,
+            number,
+            ai,
+            ui_language=lang,
         )
-    return web.json_response({
-        "owner": owner, "repo": repo, "number": number,
-        "summary": ai["summary"], "suggested_labels": ai["suggested_labels"],
-        # Just generated — the UI shows the age relative to this.
-        "generated_at": store.now_iso(),
-        "from_cache": False,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "summary": ai["summary"],
+            "suggested_labels": ai["suggested_labels"],
+            # Just generated — the UI shows the age relative to this.
+            "generated_at": store.now_iso(),
+            "from_cache": False,
+        }
+    )
 
 
 # ── PR AI summary ────────────────────────────────────────────────────────────
@@ -1742,7 +2297,8 @@ def _pr_ai_comment_rows(timeline: list[dict]) -> list[dict]:
       *objections*, which is precisely the signal the prompt is told to report.
     """
     rows = [
-        ev for ev in timeline
+        ev
+        for ev in timeline
         # These are the NORMALIZED kinds github_client emits — "comment" (not the
         # raw GitHub event name "commented"), "review_comment" for an inline
         # code-anchored note, and "reviewed" for a review verdict.
@@ -1795,13 +2351,17 @@ def _pr_ai_fingerprint(
     comments = _pr_ai_comment_rows(timeline)
     convo = hashlib.sha256()
     for c in comments:
-        convo.update("\x1f".join((
-            str(c.get("kind") or ""),
-            str(c.get("actor") or ""),
-            str(c.get("created_at") or ""),
-            str(c.get("review_state") or ""),
-            (c.get("body") or "")[:_PR_AI_COMMENT_MAX_CHARS],
-        )).encode("utf-8"))
+        convo.update(
+            "\x1f".join(
+                (
+                    str(c.get("kind") or ""),
+                    str(c.get("actor") or ""),
+                    str(c.get("created_at") or ""),
+                    str(c.get("review_state") or ""),
+                    (c.get("body") or "")[:_PR_AI_COMMENT_MAX_CHARS],
+                )
+            ).encode("utf-8")
+        )
         convo.update(b"\x1e")
     parts = [
         str(detail.get("state") or ""),
@@ -1811,7 +2371,9 @@ def _pr_ai_fingerprint(
         str(detail.get("updated_at") or ""),
         str(len(comments)),
         convo.hexdigest(),
-        ",".join(sorted(f"{c.get('name')}:{c.get('bucket')}" for c in checks if isinstance(c, dict))),
+        ",".join(
+            sorted(f"{c.get('name')}:{c.get('bucket')}" for c in checks if isinstance(c, dict))
+        ),
     ]
     if ui_language:
         parts.append(ui_language)
@@ -1828,8 +2390,13 @@ def _pr_lifecycle(detail: dict) -> str:
 
 
 def _build_pr_ai_prompt(
-    owner: str, repo: str, detail: dict, timeline: list[dict], checks: list[dict],
-    *, ui_language: str = "",
+    owner: str,
+    repo: str,
+    detail: dict,
+    timeline: list[dict],
+    checks: list[dict],
+    *,
+    ui_language: str = "",
 ) -> str:
     """Assemble the single-call PR summary prompt.
 
@@ -1851,7 +2418,9 @@ def _build_pr_ai_prompt(
     bucket_counts: dict[str, int] = {}
     for c in checks:
         if isinstance(c, dict):
-            bucket_counts[c.get("bucket") or "other"] = bucket_counts.get(c.get("bucket") or "other", 0) + 1
+            bucket_counts[c.get("bucket") or "other"] = (
+                bucket_counts.get(c.get("bucket") or "other", 0) + 1
+            )
     # Only the COUNTS go in the trusted header. Check names are chosen by whatever
     # GitHub App produced them, so they are provider-controlled text and belong
     # inside the fenced untrusted block with everything else the repo controls —
@@ -1862,12 +2431,14 @@ def _build_pr_ai_prompt(
     else:
         checks_line = "no automated checks reported"
     failing_names = [
-        str(c.get("name")) for c in checks
+        str(c.get("name"))
+        for c in checks
         if isinstance(c, dict) and c.get("bucket") == "failure" and c.get("name")
     ][:8]
     failing_block = (
         "FAILING CHECK NAMES:\n" + "\n".join(f"- {n}" for n in failing_names)
-        if failing_names else "FAILING CHECK NAMES: (none)"
+        if failing_names
+        else "FAILING CHECK NAMES: (none)"
     )
 
     comment_rows = _pr_ai_comment_rows(timeline)
@@ -1933,9 +2504,15 @@ def _build_pr_ai_prompt(
 
 
 async def _compute_pr_ai(
-    request: web.Request, owner: str, repo: str, number: int,
-    detail: dict, timeline: list[dict], checks: list[dict],
-    *, ui_language: str = "",
+    request: web.Request,
+    owner: str,
+    repo: str,
+    number: int,
+    detail: dict,
+    timeline: list[dict],
+    checks: list[dict],
+    *,
+    ui_language: str = "",
 ) -> str:
     """Run the one-shot PR summary call and return the redacted summary text.
 
@@ -1987,9 +2564,17 @@ async def _handle_pull_ai(request: web.Request) -> web.Response:
     # reopen where both queries refetch at once) could fingerprint indefinitely
     # stale inputs and confidently return the old summary. A forced regenerate
     # skips the cache entirely.
-    cached_detail = None if force_refresh else await _st(
-        key, store.read_pr_detail_cache, owner, repo, number,
-        max_age_sec=store.PR_DETAIL_CACHE_TTL_SEC,
+    cached_detail = (
+        None
+        if force_refresh
+        else await _st(
+            key,
+            store.read_pr_detail_cache,
+            owner,
+            repo,
+            number,
+            max_age_sec=store.PR_DETAIL_CACHE_TTL_SEC,
+        )
     )
     if cached_detail is not None and cached_detail.get("detail") is not None:
         detail = cached_detail["detail"]
@@ -2002,32 +2587,52 @@ async def _handle_pull_ai(request: web.Request) -> web.Response:
                 asyncio.to_thread(partial(client.list_pr_timeline, owner, repo, number, **pkw)),
             )
             sha = detail.get("head_sha")
-            checks = await asyncio.to_thread(
-                partial(client.list_pr_checks, owner, repo, sha, **pkw)
-            ) if sha else []
+            checks = (
+                await asyncio.to_thread(partial(client.list_pr_checks, owner, repo, sha, **pkw))
+                if sha
+                else []
+            )
         except GhCliError as exc:
             return web.json_response({"error": str(exc)}, status=502)
         # Freshly read — store it so the detail pane and the next fingerprint see
         # the same bytes this summary was built from.
-        await _st(
-            key, store.write_pr_detail_cache, owner, repo, number, detail, timeline, checks
-        )
+        await _st(key, store.write_pr_detail_cache, owner, repo, number, detail, timeline, checks)
 
     # Resolved once per request, off-loop (config-file I/O — see _ui_language),
     # and fed to BOTH the fingerprint and the prompt so the cached summary's
-    # language always matches the key it is stored under.
-    lang = await asyncio.to_thread(_ui_language)
+    # language always matches the key it is stored under. The query hint carries
+    # the language THIS browser resolved for itself and is consulted only when
+    # nothing is configured (see _resolve_ui_language).
+    lang = await asyncio.to_thread(_resolve_ui_language, request.query.get(_LANG_HINT_FIELD))
     fingerprint = _pr_ai_fingerprint(detail, timeline, checks, ui_language=lang)
-    cached = None if force_refresh else await _st(
-        key, store.read_pr_ai_cache, owner, repo, number, fingerprint=fingerprint
+    # Partitioned by language as well as fingerprinted: the fingerprint decides
+    # whether the PR has MOVED, but one file holds one fingerprint, so with a
+    # single slot a second browser reading another language would evict the
+    # first's summary on every open. The two are complementary, not redundant.
+    cached = (
+        None
+        if force_refresh
+        else await _st(
+            key,
+            store.read_pr_ai_cache,
+            owner,
+            repo,
+            number,
+            fingerprint=fingerprint,
+            ui_language=lang,
+        )
     )
     if cached is not None:
-        return web.json_response({
-            "owner": owner, "repo": repo, "number": number,
-            "summary": cached.get("summary", ""),
-            "generated_at": cached.get("generated_at"),
-            "from_cache": True,
-        })
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "number": number,
+                "summary": cached.get("summary", ""),
+                "generated_at": cached.get("generated_at"),
+                "from_cache": True,
+            }
+        )
 
     try:
         summary = await _compute_pr_ai(
@@ -2045,16 +2650,25 @@ async def _handle_pull_ai(request: web.Request) -> web.Response:
     # on an empty card until they manually regenerate.
     if summary:
         await _st(
-            key, store.write_pr_ai_cache, owner, repo, number,
+            key,
+            store.write_pr_ai_cache,
+            owner,
+            repo,
+            number,
             {"summary": summary, "fingerprint": fingerprint},
+            ui_language=lang,
         )
-    return web.json_response({
-        "owner": owner, "repo": repo, "number": number,
-        "summary": summary,
-        # Just generated — the UI shows the age relative to this.
-        "generated_at": store.now_iso(),
-        "from_cache": False,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "summary": summary,
+            # Just generated — the UI shows the age relative to this.
+            "generated_at": store.now_iso(),
+            "from_cache": False,
+        }
+    )
 
 
 def _apply_label_change(
@@ -2094,13 +2708,13 @@ def _apply_label_change(
             # inside the lock, so the cache is repaired too — doing it after the
             # lock released left stale labels surviving reloads.
             try:
-                final_labels = client.get_issue_detail(
-                    owner, repo, number
-                ).get("labels", [])
+                final_labels = client.get_issue_detail(owner, repo, number).get("labels", [])
             except GhCliError:
                 logger.warning(
                     "tagging: could not re-read labels for %s#%s after a no-op removal",
-                    f"{owner}/{repo}", number, exc_info=True,
+                    f"{owner}/{repo}",
+                    number,
+                    exc_info=True,
                 )
                 return None
         try:
@@ -2108,7 +2722,9 @@ def _apply_label_change(
         except Exception:
             logger.warning(
                 "tagging: cache patch failed after a label change on %s#%s",
-                f"{owner}/{repo}", number, exc_info=True,
+                f"{owner}/{repo}",
+                number,
+                exc_info=True,
             )
         return final_labels
 
@@ -2135,7 +2751,9 @@ def _reread_labels_and_patch(key: provider.RepoKey, number: int) -> list[dict]:
         except GhCliError:
             logger.warning(
                 "tagging: could not re-read labels for %s#%s",
-                f"{owner}/{repo}", number, exc_info=True,
+                f"{owner}/{repo}",
+                number,
+                exc_info=True,
             )
             return []
         try:
@@ -2143,7 +2761,9 @@ def _reread_labels_and_patch(key: provider.RepoKey, number: int) -> list[dict]:
         except Exception:
             logger.warning(
                 "tagging: cache patch failed after re-reading labels for %s#%s",
-                f"{owner}/{repo}", number, exc_info=True,
+                f"{owner}/{repo}",
+                number,
+                exc_info=True,
             )
         return labels
 
@@ -2191,7 +2811,9 @@ async def _handle_labels_apply(request: web.Request) -> web.Response:
     if (await asyncio.to_thread(_repo_can_write, key)) is not True:
         _audit("apply_labels", target, "denied", error="no confirmed write access")
         return web.json_response(
-            {"error": "This repo is connected read-only — you need triage or push access to edit labels."},
+            {
+                "error": "This repo is connected read-only — you need triage or push access to edit labels."
+            },
             status=403,
         )
 
@@ -2223,9 +2845,7 @@ async def _handle_labels_apply(request: web.Request) -> web.Response:
         # re-read failed. Retry through the locked helper so the caches are repaired
         # too: returning a read the cache never saw is how a removed label came back
         # on the next reload.
-        final_labels = await asyncio.to_thread(
-            partial(_reread_labels_and_patch, key, number)
-        )
+        final_labels = await asyncio.to_thread(partial(_reread_labels_and_patch, key, number))
 
     # The cache was patched inside the locked step above. Pruning the Tagging queue
     # is a SEPARATE try: sharing one with the patch meant a failed patch skipped the
@@ -2239,7 +2859,9 @@ async def _handle_labels_apply(request: web.Request) -> web.Response:
         except Exception:
             logger.warning(
                 "tagging: could not prune the suggestion for %s#%s",
-                f"{owner}/{repo}", number, exc_info=True,
+                f"{owner}/{repo}",
+                number,
+                exc_info=True,
             )
     _audit("apply_labels", target, "ok")
     return web.json_response(
@@ -2294,7 +2916,9 @@ async def _handle_issue_state(request: web.Request) -> web.Response:
     if (await asyncio.to_thread(_repo_can_write, key)) is not True:
         _audit("issue_state", target, "denied", error="no confirmed write access")
         return web.json_response(
-            {"error": "This repo is connected read-only — you need triage or push access to close/reopen issues."},
+            {
+                "error": "This repo is connected read-only — you need triage or push access to close/reopen issues."
+            },
             status=403,
         )
 
@@ -2310,14 +2934,24 @@ async def _handle_issue_state(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=502)
 
     await _st(
-        key, store.apply_state_change_to_caches, owner, repo, number,
-        result.get("state", state), result.get("state_reason"),
+        key,
+        store.apply_state_change_to_caches,
+        owner,
+        repo,
+        number,
+        result.get("state", state),
+        result.get("state_reason"),
     )
     _audit("issue_state", f"{target}->{result.get('state', state)}", "ok")
-    return web.json_response({
-        "owner": owner, "repo": repo, "number": number,
-        "state": result.get("state", state), "state_reason": result.get("state_reason"),
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "number": number,
+            "state": result.get("state", state),
+            "state_reason": result.get("state_reason"),
+        }
+    )
 
 
 # GitHub caps an issue at 10 assignees (its documented limit); reject a longer
@@ -2376,7 +3010,9 @@ def _replace_assignees_checked(
         except Exception:
             logger.warning(
                 "issue-radar: cache patch failed after an assignee change on %s#%s",
-                f"{owner}/{repo}", number, exc_info=True,
+                f"{owner}/{repo}",
+                number,
+                exc_info=True,
             )
         return final, current
 
@@ -2450,8 +3086,10 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
     for entry in assignees:
         if not isinstance(entry, str) or not entry.strip():
             return web.json_response(
-                {"error": "each entry in 'assignees' must be a non-empty string",
-                 "code": "invalid_assignee_entry"},
+                {
+                    "error": "each entry in 'assignees' must be a non-empty string",
+                    "code": "invalid_assignee_entry",
+                },
                 status=400,
             )
         cleaned.append(entry.strip())
@@ -2474,8 +3112,10 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
     expected = body.get("expected")
     if not isinstance(expected, list) or not all(isinstance(s, str) for s in expected):
         return web.json_response(
-            {"error": "'expected' must be an array of the assignee logins you last read",
-             "code": "expected_required"},
+            {
+                "error": "'expected' must be an array of the assignee logins you last read",
+                "code": "expected_required",
+            },
             status=400,
         )
     if len(assignees) > MAX_ASSIGNEES:
@@ -2486,8 +3126,10 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
 
     if not await asyncio.to_thread(_connected, key):
         return web.json_response(
-            {"error": f"{owner}/{repo} is not connected — call /connect first",
-             "code": "repo_not_connected"},
+            {
+                "error": f"{owner}/{repo} is not connected — call /connect first",
+                "code": "repo_not_connected",
+            },
             status=404,
         )
 
@@ -2495,8 +3137,10 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
     if (await asyncio.to_thread(_repo_can_write, key)) is not True:
         _audit("issue_assignees", target, "denied", error="no confirmed write access")
         return web.json_response(
-            {"error": "This repo is connected read-only — you need triage or push access to edit assignees.",
-             "code": "repo_read_only"},
+            {
+                "error": "This repo is connected read-only — you need triage or push access to edit assignees.",
+                "code": "repo_read_only",
+            },
             status=403,
         )
 
@@ -2506,9 +3150,7 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
         )
     except GhPermissionError as exc:
         _audit("issue_assignees", target, "denied", error=str(exc))
-        return web.json_response(
-            {"error": str(exc), "code": "provider_forbidden"}, status=403
-        )
+        return web.json_response({"error": str(exc), "code": "provider_forbidden"}, status=403)
     except GhInvalidInputError as exc:
         # The forge refused a LOGIN, not the caller: 400, naming who was refused.
         # A 502 here would report the forge as broken and invite a retry that can
@@ -2522,7 +3164,7 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
     except GhCliError as exc:
         _audit("issue_assignees", target, "failure", error=str(exc))
         return web.json_response(
-            {"error": str(exc), "code": "provider_error"}, status=502
+            {"error": "upstream provider error", "code": "provider_error"}, status=502
         )
 
     if final_assignees is None:
@@ -2531,8 +3173,11 @@ async def _handle_issue_assignees(request: web.Request) -> web.Response:
         # client can re-render and let the user redo the edit on current state.
         _audit("issue_assignees", target, "failure", error="assignees changed elsewhere")
         return web.json_response(
-            {"error": "The assignees changed elsewhere since you loaded this issue.",
-             "code": "assignees_conflict", "assignees": current},
+            {
+                "error": "The assignees changed elsewhere since you loaded this issue.",
+                "code": "assignees_conflict",
+                "assignees": current,
+            },
             status=409,
         )
 
@@ -2590,13 +3235,21 @@ async def _handle_get_investigation(request: web.Request) -> web.Response:
         return web.json_response({"error": "'kind' must be 'issue' or 'pull'"}, status=400)
 
     record = await _st(
-        key, store.read_investigation, owner, repo, number,
+        key,
+        store.read_investigation,
+        owner,
+        repo,
+        number,
         kind=provider.investigation_kind(key, item_kind),
     )
-    return web.json_response({
-        **_identity(key), "number": number, "kind": item_kind,
-        "investigation": record,
-    })
+    return web.json_response(
+        {
+            **_identity(key),
+            "number": number,
+            "kind": item_kind,
+            "investigation": record,
+        }
+    )
 
 
 async def _handle_put_investigation(request: web.Request) -> web.Response:
@@ -2655,12 +3308,22 @@ async def _handle_put_investigation(request: web.Request) -> web.Response:
 
     patch = {k: body[k] for k in ("slot_key", "folder_id", "status", "findings") if k in body}
     saved = await _st(
-        key, store.write_investigation, owner, repo, number, patch,
+        key,
+        store.write_investigation,
+        owner,
+        repo,
+        number,
+        patch,
         kind=provider.investigation_kind(key, item_kind),
     )
-    return web.json_response({
-        **_identity(key), "number": number, "kind": item_kind, "investigation": saved,
-    })
+    return web.json_response(
+        {
+            **_identity(key),
+            "number": number,
+            "kind": item_kind,
+            "investigation": saved,
+        }
+    )
 
 
 # ── AI label recommendations (repo-level taxonomy proposal) ──────────────────
@@ -2673,14 +3336,17 @@ async def _handle_put_investigation(request: web.Request) -> web.Response:
 # Turning a proposal into a real label is a separate, write-gated step
 # (/labels/create) — the suggest->confirm split, same as /issue-ai + /labels/apply.
 
-_RECO_ISSUE_SAMPLE = 60       # most-recently-updated open issues fed to the model
-_RECO_BODY_MAX_CHARS = 280    # per-issue body slice — enough to categorize, cheap
-_RECO_MAX = 12                # cap on proposed labels
+_RECO_ISSUE_SAMPLE = 60  # most-recently-updated open issues fed to the model
+_RECO_BODY_MAX_CHARS = 280  # per-issue body slice — enough to categorize, cheap
+_RECO_MAX = 12  # cap on proposed labels
 _RECO_CATEGORIES = ("priority", "area", "type", "triage", "first-issue")
-_RECO_MAX_EXAMPLES = 1       # example issues kept per proposal (the UI shows one)
+_RECO_MAX_EXAMPLES = 1  # example issues kept per proposal (the UI shows one)
 _DEFAULT_CATEGORY_COLOR = {
-    "priority": "d93f0b", "area": "0e8a16", "type": "1d76db",
-    "triage": "fbca04", "first-issue": "7057ff",
+    "priority": "d93f0b",
+    "area": "0e8a16",
+    "type": "1d76db",
+    "triage": "fbca04",
+    "first-issue": "7057ff",
 }
 
 
@@ -2719,8 +3385,12 @@ def _short_rationale(raw: object) -> str:
 
 
 def _build_reco_prompt(
-    owner: str, repo: str, existing_labels: list[dict], issues: list[dict],
-    *, ui_language: str = "",
+    owner: str,
+    repo: str,
+    existing_labels: list[dict],
+    issues: list[dict],
+    *,
+    ui_language: str = "",
 ) -> str:
     """Assemble the taxonomy-proposal prompt. Open-issue text is UNTRUSTED
     (prompt-injection surface), so it is fenced and marked as data; the output is
@@ -2743,10 +3413,14 @@ def _build_reco_prompt(
     repo's existing list is useless however well-named it is in the abstract.
     ``category`` is separate metadata (it drives the UI tag and the triage-role
     mapping) and stays a fixed enum; it is NOT part of the label name."""
-    existing_lines = "\n".join(
-        f"- {lab.get('name')}" + (f": {lab.get('description')}" if lab.get("description") else "")
-        for lab in existing_labels
-    ) or "(this repo defines no labels yet)"
+    existing_lines = (
+        "\n".join(
+            f"- {lab.get('name')}"
+            + (f": {lab.get('description')}" if lab.get("description") else "")
+            for lab in existing_labels
+        )
+        or "(this repo defines no labels yet)"
+    )
     lines: list[str] = []
     for iss in issues[:_RECO_ISSUE_SAMPLE]:
         body = (iss.get("body") or "").strip().replace("\r", "")
@@ -2812,7 +3486,13 @@ def _build_reco_prompt(
 
 
 async def _compute_label_recommendations(
-    request: web.Request, owner: str, repo: str, existing_labels: list[dict], issues: list[dict]
+    request: web.Request,
+    owner: str,
+    repo: str,
+    existing_labels: list[dict],
+    issues: list[dict],
+    *,
+    ui_language: str = "",
 ) -> dict:
     """One-shot, tool-less, ephemeral-session model call proposing NEW labels.
 
@@ -2822,7 +3502,13 @@ async def _compute_label_recommendations(
     proposal is genuinely new), ``category`` is constrained to the known set,
     ``color`` is validated to 6-hex (else a per-category default), text fields are
     redacted + length-clamped, and ``examples`` are kept only if they are real
-    issue numbers from the sample."""
+    issue numbers from the sample.
+
+    ``ui_language`` is the resolved BCP-47 tag the ``rationale`` prose is written
+    in, resolved by the CALLER — the handler owns it now (as the other three
+    prose surfaces already do) because it also has to stamp the cache with the
+    same tag, and two independent reads could disagree if the language moved
+    between them."""
     from kiro_crew.llm_helpers import ToolApprovalPolicy, parse_llm_json, stream_and_collect
     from kiro_crew.security import redact
 
@@ -2831,9 +3517,7 @@ async def _compute_label_recommendations(
         raise RuntimeError("session manager unavailable")
 
     kiro_agent = "kirocrew-lite"
-    # Off-loop: the language read is config-file I/O (see _ui_language).
-    lang = await asyncio.to_thread(_ui_language)
-    prompt = _build_reco_prompt(owner, repo, existing_labels, issues, ui_language=lang)
+    prompt = _build_reco_prompt(owner, repo, existing_labels, issues, ui_language=ui_language)
 
     import uuid
 
@@ -2886,22 +3570,22 @@ async def _compute_label_recommendations(
             if len(examples) >= _RECO_MAX_EXAMPLES:
                 break
         seen.add(lc)
-        out.append({
-            "name": name[:60],
-            "category": category,
-            "color": color,
-            "description": redact(str(item.get("description") or "").strip())[:120],
-            "rationale": _short_rationale(item.get("rationale")),
-            "examples": examples,
-        })
+        out.append(
+            {
+                "name": name[:60],
+                "category": category,
+                "color": color,
+                "description": redact(str(item.get("description") or "").strip())[:120],
+                "rationale": _short_rationale(item.get("rationale")),
+                "examples": examples,
+            }
+        )
         if len(out) >= _RECO_MAX:
             break
     return {"recommendations": out}
 
 
-async def _load_open_issues_for_reco(
-    key: provider.RepoKey, *, refresh: bool = False
-) -> list[dict]:
+async def _load_open_issues_for_reco(key: provider.RepoKey, *, refresh: bool = False) -> list[dict]:
     """Return the repo's open issues, cache-first (fetch + cache on miss).
 
     ``refresh`` bypasses the cache — the Tagging queue needs it because labels are
@@ -2918,8 +3602,10 @@ async def _load_open_issues_for_reco(
     # patch the cache between the two and then be overwritten by this pre-write
     # snapshot, so a label the user just applied would vanish from the dashboard.
     return await _st(
-        key, store.refresh_issues_cache,
-        owner, repo,
+        key,
+        store.refresh_issues_cache,
+        owner,
+        repo,
         lambda: client.list_open_issues(owner, repo, **pkw),
         state="open",
     )
@@ -2939,13 +3625,23 @@ async def _handle_get_recommendations(request: web.Request) -> web.Response:
             {"error": f"{owner}/{repo} is not connected — call /connect first"}, status=404
         )
 
-    cached = await _st(key, store.read_recommendations_cache, owner, repo)
-    return web.json_response({
-        "owner": owner, "repo": repo,
-        "recommendations": cached["recommendations"] if cached else None,
-        "generated_at": cached["generated_at"] if cached else None,
-        "from_cache": cached is not None,
-    })
+    # Each recommendation carries `rationale` prose, so a set is only meaningful in
+    # the language it was generated in. The cache is PARTITIONED by that language
+    # rather than gated on it: the language can differ per-browser, and one shared
+    # slot would let two browsers read each other's set as absent and overwrite it
+    # on regenerate, discarding paid model output back and forth. Resolved off-loop
+    # (config-file I/O — see _ui_language).
+    lang = await asyncio.to_thread(_resolve_ui_language, request.query.get(_LANG_HINT_FIELD))
+    cached = await _st(key, store.read_recommendations_cache, owner, repo, ui_language=lang)
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "recommendations": cached["recommendations"] if cached else None,
+            "generated_at": cached["generated_at"] if cached else None,
+            "from_cache": cached is not None,
+        }
+    )
 
 
 async def _handle_generate_recommendations(request: web.Request) -> web.Response:
@@ -2976,8 +3672,15 @@ async def _handle_generate_recommendations(request: web.Request) -> web.Response
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
 
+    # Resolved once per request, off-loop (config-file I/O — see _ui_language), and
+    # used both to steer the generation and to stamp what the cache was written
+    # in. The body hint carries the language THIS browser resolved for itself and
+    # is consulted only when nothing is configured (see _resolve_ui_language).
+    lang = await asyncio.to_thread(_resolve_ui_language, body.get(_LANG_HINT_FIELD))
     try:
-        result = await _compute_label_recommendations(request, owner, repo, existing_labels, issues)
+        result = await _compute_label_recommendations(
+            request, owner, repo, existing_labels, issues, ui_language=lang
+        )
     except Exception:
         logger.exception("reco: computation failed for %s/%s", owner, repo)
         return web.json_response(
@@ -2987,12 +3690,18 @@ async def _handle_generate_recommendations(request: web.Request) -> web.Response
 
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     payload = {"recommendations": result["recommendations"], "generated_at": generated_at}
-    await _st(key, store.write_recommendations_cache, owner, repo, payload)
-    return web.json_response({
-        "owner": owner, "repo": repo,
-        "recommendations": payload["recommendations"],
-        "generated_at": generated_at, "from_cache": False,
-    })
+    # Written into this language's partition, so regenerating in one language never
+    # destroys another's set (see store.recommendations_cache_path).
+    await _st(key, store.write_recommendations_cache, owner, repo, payload, ui_language=lang)
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "recommendations": payload["recommendations"],
+            "generated_at": generated_at,
+            "from_cache": False,
+        }
+    )
 
 
 # ── tagging dashboard: per-issue label suggestions over the untagged queue ────
@@ -3007,10 +3716,10 @@ async def _handle_generate_recommendations(request: web.Request) -> web.Response
 # the prompt (and the request) stay finite; the dashboard walks a long queue by
 # generating repeatedly, and each generate merges into the cache.
 
-_TAG_BATCH_MAX = 50           # untagged issues fed to ONE model call
-_TAG_BODY_MAX_CHARS = 400     # per-issue body slice — enough to classify, cheap
-_TAG_MAX_PER_ISSUE = 3        # cap on labels proposed for a single issue
-_TAG_BULK_MAX = 25            # issues touched by ONE bulk apply request
+_TAG_BATCH_MAX = 50  # untagged issues fed to ONE model call
+_TAG_BODY_MAX_CHARS = 400  # per-issue body slice — enough to classify, cheap
+_TAG_MAX_PER_ISSUE = 3  # cap on labels proposed for a single issue
+_TAG_BULK_MAX = 25  # issues touched by ONE bulk apply request
 #
 # Each bulk entry is a separate `gh` subprocess, run sequentially inside one
 # HTTP request, so this cap is a latency budget rather than a size limit: at 100
@@ -3030,18 +3739,31 @@ def _untagged(issues: list[dict]) -> list[dict]:
     return rows
 
 
-def _build_tagging_prompt(owner: str, repo: str, labels: list[dict], issues: list[dict]) -> str:
+def _build_tagging_prompt(
+    owner: str, repo: str, labels: list[dict], issues: list[dict], *, ui_language: str = ""
+) -> str:
     """Assemble the batched "label these untagged issues" prompt.
 
     Issue text is UNTRUSTED (anyone can open an issue containing prompt-injection
     text), so it is fenced and marked as data. The output is constrained
     downstream too: every proposed name is intersected with the repo's real label
     set, so an injected "add label X" cannot invent a label, and the issue numbers
-    are intersected with the batch, so it cannot reach issues it wasn't shown."""
-    label_lines = "\n".join(
-        f"- {lab.get('name')}" + (f": {lab.get('description')}" if lab.get("description") else "")
-        for lab in labels
-    ) or "(this repo defines no labels)"
+    are intersected with the batch, so it cannot reach issues it wasn't shown.
+
+    ``ui_language`` is a validated BCP-47 tag (see :func:`_ui_language`); ``""``
+    omits the language directive entirely, leaving the prompt byte-identical to
+    what it was before this argument existed. Only the ``reason`` is steered — the
+    label NAMES must stay exactly as the repository spells them, because the
+    validator intersects them against the real label set and a translated name
+    would be dropped as invented."""
+    label_lines = (
+        "\n".join(
+            f"- {lab.get('name')}"
+            + (f": {lab.get('description')}" if lab.get("description") else "")
+            for lab in labels
+        )
+        or "(this repo defines no labels)"
+    )
     rows: list[str] = []
     for iss in issues:
         body = (iss.get("body") or "").strip().replace("\r", "")
@@ -3076,11 +3798,18 @@ def _build_tagging_prompt(owner: str, repo: str, labels: list[dict], issues: lis
         "</issues>\n\n"
         'Respond with ONLY the JSON object, e.g. {"assignments": [{"number": 12, '
         '"labels": [{"name": "bug", "reason": "reports a crash"}]}]}.'
+        + _language_directive(ui_language, 'each "reason"')
     )
 
 
 async def _compute_tagging_suggestions(
-    request: web.Request, owner: str, repo: str, labels: list[dict], issues: list[dict]
+    request: web.Request,
+    owner: str,
+    repo: str,
+    labels: list[dict],
+    issues: list[dict],
+    *,
+    ui_language: str = "",
 ) -> dict[str, list[dict]]:
     """One batched, tool-less, ephemeral-session model call proposing labels for
     ``issues``; returns ``{"<number>": [{name, reason}]}``.
@@ -3088,13 +3817,17 @@ async def _compute_tagging_suggestions(
     Runs through :func:`_run_oneshot_model` exactly like the issue-triage and
     taxonomy paths. Output is validated: names are intersected with the repo's
     real labels, numbers with the batch that was actually shown, text is redacted
-    and clamped, and issues that got no valid label are dropped."""
+    and clamped, and issues that got no valid label are dropped.
+
+    ``ui_language`` is resolved by the caller (``_handle_generate_tagging``) rather
+    than here, so one request's prompt and the cache entry it produces cannot
+    disagree about the language — the same split the issue-ai path uses."""
     import uuid
 
     from kiro_crew.llm_helpers import parse_llm_json
     from kiro_crew.security import redact
 
-    prompt = _build_tagging_prompt(owner, repo, labels, issues)
+    prompt = _build_tagging_prompt(owner, repo, labels, issues, ui_language=ui_language)
     key = f"issue-radar-tagging:{owner}/{repo}:{uuid.uuid4().hex}"
     text = await _run_oneshot_model(request, key, prompt)
 
@@ -3166,13 +3899,27 @@ async def _handle_get_tagging(request: web.Request) -> web.Response:
         )
 
     try:
-        issues = await _load_open_issues_for_reco(
-            key, refresh=request.query.get("refresh") == "1"
-        )
+        issues = await _load_open_issues_for_reco(key, refresh=request.query.get("refresh") == "1")
     except GhCliError as exc:
         return web.json_response({"error": str(exc)}, status=502)
 
     cached = await _st(key, store.read_tagging_cache, owner, repo)
+    # Each cached suggestion carries `reason` prose, and the queue renders it as a
+    # tooltip. A suggestion generated before a language switch would keep that
+    # tooltip in the old language indefinitely -- and worse than plainly foreign,
+    # because the tooltip TEMPLATE around it is localized by the frontend, so the
+    # row reads half-translated. Serving nothing instead offers the user the
+    # regenerate they can actually act on. Resolved off-loop (config-file I/O) and
+    # compared exactly as the issue-ai cache does; a legacy entry carries no tag and
+    # reads as "", so installs that never set a language keep their suggestions.
+    #
+    # Config-only, NOT the per-request hint the other prose routes accept: see
+    # _handle_generate_tagging for why a per-browser language would destroy this
+    # cache. The GET must resolve it the same way the POST stamps it, or the gate
+    # would drop every entry the queue just paid to generate.
+    lang = await asyncio.to_thread(_ui_language)
+    if cached is not None and str(cached.get("ui_language") or "") != lang:
+        cached = None
     suggestions = cached["suggestions"] if cached else {}
     rows = [
         {
@@ -3215,20 +3962,23 @@ async def _handle_get_tagging(request: web.Request) -> web.Response:
     # elsewhere (GitHub, the detail pane) makes a cached proposal moot, and
     # showing it would offer to re-label an issue that no longer needs it.
     live = {str(n) for n in untagged}
-    return web.json_response({
-        "owner": owner, "repo": repo,
-        "issues": rows,
-        "untagged": untagged,
-        "label_counts": label_counts,
-        "titles": titles,
-        # The bulk-apply cap, so the client chunks on the server's real limit
-        # instead of a hardcoded copy that silently 400s when this changes.
-        "bulk_max": _TAG_BULK_MAX,
-        "open_count": len(issues),
-        "suggestions": {k: v for k, v in suggestions.items() if k in live},
-        "generated_at": (cached or {}).get("generated_at") or None,
-        "batch_size": _TAG_BATCH_MAX,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "issues": rows,
+            "untagged": untagged,
+            "label_counts": label_counts,
+            "titles": titles,
+            # The bulk-apply cap, so the client chunks on the server's real limit
+            # instead of a hardcoded copy that silently 400s when this changes.
+            "bulk_max": _TAG_BULK_MAX,
+            "open_count": len(issues),
+            "suggestions": {k: v for k, v in suggestions.items() if k in live},
+            "generated_at": (cached or {}).get("generated_at") or None,
+            "batch_size": _TAG_BATCH_MAX,
+        }
+    )
 
 
 async def _handle_generate_tagging(request: web.Request) -> web.Response:
@@ -3268,39 +4018,71 @@ async def _handle_generate_tagging(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=502)
     if not labels:
         return web.json_response(
-            {"error": "This repo defines no labels yet — create some first (see the "
-                      "recommended labels below) and then suggest tags."},
+            {
+                "error": "This repo defines no labels yet — create some first (see the "
+                "recommended labels below) and then suggest tags."
+            },
             status=400,
         )
 
     untagged = _untagged(issues)
+    # Resolved once per request, off-loop (config-file I/O — see _ui_language), and
+    # used for all three of: which issues still count as un-analysed, steering the
+    # generation, and stamping what the cache is written in.
+    #
+    # Config-only, NOT the per-request hint the other prose routes accept, and that
+    # is a correctness requirement rather than an omission. This cache is ONE
+    # document per repo that ACCUMULATES across many batched calls, and
+    # store.merge_tagging_suggestions drops every accumulated entry when the stored
+    # language differs from the batch's — sound while the language is install-wide,
+    # because that difference means a deliberate operator switch happened once. A
+    # per-browser language turns the same code into a loop: two browsers reading
+    # different languages would alternate, each wiping the queue the other just
+    # paid a model to build, with neither user having done anything. Localizing this
+    # surface needs the cache partitioned BY language first.
+    lang = await asyncio.to_thread(_ui_language)
     # `is not None`, not truthiness: an explicit empty `numbers` array means
     # "analyse exactly these (none)", and treating it as an omission started a
     # whole automatic batch the caller never asked for.
     if requested is not None:
         wanted = {
-            int(n) for n in requested
-            if isinstance(n, int) and not isinstance(n, bool) and n > 0
+            int(n) for n in requested if isinstance(n, int) and not isinstance(n, bool) and n > 0
         }
         batch = [i for i in untagged if i.get("number") in wanted]
     else:
         cached = await _st(key, store.read_tagging_cache, owner, repo)
-        done = set((cached or {}).get("suggestions") or {})
+        # An entry written in another language is NOT analysed for this purpose.
+        # Counting it would make "next un-analysed slice" skip exactly the rows
+        # whose reason the switch invalidated, so those rows could never be
+        # re-earned by the automatic batch — the queue would advance past them and
+        # leave them permanently blank.
+        stale_lang = cached is not None and str(cached.get("ui_language") or "") != lang
+        done = set() if stale_lang else set((cached or {}).get("suggestions") or {})
         batch = [i for i in untagged if str(i.get("number")) not in done]
     remaining = max(0, len(batch) - _TAG_BATCH_MAX)
     batch = batch[:_TAG_BATCH_MAX]
 
     if not batch:
         cached = await _st(key, store.read_tagging_cache, owner, repo)
-        return web.json_response({
-            "owner": owner, "repo": repo,
-            "suggestions": (cached or {}).get("suggestions") or {},
-            "analyzed": [], "remaining": 0,
-            "generated_at": (cached or {}).get("generated_at") or None,
-        })
+        # Same language gate as the GET route: nothing was generated, so the only
+        # thing to return is the cache, and it is servable only if it matches.
+        if cached is not None and str(cached.get("ui_language") or "") != lang:
+            cached = None
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "suggestions": (cached or {}).get("suggestions") or {},
+                "analyzed": [],
+                "remaining": 0,
+                "generated_at": (cached or {}).get("generated_at") or None,
+            }
+        )
 
     try:
-        produced = await _compute_tagging_suggestions(request, owner, repo, labels, batch)
+        produced = await _compute_tagging_suggestions(
+            request, owner, repo, labels, batch, ui_language=lang
+        )
     except Exception:
         logger.exception("tagging: computation failed for %s/%s", owner, repo)
         return web.json_response(
@@ -3315,15 +4097,64 @@ async def _handle_generate_tagging(request: web.Request) -> web.Response:
     analyzed = [int(i["number"]) for i in batch if isinstance(i.get("number"), int)]
     merged_batch = {str(n): produced.get(str(n), []) for n in analyzed}
     result = await _st(
-        key, store.merge_tagging_suggestions, owner, repo, merged_batch
+        key,
+        store.merge_tagging_suggestions,
+        owner,
+        repo,
+        merged_batch,
+        ui_language=lang,
+        # Resolves the language exactly as this handler did (config only), so the
+        # in-lock re-check and the value the batch was generated under cannot
+        # disagree. If this route ever starts accepting the per-request hint, this
+        # callable has to carry the same hint or every hinted write is refused as a
+        # language switch and nothing is ever persisted.
+        verify_language=_ui_language,
     )
-    return web.json_response({
-        "owner": owner, "repo": repo,
-        "suggestions": result["suggestions"],
-        "analyzed": analyzed,
-        "remaining": remaining,
-        "generated_at": result["generated_at"],
-    })
+    # The store refused under its own lock: the configured language moved before
+    # the write. This is the ONLY language guard on the write path, and it belongs
+    # in the lock -- a pre-check out here would be strictly weaker, because it and
+    # the write are not atomic, so a switch landing between them would still let a
+    # stale generation replace a newer-language one that had already landed. Since
+    # the merge REPLACES on a language change, that lost race is lost DATA.
+    #
+    # Nothing was persisted, so nothing is claimed as analysed and the slice stays
+    # in `remaining` for the next call to re-generate under the current language.
+    #
+    # Returns NO suggestions, deliberately. The untouched document this refusal
+    # protected may still be in the language the switch just left, and handing it
+    # back would put exactly the stale prose this route exists to withhold into the
+    # client's cache -- the GET route gates on the language for that reason, and an
+    # error path that skips the gate reintroduces the defect through the back door.
+    # An empty answer cannot be wrong, and the client's next GET serves whatever is
+    # genuinely current under the gate that already exists there.
+    if result.get("stale_language"):
+        logger.info(
+            "tagging: store refused a batch for %s/%s generated under %r; the "
+            "dashboard language moved before the write",
+            owner,
+            repo,
+            lang or "(unset)",
+        )
+        return web.json_response(
+            {
+                "owner": owner,
+                "repo": repo,
+                "suggestions": {},
+                "analyzed": [],
+                "remaining": remaining + len(analyzed),
+                "generated_at": None,
+            }
+        )
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "suggestions": result["suggestions"],
+            "analyzed": analyzed,
+            "remaining": remaining,
+            "generated_at": result["generated_at"],
+        }
+    )
 
 
 async def _handle_labels_apply_bulk(request: web.Request) -> web.Response:
@@ -3382,7 +4213,9 @@ async def _handle_labels_apply_bulk(request: web.Request) -> web.Response:
                 bucket.append(name)
     parsed: list[tuple[int, list[str]]] = list(merged_adds.items())
     if not parsed:
-        return web.json_response({"error": "nothing to apply (no labels in any change)"}, status=400)
+        return web.json_response(
+            {"error": "nothing to apply (no labels in any change)"}, status=400
+        )
 
     if not await asyncio.to_thread(_connected, key):
         return web.json_response(
@@ -3393,7 +4226,9 @@ async def _handle_labels_apply_bulk(request: web.Request) -> web.Response:
     if (await asyncio.to_thread(_repo_can_write, key)) is not True:
         _audit("apply_labels_bulk", target, "denied", error="no confirmed write access")
         return web.json_response(
-            {"error": "This repo is connected read-only — you need triage or push access to edit labels."},
+            {
+                "error": "This repo is connected read-only — you need triage or push access to edit labels."
+            },
             status=403,
         )
 
@@ -3443,11 +4278,17 @@ async def _handle_labels_apply_bulk(request: web.Request) -> web.Response:
         except Exception:
             logger.warning(
                 "tagging: could not prune suggestions for %s after a bulk apply",
-                f"{owner}/{repo}", exc_info=True,
+                f"{owner}/{repo}",
+                exc_info=True,
             )
-    return web.json_response({
-        "owner": owner, "repo": repo, "applied": applied, "failed": failed,
-    })
+    return web.json_response(
+        {
+            "owner": owner,
+            "repo": repo,
+            "applied": applied,
+            "failed": failed,
+        }
+    )
 
 
 async def _handle_create_label(request: web.Request) -> web.Response:
@@ -3486,7 +4327,9 @@ async def _handle_create_label(request: web.Request) -> web.Response:
     if (await asyncio.to_thread(_repo_can_write, key)) is not True:
         _audit("create_label", target, "denied", error="no confirmed write access")
         return web.json_response(
-            {"error": "This repo is connected read-only — you need triage or push access to create labels."},
+            {
+                "error": "This repo is connected read-only — you need triage or push access to create labels."
+            },
             status=403,
         )
 
@@ -3649,7 +4492,11 @@ def _pr_numbers_field(body: dict) -> tuple[list[int], web.Response | None]:
         )
     if len(raw) > _BULK_PR_MAX:
         return [], web.json_response(
-            {"error": f"too many pull requests in one request (max {_BULK_PR_MAX})", "code": "too_many_pulls"}, status=400
+            {
+                "error": f"too many pull requests in one request (max {_BULK_PR_MAX})",
+                "code": "too_many_pulls",
+            },
+            status=400,
         )
     out: list[int] = []
     seen: set[int] = set()
@@ -3657,11 +4504,19 @@ def _pr_numbers_field(body: dict) -> tuple[list[int], web.Response | None]:
         # bool is a subclass of int: JSON `true` would otherwise validate as #1.
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             return [], web.json_response(
-                {"error": "each entry in 'numbers' must be a positive integer", "code": "invalid_number"}, status=400
+                {
+                    "error": "each entry in 'numbers' must be a positive integer",
+                    "code": "invalid_number",
+                },
+                status=400,
             )
         if value > MAX_ITEM_NUMBER:
             return [], web.json_response(
-                {"error": f"pull-request number out of range (max {MAX_ITEM_NUMBER})", "code": "number_out_of_range"}, status=400
+                {
+                    "error": f"pull-request number out of range (max {MAX_ITEM_NUMBER})",
+                    "code": "number_out_of_range",
+                },
+                status=400,
             )
         if value not in seen:
             seen.add(value)
@@ -3688,7 +4543,7 @@ def _pr_head_shas_field(
         return {}, web.json_response(
             {
                 "error": "'head_shas' must be an object mapping each pull-request "
-                         "number to the head commit you reviewed",
+                "number to the head commit you reviewed",
                 "code": "head_shas_required",
             },
             status=400,
@@ -3701,7 +4556,7 @@ def _pr_head_shas_field(
             return {}, web.json_response(
                 {
                     "error": f"'head_shas' is missing or invalid for #{number} — each "
-                             "pull request is pinned to the commit you reviewed",
+                    "pull request is pinned to the commit you reviewed",
                     "code": "head_shas_required",
                 },
                 status=400,
@@ -3715,13 +4570,18 @@ def _pr_body_field(body: dict, key: str = "body") -> tuple[str, web.Response | N
     text = _str_field(body, key)
     if len(text) > _PR_BODY_MAX_CHARS:
         return "", web.json_response(
-            {"error": f"'{key}' is too long (max {_PR_BODY_MAX_CHARS} characters)", "code": "body_too_long"}, status=400
+            {
+                "error": f"'{key}' is too long (max {_PR_BODY_MAX_CHARS} characters)",
+                "code": "body_too_long",
+            },
+            status=400,
         )
     return text, None
 
 
 async def _pr_action_preamble(
-    request: web.Request, op: str,
+    request: web.Request,
+    op: str,
 ) -> tuple[dict, provider.RepoKey, web.Response | None]:
     """The checks EVERY pull-request action shares: JSON body, owner/repo,
     connected-repo gate, and the triage/push permission gate.
@@ -3734,35 +4594,58 @@ async def _pr_action_preamble(
     try:
         raw = await request.json()
     except Exception:
-        return {}, provider.RepoKey(), web.json_response(
-            {"error": "request body must be JSON", "code": "invalid_json"}, status=400
+        return (
+            {},
+            provider.RepoKey(),
+            web.json_response(
+                {"error": "request body must be JSON", "code": "invalid_json"}, status=400
+            ),
         )
     if not isinstance(raw, dict):
-        return {}, provider.RepoKey(), web.json_response(
-            {"error": "request body must be a JSON object", "code": "invalid_json"}, status=400
+        return (
+            {},
+            provider.RepoKey(),
+            web.json_response(
+                {"error": "request body must be a JSON object", "code": "invalid_json"}, status=400
+            ),
         )
 
     key = _key_from_body(raw)
     if not key.owner or not key.repo:
-        return raw, key, web.json_response(
-            {"error": "missing 'owner'/'repo'", "code": "missing_repo"}, status=400
+        return (
+            raw,
+            key,
+            web.json_response(
+                {"error": "missing 'owner'/'repo'", "code": "missing_repo"}, status=400
+            ),
         )
 
     if not await asyncio.to_thread(_connected, key):
-        return raw, key, web.json_response(
-            {"error": f"{key.slug} is not connected — call /connect first",
-             "code": "repo_not_connected"}, status=404
+        return (
+            raw,
+            key,
+            web.json_response(
+                {
+                    "error": f"{key.slug} is not connected — call /connect first",
+                    "code": "repo_not_connected",
+                },
+                status=404,
+            ),
         )
 
     if (await asyncio.to_thread(_repo_can_write, key)) is not True:
         _audit(op, key.slug, "denied", error="no confirmed write access")
-        return raw, key, web.json_response(
-            {
-                "error": "This repo is connected read-only — you need triage or push "
-                         "access to act on pull requests.",
-                "code": "repo_read_only",
-            },
-            status=403,
+        return (
+            raw,
+            key,
+            web.json_response(
+                {
+                    "error": "This repo is connected read-only — you need triage or push "
+                    "access to act on pull requests.",
+                    "code": "repo_read_only",
+                },
+                status=403,
+            ),
         )
     return raw, key, None
 
@@ -3774,6 +4657,13 @@ def _pr_action_error(op: str, target: str, exc: Exception) -> web.Response:
     the client could fix is 400, and anything else upstream is 502 — the same
     taxonomy the label/state routes use, so one action behaving differently is not
     something a caller has to discover.
+
+    The 502 relays ``str(exc)`` rather than a fixed string, unlike the read routes.
+    A PR action fails for a reason the caller can usually FIX — "Allow auto-merge is
+    off for this repository", "the base branch is protected" — and that reason lives
+    only in the provider's own text. Withholding it here would leave the operator
+    retrying a button that can never work. The read routes carry no such actionable
+    text, so they sanitize (see ``_handle_pull_runs``).
     """
     if isinstance(exc, GhPermissionError):
         _audit(op, target, "denied", error=str(exc))
@@ -3783,8 +4673,14 @@ def _pr_action_error(op: str, target: str, exc: Exception) -> web.Response:
 
 
 async def _run_pr_action(
-    key: provider.RepoKey, action: str, number: int, *, body: str = "",
-    method: str = "SQUASH", failed_only: bool = False, run_id: int = 0,
+    key: provider.RepoKey,
+    action: str,
+    number: int,
+    *,
+    body: str = "",
+    method: str = "SQUASH",
+    failed_only: bool = False,
+    run_id: int = 0,
     head_sha: str = "",
 ) -> dict:
     """Perform ONE pull-request action against the provider, off the event loop.
@@ -3803,7 +4699,11 @@ async def _run_pr_action(
             partial(client.set_pr_state, owner, repo, number, state, **pkw)
         )
         await _st(
-            key, store.apply_pr_state_change_to_caches, owner, repo, number,
+            key,
+            store.apply_pr_state_change_to_caches,
+            owner,
+            repo,
+            number,
             result.get("state", state),
         )
         return result
@@ -3877,8 +4777,12 @@ async def _run_pr_action(
     if action == "rerun_run":
         result = await asyncio.to_thread(
             partial(
-                client.rerun_workflow_run, owner, repo, run_id,
-                failed_only=failed_only, **pkw,
+                client.rerun_workflow_run,
+                owner,
+                repo,
+                run_id,
+                failed_only=failed_only,
+                **pkw,
             )
         )
         await _st(key, store.drop_pr_detail_cache, owner, repo, number)
@@ -3903,8 +4807,11 @@ def _pr_number_field(body: dict) -> tuple[int, web.Response | None]:
         )
     if number > MAX_ITEM_NUMBER:
         return 0, web.json_response(
-            {"error": f"pull-request number out of range (max {MAX_ITEM_NUMBER})",
-             "code": "number_out_of_range"}, status=400
+            {
+                "error": f"pull-request number out of range (max {MAX_ITEM_NUMBER})",
+                "code": "number_out_of_range",
+            },
+            status=400,
         )
     return number, None
 
@@ -3923,7 +4830,7 @@ def _pr_head_sha_field(body: dict) -> tuple[str, web.Response | None]:
         return "", web.json_response(
             {
                 "error": "'head_sha' is required — the action is pinned to the commit "
-                         "you reviewed",
+                "you reviewed",
                 "code": "head_sha_required",
             },
             status=400,
@@ -3944,8 +4851,7 @@ def _pr_merge_method_field(body: dict, key: provider.RepoKey) -> tuple[str, web.
     if method not in methods:
         return "", web.json_response(
             {
-                "error": "method must be one of "
-                         f"{', '.join(m.lower() for m in methods)}",
+                "error": "method must be one of " f"{', '.join(m.lower() for m in methods)}",
                 "code": "invalid_merge_method",
             },
             status=400,
@@ -3984,7 +4890,10 @@ async def _handle_pull_state(request: web.Request) -> web.Response:
 
 
 async def _refuse_if_head_moved(
-    key: provider.RepoKey, number: int, head_sha: str, op: str,
+    key: provider.RepoKey,
+    number: int,
+    head_sha: str,
+    op: str,
 ) -> web.Response | None:
     """409 when the PR's LIVE head is not the commit the caller reviewed.
 
@@ -4013,8 +4922,14 @@ async def _refuse_if_head_moved(
         # redundant round-trips. Dropping the retry does not weaken the pin: the read
         # is still a LIVE read of the current head, which is all the 409 needs.
         detail = await asyncio.to_thread(
-            partial(provider.client_for(key).get_pr_detail, key.owner, key.repo, number,
-                    resolve_mergeable=False, **provider.call_kwargs(key))
+            partial(
+                provider.client_for(key).get_pr_detail,
+                key.owner,
+                key.repo,
+                number,
+                resolve_mergeable=False,
+                **provider.call_kwargs(key),
+            )
         )
     except GhCliError as exc:
         return _pr_action_error(op, f"{key.slug}#{number}", exc)
@@ -4022,13 +4937,15 @@ async def _refuse_if_head_moved(
     if not live_sha or live_sha.lower() == head_sha.lower():
         return None
     _audit(
-        op, f"{key.slug}#{number}", "denied",
+        op,
+        f"{key.slug}#{number}",
+        "denied",
         error=f"head moved: reviewed={head_sha} live={live_sha}",
     )
     return web.json_response(
         {
             "error": "The head branch moved since this page last read it — refresh and "
-                     "review the new commit.",
+            "review the new commit.",
             "code": "review_conflict",
         },
         status=409,
@@ -4070,8 +4987,11 @@ async def _handle_pull_review(request: web.Request) -> web.Response:
     event = _str_field(body, "event").lower()
     if event not in ("approve", "request_changes", "comment"):
         return web.json_response(
-            {"error": "event must be 'approve', 'request_changes' or 'comment'",
-             "code": "invalid_event"}, status=400
+            {
+                "error": "event must be 'approve', 'request_changes' or 'comment'",
+                "code": "invalid_event",
+            },
+            status=400,
         )
     text, too_long = _pr_body_field(body)
     if too_long is not None:
@@ -4115,7 +5035,9 @@ async def _handle_pull_comment(request: web.Request) -> web.Response:
     if too_long is not None:
         return too_long
     if not text:
-        return web.json_response({"error": "'body' is required", "code": "body_required"}, status=400)
+        return web.json_response(
+            {"error": "'body' is required", "code": "body_required"}, status=400
+        )
 
     target = f"{key.slug}#{number}"
     try:
@@ -4152,7 +5074,9 @@ async def _handle_pull_auto_merge(request: web.Request) -> web.Response:
         return number_error
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
-        return web.json_response({"error": "'enabled' must be a boolean", "code": "invalid_enabled"}, status=400)
+        return web.json_response(
+            {"error": "'enabled' must be a boolean", "code": "invalid_enabled"}, status=400
+        )
     method, method_error = _pr_merge_method_field(body, key)
     if method_error is not None:
         return method_error
@@ -4242,8 +5166,13 @@ async def _handle_pull_merge(request: web.Request) -> web.Response:
     # stops being true exactly for the account that can do the most damage.
     try:
         detail = await asyncio.to_thread(
-            partial(provider.client_for(key).get_pr_detail, key.owner, key.repo, number,
-                    **provider.call_kwargs(key))
+            partial(
+                provider.client_for(key).get_pr_detail,
+                key.owner,
+                key.repo,
+                number,
+                **provider.call_kwargs(key),
+            )
         )
     except GhCliError as exc:
         return _pr_action_error("pull_merge", f"{key.slug}#{number}", exc)
@@ -4253,8 +5182,8 @@ async def _handle_pull_merge(request: web.Request) -> web.Response:
         return web.json_response(
             {
                 "error": "This pull request is not ready to merge "
-                         f"(the provider reports it as '{state or 'unknown'}'). Arm "
-                         "auto-merge to land it once its required reviews and checks pass.",
+                f"(the provider reports it as '{state or 'unknown'}'). Arm "
+                "auto-merge to land it once its required reviews and checks pass.",
                 "code": "merge_not_ready",
             },
             status=409,
@@ -4270,13 +5199,15 @@ async def _handle_pull_merge(request: web.Request) -> web.Response:
         # case — the one worth noticing, because a repeated hit means someone is
         # racing a live branch.
         _audit(
-            "pull_merge", f"{key.slug}#{number}", "denied",
+            "pull_merge",
+            f"{key.slug}#{number}",
+            "denied",
             error=f"head moved: reviewed={head_sha} live={live_sha}",
         )
         return web.json_response(
             {
                 "error": "The head branch moved since this page last read it — "
-                         "refresh and try again.",
+                "refresh and try again.",
                 "code": "merge_conflict",
             },
             status=409,
@@ -4299,9 +5230,9 @@ async def _handle_pull_merge(request: web.Request) -> web.Response:
             return web.json_response(
                 {
                     "error": "The provider refused to merge this — its required "
-                             "reviews or checks are not satisfied, or the repository "
-                             "does not allow this merge method. Arm auto-merge to "
-                             "land it once they pass.",
+                    "reviews or checks are not satisfied, or the repository "
+                    "does not allow this merge method. Arm auto-merge to "
+                    "land it once they pass.",
                     "code": "merge_not_allowed",
                 },
                 status=409,
@@ -4311,7 +5242,7 @@ async def _handle_pull_merge(request: web.Request) -> web.Response:
             return web.json_response(
                 {
                     "error": "The head branch moved since this page last read it — "
-                             "refresh and try again.",
+                    "refresh and try again.",
                     "code": "merge_conflict",
                 },
                 status=409,
@@ -4336,7 +5267,9 @@ async def _handle_pull_runs(request: web.Request) -> web.Response:
     sha = (request.query.get("sha") or "").strip()
     number_raw = (request.query.get("number") or "").strip()
     if not owner or not repo or not sha:
-        return web.json_response({"error": "missing ?owner=, ?repo= and ?sha=", "code": "missing_params"}, status=400)
+        return web.json_response(
+            {"error": "missing ?owner=, ?repo= and ?sha=", "code": "missing_params"}, status=400
+        )
     # The number is only echoed back (the runs are addressed by sha), but it is
     # still validated so a caller cannot get a response keyed to a bogus item.
     number, number_error = _parse_item_number(number_raw) if number_raw else (0, None)
@@ -4345,19 +5278,30 @@ async def _handle_pull_runs(request: web.Request) -> web.Response:
 
     if not await asyncio.to_thread(_connected, key):
         return web.json_response(
-            {"error": f"{owner}/{repo} is not connected — call /connect first",
-             "code": "repo_not_connected"}, status=404
+            {
+                "error": f"{owner}/{repo} is not connected — call /connect first",
+                "code": "repo_not_connected",
+            },
+            status=404,
         )
 
     try:
         runs = await asyncio.to_thread(
             partial(
                 provider.client_for(key).list_pr_workflow_runs,
-                owner, repo, sha, **provider.call_kwargs(key),
+                owner,
+                repo,
+                sha,
+                **provider.call_kwargs(key),
             )
         )
     except GhCliError as exc:
-        return web.json_response({"error": str(exc), "code": "provider_error"}, status=502)
+        # Fixed string, not `str(exc)`: the message is gh's stderr tail (command,
+        # exit code, upstream body). Logged for us, withheld from the caller.
+        logger.warning("issue-radar list_pr_workflow_runs provider error: %s", exc)
+        return web.json_response(
+            {"error": "upstream provider error", "code": "provider_error"}, status=502
+        )
     return web.json_response({**_identity(key), "number": number, "runs": runs})
 
 
@@ -4391,16 +5335,23 @@ async def _handle_pull_run_action(request: web.Request) -> web.Response:
         )
     action = _str_field(body, "action").lower()
     if action not in ("cancel", "rerun"):
-        return web.json_response({"error": "action must be 'cancel' or 'rerun'", "code": "invalid_action"}, status=400)
+        return web.json_response(
+            {"error": "action must be 'cancel' or 'rerun'", "code": "invalid_action"}, status=400
+        )
     failed_only = body.get("failed_only", False)
     if not isinstance(failed_only, bool):
-        return web.json_response({"error": "'failed_only' must be a boolean", "code": "invalid_failed_only"}, status=400)
+        return web.json_response(
+            {"error": "'failed_only' must be a boolean", "code": "invalid_failed_only"}, status=400
+        )
 
     target = f"{key.slug}#{number}/run/{run_id}"
     try:
         result = await _run_pr_action(
-            key, "cancel_run" if action == "cancel" else "rerun_run",
-            number, run_id=run_id, failed_only=failed_only,
+            key,
+            "cancel_run" if action == "cancel" else "rerun_run",
+            number,
+            run_id=run_id,
+            failed_only=failed_only,
         )
     except GhCliError as exc:
         return _pr_action_error("pull_run", target, exc)
@@ -4430,7 +5381,11 @@ async def _handle_pulls_bulk(request: web.Request) -> web.Response:
     action = _str_field(body, "action").lower()
     if action not in _BULK_PR_ACTIONS:
         return web.json_response(
-            {"error": f"action must be one of {', '.join(_BULK_PR_ACTIONS)}", "code": "invalid_action"}, status=400
+            {
+                "error": f"action must be one of {', '.join(_BULK_PR_ACTIONS)}",
+                "code": "invalid_action",
+            },
+            status=400,
         )
     numbers, numbers_error = _pr_numbers_field(body)
     if numbers_error is not None:
@@ -4469,15 +5424,21 @@ async def _handle_pulls_bulk(request: web.Request) -> web.Response:
                 key, number, head_shas.get(number, ""), "pulls_bulk"
             )
             if conflict is not None:
-                failed.append({
-                    "number": number,
-                    "error": "the head branch moved since this list was read — refresh "
-                             "and review the new commit",
-                })
+                failed.append(
+                    {
+                        "number": number,
+                        "error": "the head branch moved since this list was read — refresh "
+                        "and review the new commit",
+                    }
+                )
                 continue
         try:
             result = await _run_pr_action(
-                key, action, number, body=text, method=method,
+                key,
+                action,
+                number,
+                body=text,
+                method=method,
                 head_sha=head_shas.get(number, ""),
             )
         except GhPermissionError as exc:
@@ -4497,9 +5458,14 @@ async def _handle_pulls_bulk(request: web.Request) -> web.Response:
         _audit("pulls_bulk", f"{target}:{action}", "ok")
         applied.append({"number": number, **result})
 
-    return web.json_response({
-        **_identity(key), "action": action, "applied": applied, "failed": failed,
-    })
+    return web.json_response(
+        {
+            **_identity(key),
+            "action": action,
+            "applied": applied,
+            "failed": failed,
+        }
+    )
 
 
 def register_routes(app: web.Application) -> None:
@@ -4517,6 +5483,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/apps/issue-radar/pulls/search", _require_enabled(_handle_pulls_search))
     app.router.add_get("/api/apps/issue-radar/pull", _require_enabled(_handle_pull_detail))
     app.router.add_get("/api/apps/issue-radar/ref", _require_enabled(_handle_ref_summary))
+    app.router.add_get("/api/apps/issue-radar/deps", _require_enabled(_handle_deps))
     app.router.add_get("/api/apps/issue-radar/labels", _require_enabled(_handle_labels))
     app.router.add_get("/api/apps/issue-radar/members", _require_enabled(_handle_members))
     app.router.add_get("/api/apps/issue-radar/repos", _require_enabled(_handle_repos))
@@ -4530,7 +5497,9 @@ def register_routes(app: web.Application) -> None:
     )
     app.router.add_get("/api/apps/issue-radar/issue-ai", _require_enabled(_handle_issue_ai))
     app.router.add_get("/api/apps/issue-radar/pull-ai", _require_enabled(_handle_pull_ai))
-    app.router.add_post("/api/apps/issue-radar/labels/apply", _require_enabled(_handle_labels_apply))
+    app.router.add_post(
+        "/api/apps/issue-radar/labels/apply", _require_enabled(_handle_labels_apply)
+    )
     app.router.add_post("/api/apps/issue-radar/issue/state", _require_enabled(_handle_issue_state))
     app.router.add_post(
         "/api/apps/issue-radar/issue/assignees", _require_enabled(_handle_issue_assignees)
@@ -4538,7 +5507,9 @@ def register_routes(app: web.Application) -> None:
     # Pull-request actions (see the "pull-request actions" section above).
     app.router.add_post("/api/apps/issue-radar/pull/state", _require_enabled(_handle_pull_state))
     app.router.add_post("/api/apps/issue-radar/pull/review", _require_enabled(_handle_pull_review))
-    app.router.add_post("/api/apps/issue-radar/pull/comment", _require_enabled(_handle_pull_comment))
+    app.router.add_post(
+        "/api/apps/issue-radar/pull/comment", _require_enabled(_handle_pull_comment)
+    )
     app.router.add_post("/api/apps/issue-radar/pull/merge", _require_enabled(_handle_pull_merge))
     app.router.add_post(
         "/api/apps/issue-radar/pull/auto-merge", _require_enabled(_handle_pull_auto_merge)
@@ -4546,11 +5517,21 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/apps/issue-radar/pull/runs", _require_enabled(_handle_pull_runs))
     app.router.add_post("/api/apps/issue-radar/pull/run", _require_enabled(_handle_pull_run_action))
     app.router.add_post("/api/apps/issue-radar/pulls/bulk", _require_enabled(_handle_pulls_bulk))
-    app.router.add_get("/api/apps/issue-radar/investigation", _require_enabled(_handle_get_investigation))
-    app.router.add_put("/api/apps/issue-radar/investigation", _require_enabled(_handle_put_investigation))
-    app.router.add_get("/api/apps/issue-radar/recommendations", _require_enabled(_handle_get_recommendations))
-    app.router.add_post("/api/apps/issue-radar/recommendations", _require_enabled(_handle_generate_recommendations))
-    app.router.add_post("/api/apps/issue-radar/labels/create", _require_enabled(_handle_create_label))
+    app.router.add_get(
+        "/api/apps/issue-radar/investigation", _require_enabled(_handle_get_investigation)
+    )
+    app.router.add_put(
+        "/api/apps/issue-radar/investigation", _require_enabled(_handle_put_investigation)
+    )
+    app.router.add_get(
+        "/api/apps/issue-radar/recommendations", _require_enabled(_handle_get_recommendations)
+    )
+    app.router.add_post(
+        "/api/apps/issue-radar/recommendations", _require_enabled(_handle_generate_recommendations)
+    )
+    app.router.add_post(
+        "/api/apps/issue-radar/labels/create", _require_enabled(_handle_create_label)
+    )
     app.router.add_get("/api/apps/issue-radar/tagging", _require_enabled(_handle_get_tagging))
     app.router.add_post("/api/apps/issue-radar/tagging", _require_enabled(_handle_generate_tagging))
     app.router.add_post(
@@ -4566,6 +5547,13 @@ def register_routes(app: web.Application) -> None:
 
     crew_routes.register_crew_routes(app)
 
+    # The pipeline dashboard's routes, same arrangement and for the same reason:
+    # its own module, registered HERE so this function stays the one place that
+    # lists this app's routes. Unlike crew_routes this import is NOT circular --
+    # pipeline_routes depends only on its fold and on `store` for the app name --
+    # so it is imported at module scope with the rest.
+    pipeline_routes.register_routes(app)
+
     # Background new-issue watcher: a single in-process asyncio loop (NOT a cron
     # job) that polls opted-in repos every ~60s and pushes a KiroCrew
     # notification when a new issue is opened. register_app_routes runs before
@@ -4575,5 +5563,8 @@ def register_routes(app: web.Application) -> None:
     try:
         app.on_startup.append(watch.start_watcher)
         app.on_cleanup.append(watch.stop_watcher)
+        # Cancel any in-flight background /deps revalidations on shutdown so a
+        # serve-stale rebuild never outlives the app as an unawaited task.
+        app.on_cleanup.append(_stop_deps_refreshes)
     except Exception:  # pragma: no cover - defensive
         logger.warning("issue-radar: could not register watcher lifecycle hooks", exc_info=True)

@@ -43,7 +43,10 @@ def _request(body: object) -> web.Request:
         return body
 
     req.json = _json
-    req.app = {"state": MagicMock()}
+    state = MagicMock()
+    state._gateway_restart_task = None
+    state._gateway_restart_in_progress = False
+    req.app = {"state": state}
     return req
 
 
@@ -123,6 +126,36 @@ class TestChannelEndpoint:
         # The re-check is what stops the panel from presenting the PREVIOUS
         # lane's verdict as this lane's answer.
         assert len(checked) == 1
+
+    def test_switch_response_carries_the_folded_display_sibling(self, _isolated_channel_home):
+        """The switch response is the check contract re-run against the new
+        lane, and the panel adopts it wholesale — so it must carry the same
+        display-only ``latest_version_display`` sibling as ``api_update_check``
+        (folded on stable, verbatim elsewhere) or a switch would blank the
+        clean display back to the raw promoted stamp."""
+        update_layout.set_release_channel("insider")
+
+        async def _fake_check() -> None:
+            # What the real re-check leaves behind after a stable switch finds
+            # the promoted candidate: the raw stamp, never pre-folded.
+            updates._set_update_info(
+                update_available=True, latest_version="0.4.0rc14", channel="stable"
+            )
+
+        try:
+            with (
+                patch.object(updates, "detect_install_layout", return_value=self._feed_layout()),
+                patch.object(updates, "_do_update_check", _fake_check),
+            ):
+                resp = asyncio.run(updates.api_update_channel(_request({"channel": "stable"})))
+
+            assert resp.status == 200
+            body = json.loads(resp.text)
+            # Raw for arm/apply, folded for humans — per the NEW channel.
+            assert body["latest_version"] == "0.4.0rc14"
+            assert body["latest_version_display"] == "0.4.0"
+        finally:
+            updates._set_update_info()
 
     def test_the_switch_never_reads_the_channel_file_on_the_event_loop(
         self, _isolated_channel_home
@@ -493,3 +526,30 @@ class TestRestartEndpoint:
         state = asyncio.run(_run())
         # The user is told, rather than left watching a spinner that never ends.
         assert state.push_update_progress.called
+
+    def test_duplicate_requests_share_one_restart_task(self):
+        """Double-clicks cannot race two successors for one gateway port."""
+        calls = 0
+        release = asyncio.Event()
+
+        async def _fake_restart(_state: object) -> None:
+            nonlocal calls
+            calls += 1
+            await release.wait()
+
+        async def _run() -> tuple[web.Response, web.Response]:
+            req = _request({})
+            req.app["state"]._background_tasks = set()
+            with patch.object(updates, "_restart_gateway", _fake_restart):
+                first = await updates.api_gateway_restart(req)
+                second = await updates.api_gateway_restart(req)
+                assert json.loads(second.body)["already_in_progress"] is True
+                await asyncio.sleep(0.3)
+                assert calls == 1
+                release.set()
+                await asyncio.sleep(0)
+            return first, second
+
+        first, second = asyncio.run(_run())
+        assert first.status == 200
+        assert second.status == 200

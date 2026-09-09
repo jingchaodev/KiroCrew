@@ -1,19 +1,25 @@
 import { type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, BarChart3, Brain } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BarChart3, Brain, Clock } from 'lucide-react'
 import { useAppSelector } from '../store'
 import { useUptime } from '../hooks/useUptime'
 import { api } from '../api/client'
-import { Card, CardTitle, StatCard } from '../components/ui'
+import type { WakaTimeStats } from '../api/client'
+import { Card, CardTitle, StatCard, Btn } from '../components/ui'
 import { TunnelStatus } from '../components/TunnelStatus'
+import { TailnetMobileCard } from '../components/TailnetMobileCard'
 import ErrorBoundary from '../components/ErrorBoundary'
+import ErrorNotice from '../components/ErrorNotice'
 import { getOverviewStatCards } from './overviewStatCards'
-import { MemoryTab, UsageTab } from './overview'
+import { getOverviewPanel } from './overviewPanel'
+import { isOverviewBuiltinSuppressed } from './overviewBuiltins'
+import { MemoryTab, UsageTab, WakaTimeTab } from './overview'
 import { useProvider } from '../providers'
 import type { NormalizedUsage } from '../providers'
 
 import { i18nT } from '../i18n/t'
+import { fmtDuration } from '../i18n/format'
 /**
  * Settings > Overview — mission control.
  *
@@ -25,7 +31,7 @@ import { i18nT } from '../i18n/t'
  * on the Import tab.
  */
 
-const DRILL_VIEWS = ['memory', 'usage'] as const
+const DRILL_VIEWS = ['memory', 'usage', 'wakatime'] as const
 type DrillView = (typeof DRILL_VIEWS)[number]
 
 function fmtNum(n: number | undefined | null): string {
@@ -56,7 +62,7 @@ function DrillIn({ title, onBack, children }: { title: string; onBack: () => voi
 /** Usage summary card — shares the query cache with the Usage drill-in. */
 function UsageSummaryCard({ onOpen }: { onOpen: () => void }) {
   const provider = useProvider()
-  const { data } = useQuery<NormalizedUsage>({
+  const { data, isError, error } = useQuery<NormalizedUsage>({
     queryKey: ['provider-usage', provider.id],
     queryFn: () => provider.fetchUsage(),
     enabled: provider.capabilities.usageBilling,
@@ -73,6 +79,10 @@ function UsageSummaryCard({ onOpen }: { onOpen: () => void }) {
       </CardTitle>
       {!provider.capabilities.usageBilling ? (
         <div className="text-[13px] text-muted">{i18nT('pages.overviewPage.usage_tracking_is_not_available_for')} {provider.displayName}.</div>
+      ) : isError ? (
+        // askAgent on: a read of the provider's usage report; the card holds no
+        // input. Without this branch a rejected fetch left the skeleton up forever.
+        <ErrorNotice message={error?.message} askAgent testId="overview-usage-error" />
       ) : !data ? (
         <div className="skeleton h-14 rounded" />
       ) : (
@@ -101,9 +111,46 @@ function UsageSummaryCard({ onOpen }: { onOpen: () => void }) {
   )
 }
 
+/** WakaTime summary card — shares the query cache with the WakaTime drill-in. */
+function WakaTimeSummaryCard({ onOpen }: { onOpen: () => void }) {
+  const { data, isError, error } = useQuery<WakaTimeStats>({
+    queryKey: ['wakatime-stats', 'last_7_days'],
+    queryFn: () => api.wakatimeStats('last_7_days'),
+  })
+  const total = data?.stats?.total_seconds ?? 0
+  const fmtHm = (s: number) => {
+    // Round to whole minutes first, then split, so 7199s -> 2h 0m, not 1h 60m.
+    const totalMin = Math.round(Math.max(0, s) / 60)
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return fmtDuration([[h, 'hour'], [m, 'minute']], { dropZero: true })
+  }
+  return (
+    <Card>
+      <CardTitle>
+        <Clock className="lucide-inline" /> {i18nT('pages.overviewPage.wakatime')}
+        <Btn onClick={onOpen} className="ml-auto border-none bg-transparent px-0 py-0 text-[12px] font-medium text-accent hover:bg-transparent hover:underline">
+          {i18nT('pages.overviewPage.view_details')} <ArrowRight size={12} />
+        </Btn>
+      </CardTitle>
+      {isError ? (
+        <ErrorNotice message={error?.message} askAgent testId="overview-wakatime-error" />
+      ) : !data ? (
+        <div className="skeleton h-14 rounded" />
+      ) : !data.configured ? (
+        <div className="text-[13px] text-muted">{i18nT('pages.overviewPage.wakatime_not_connected')}</div>
+      ) : (
+        <div className="text-[13px] text-muted">
+          {i18nT('pages.overviewPage.wakatime_last_7_days')} <span className="text-text font-mono">{fmtHm(total)}</span>
+        </div>
+      )}
+    </Card>
+  )
+}
+
 /** Memory summary card — consolidation cadence + retention at a glance. */
 function MemorySummaryCard({ onOpen }: { onOpen: () => void }) {
-  const { data } = useQuery<{ history_idle_hours?: number; history_max_days?: number; migrated?: boolean }>({
+  const { data, isError, error } = useQuery<{ history_idle_hours?: number; history_max_days?: number; migrated?: boolean }>({
     queryKey: ['memory-settings'],
     queryFn: () => api.memorySettings(),
   })
@@ -115,7 +162,11 @@ function MemorySummaryCard({ onOpen }: { onOpen: () => void }) {
           {i18nT('pages.overviewPage.view_details')} <ArrowRight size={12} />
         </button>
       </CardTitle>
-      {!data ? (
+      {isError ? (
+        // askAgent on: a read of the persisted memory settings; the card holds no
+        // input. Without this branch a rejected fetch left the skeleton up forever.
+        <ErrorNotice message={error?.message} askAgent testId="overview-memory-error" />
+      ) : !data ? (
         <div className="skeleton h-14 rounded" />
       ) : (
         <div className="flex flex-col gap-1 text-[13px] text-muted">
@@ -169,6 +220,14 @@ export default function OverviewPage() {
   if (view === 'usage') {
     return <DrillIn title={i18nT('pages.overviewPage.usage')} onBack={() => setView(null)}><UsageTab /></DrillIn>
   }
+  if (view === 'wakatime') {
+    return <DrillIn title={i18nT('pages.overviewPage.wakatime')} onBack={() => setView(null)}><WakaTimeTab /></DrillIn>
+  }
+
+  // Resolved once per render, and bound to a capitalized local so JSX treats it
+  // as a component rather than an intrinsic element.
+  const overviewPanel = getOverviewPanel()
+  const OverviewPanelComp = overviewPanel?.component
 
   return (
     <>
@@ -215,11 +274,44 @@ export default function OverviewPage() {
         })}
       </div>
 
+      {/* Mobile access. Above the summary cards and full width, because it is a
+          guided sequence rather than a metric: it owns the one next action, and
+          in its terminal state it renders a QR the operator scans off the screen.
+          Isolated so a throwing card cannot take the Overview down with it.
+
+          Suppressible downstream: a distribution that disables tailnet outright
+          can remove this surface via `suppressOverviewBuiltin('tailnet-mobile')`
+          rather than patching this file on every sync. Gated OUTSIDE the
+          ErrorBoundary and the spacing wrapper so a suppressed build renders no
+          element at all — leaving the `mb-6` div behind would keep a 24px gap
+          where the card used to be. The core suppresses nothing. */}
+      {!isOverviewBuiltinSuppressed('tailnet-mobile') && (
+        <ErrorBoundary scope="overview-tailnet-mobile" fallback={null}>
+          <div className="mb-6">
+            <TailnetMobileCard />
+          </div>
+        </ErrorBoundary>
+      )}
+
       {/* Deep-surface summary cards */}
       <div className="grid gap-3.5 grid-cols-2 max-[760px]:grid-cols-1">
         <UsageSummaryCard onOpen={() => setView('usage')} />
+        <WakaTimeSummaryCard onOpen={() => setView('wakatime')} />
         <MemorySummaryCard onOpen={() => setView('memory')} />
       </div>
+
+      {/* Extension slot: the single downstream-owned panel for the region below
+          the summary cards. One surface, one owner — a second registration
+          fails loud at the seam rather than negotiating layout here. Absent in
+          the stock build, and isolated so a throwing panel takes only itself
+          down, not the whole Overview. */}
+      {overviewPanel && OverviewPanelComp ? (
+        <ErrorBoundary scope={`overview-panel:${overviewPanel.id}`} fallback={null}>
+          <div className="mt-6">
+            <OverviewPanelComp />
+          </div>
+        </ErrorBoundary>
+      ) : null}
     </>
   )
 }

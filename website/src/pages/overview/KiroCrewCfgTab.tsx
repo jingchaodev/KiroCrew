@@ -11,6 +11,7 @@ import { useProvider } from '../../providers'
 import type { KiroCrewAgent } from '../../components/AgentSelector'
 
 import { i18nT } from '../../i18n/t'
+import { useImeGuard } from '../../hooks/useImeGuard'
 type KiroCrewAgentCfg = Omit<KiroCrewAgent, 'name'>
 interface WorkspaceCfg { dir: string }
 interface MemoryStoreCfg { description: string; embedding_provider: string }
@@ -84,6 +85,7 @@ function CfgSelect({ label, path, value, options, hint, labels, onSave }: { labe
 }
 
 function CfgNumber({ label, path, value, suffix, min, max, hint, onSave }: { label: string; path: string; value: number; suffix?: string; min?: number; max?: number; hint?: string; onSave: (p: string, v: number) => void }) {
+  const ime = useImeGuard()
   const [local, setLocal] = useState(String(value))
   const { ok, markDirty } = useDirtyTrack(value)
   const [err, setErr] = useState('')
@@ -101,8 +103,7 @@ function CfgNumber({ label, path, value, suffix, min, max, hint, onSave }: { lab
         className={`${inputCls} text-right ${err ? 'border-danger' : ''}`}
         value={local}
         onChange={e => { setLocal(e.target.value); setErr('') }}
-        onBlur={commit}
-        onKeyDown={e => { if (e.key === 'Enter') commit() }}
+        {...ime.bindEnter({ onEnter: commit, onBlur: commit })}
       />
       {suffix && <span className="text-muted text-[12px]">{suffix}</span>}
       {err && <span className="text-danger text-[11px]">{err}</span>}
@@ -326,7 +327,6 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroCrewCfg; onSaved: () => v
         {/* label-has-for flags a label whose only control is a <button>; the
             toggle button is self-labeling (its text is the value) and the label
             wrapper only extends the click target to the row text — intentional. */}
-        {/* eslint-disable-next-line jsx-a11y/label-has-for */}
         <label htmlFor="subagent-orchestrator-mode" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
           <span className="text-muted inline-flex items-center gap-1">{i18nT('pages.overview.kiroCrewCfgTab.orchestrator_mode')} <InfoTip text={i18nT('pages.overview.kiroCrewCfgTab.enable_conductor_skill_for_multi_agent_orchestra')} /></span>
           <button id="subagent-orchestrator-mode" aria-label={i18nT('pages.overview.kiroCrewCfgTab.orchestrator_mode')} onClick={() => setConductor(!conductor)}
@@ -335,8 +335,8 @@ function SubagentSettings({ cfg, onSaved }: { cfg: KiroCrewCfg; onSaved: () => v
           </button>
         </label>
         <label htmlFor="subagent-max-turns" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">
-          <span className="text-muted inline-flex items-center gap-1">{i18nT('pages.overview.kiroCrewCfgTab.max_turns_per_subagent')} <InfoTip text={i18nT('pages.overview.kiroCrewCfgTab.tool_call_budget_per_subagent_1_200_default_100')} /></span>
-          <input id="subagent-max-turns" aria-label={i18nT('pages.overview.kiroCrewCfgTab.max_turns_per_subagent')} type="number" min={1} max={200} value={maxTurns} onChange={e => setMaxTurns(parseInt(e.target.value) || 1)}
+          <span className="text-muted inline-flex items-center gap-1">{i18nT('pages.overview.kiroCrewCfgTab.max_turns_per_subagent')} <InfoTip text={i18nT('pages.overview.kiroCrewCfgTab.tool_call_budget_per_subagent_1_1000_default_100')} /></span>
+          <input id="subagent-max-turns" aria-label={i18nT('pages.overview.kiroCrewCfgTab.max_turns_per_subagent')} type="number" min={1} max={1000} value={maxTurns} onChange={e => setMaxTurns(parseInt(e.target.value) || 1)}
             className="w-20 px-2 py-1 rounded border border-border bg-bg-elevated text-text font-mono text-[13px] text-right" />
         </label>
         <label htmlFor="subagent-max-concurrent" className="flex justify-between items-center gap-3 py-1.5 border-b border-border text-sm">

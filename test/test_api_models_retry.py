@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -238,13 +239,22 @@ def test_successful_list_returns_200_with_models(tmp_path):
     assert any(m["model_name"] == "claude-opus-4.8" for m in models)
 
 
-def test_successful_list_launches_resolved_binary_in_place(tmp_path):
+def test_successful_list_launches_resolved_binary_in_place(tmp_path, monkeypatch):
     # The resolved binary is exec'd at its own path with no inherited snapshot
     # descriptor: a copy/memfd would strand a multi-call CLI's sibling
     # subcommand executable and every spawn would fail with ENOENT.
     payload = json.dumps({"models": [{"model_name": "claude-opus-4.8"}]}).encode()
     resolved = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli"
     spawn = AsyncMock(return_value=_FakeProc(payload))
+    env_file = tmp_path / ".env"
+    env_file.write_text("KIRO_API_KEY=model-list-key\n", encoding="utf-8")
+    monkeypatch.delenv("KIRO_API_KEY", raising=False)
+    monkeypatch.setattr("kiro_crew.config.loader.env_path", lambda: env_file)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "FAKE-secret")
+    monkeypatch.setenv("PYTHONPATH", "/gateway/pythonpath")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-FAKE")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "FAKE-akid")
+    monkeypatch.setenv("KIROCREW_UNRELATED_KEEPME", "keep-this-value")
     with (
         patch.object(agents.KiroCrewConfig, "load", return_value=_kiro_cfg()),
         patch("kiro_crew.acp.client._resolve_kiro_bin_for_spawn", return_value=resolved),
@@ -263,6 +273,13 @@ def test_successful_list_launches_resolved_binary_in_place(tmp_path):
     assert resolved in argv, argv
     assert not any("kiro-cli-snapshots" in str(a) for a in argv), argv
     assert "pass_fds" not in spawn.await_args.kwargs
+    env = spawn.await_args.kwargs["env"]
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "PYTHONPATH" not in env
+    assert "SLACK_BOT_TOKEN" not in env
+    assert env["KIRO_API_KEY"] == "model-list-key"
+    assert env["AWS_ACCESS_KEY_ID"] == "FAKE-akid"
+    assert env["KIROCREW_UNRELATED_KEEPME"] == "keep-this-value"
 
 
 def test_structured_context_window_seeds_central_authority(tmp_path):
@@ -305,8 +322,6 @@ def test_structured_context_window_seeds_central_authority(tmp_path):
         "kiro_crew.sandbox.resource_limit_preexec", lambda: None
     ), patch.object(
         agents.asyncio, "create_subprocess_exec", return_value=_FakeProc(payload)
-    ), patch.object(
-        agents.asyncio, "wait_for", return_value=(payload, b"")
     ):
         resp = _run(agents.api_models(_kiro_request(tmp_path)))
     assert resp.status == 200
@@ -325,9 +340,9 @@ def test_list_models_spawns_at_the_configured_sandbox_tier(tmp_path):
     ``wrap_argv``'s mode parameter defaults to ``"auto"``, which ignores what the
     operator configured. Where ``agent.sandbox`` is an explicit ``"off"``
     (isolation deferred to kiro-cli's own internal sandbox, which cannot nest
-    inside Kiro Crew's), taking that default asked for a STRICTER tier than chat
-    itself runs under — and on a host with no backend at all (every Windows host,
-    macOS >= 26) it fail-closed while chat worked fine.
+    inside Kiro Crew's), taking that default asks for a STRICTER tier than chat
+    itself runs under. Explicit Windows Kiro classification delegates either
+    tier, but the configured-tier invariant remains cross-platform.
     """
     payload = json.dumps({"models": [{"model_name": "claude-opus-4.8"}]}).encode()
     seen: dict[str, Any] = {}
@@ -350,8 +365,6 @@ def test_list_models_spawns_at_the_configured_sandbox_tier(tmp_path):
         "kiro_crew.sandbox.resource_limit_preexec", lambda: None
     ), patch.object(
         agents.asyncio, "create_subprocess_exec", return_value=_FakeProc(payload)
-    ), patch.object(
-        agents.asyncio, "wait_for", return_value=(payload, b"")
     ):
         resp = _run(agents.api_models(_kiro_request(tmp_path)))
 
@@ -418,3 +431,45 @@ def test_sandbox_refusal_is_reported_with_a_machine_readable_code(tmp_path, capl
     }
     # The remedy reaches the operator rather than a bare traceback.
     assert any("not Linux" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_ssh_auth_sock_resolver_runs_off_the_event_loop(tmp_path):
+    """``_resolve_ssh_auth_sock`` globs ``/tmp/ssh-*/agent.*`` and ``os.stat``s
+    every hit, so its latency scales with the ``/tmp`` entry count. The frontend
+    polls this endpoint every 8s while the model list is degraded, so an on-loop
+    call stalls chat, cron and the liveness heartbeat on exactly the host where
+    the probe is slowest. Its sibling wrapper's docstring states the rule: never
+    on the event loop. Same shape as
+    ``test_acp_spawn_offload.py``'s resolver assertions.
+    """
+    payload = json.dumps({"models": [{"model_name": "claude-opus-4.8"}]}).encode()
+    seen: list[threading.Thread] = []
+
+    def _probe(env):
+        seen.append(threading.current_thread())
+        return None
+
+    async def _drive():
+        loop_thread = threading.current_thread()
+        resp = await agents.api_models(_kiro_request(tmp_path))
+        return loop_thread, resp
+
+    with patch.object(agents.KiroCrewConfig, "load", return_value=_kiro_cfg()), patch(
+        "kiro_crew.acp.client._resolve_kiro_bin_for_spawn", return_value="/usr/bin/kiro-cli"
+    ), patch("kiro_crew.acp.client._resolve_ssh_auth_sock", _probe), patch(
+        "kiro_crew.env.augmented_path", lambda p: p
+    ), patch(
+        "kiro_crew.dashboard.handlers.agents.wrap_argv", _stub_wrap_argv
+    ), patch(
+        "kiro_crew.dashboard.handlers.agents.cgroup_scope_argv", lambda argv: argv
+    ), patch(
+        "kiro_crew.sandbox.resource_limit_preexec", lambda: None
+    ), patch.object(
+        agents.asyncio, "create_subprocess_exec", return_value=_FakeProc(payload)
+    ):
+        loop_thread, resp = _run(_drive())
+
+    assert resp.status == 200
+    assert seen, "_resolve_ssh_auth_sock was never called by api_models"
+    for thread in seen:
+        assert thread is not loop_thread, "ssh resolver ran on the event loop thread"

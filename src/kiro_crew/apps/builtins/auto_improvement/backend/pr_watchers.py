@@ -60,6 +60,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from kiro_crew.platform.context import redact_via_context
+from kiro_crew.subprocess_utf8 import UTF8_TEXT
+
 from ..spine.git_safety import GIT_SAFE_CONFIG, require_pinned
 from . import pr_checks, store
 
@@ -151,6 +154,7 @@ def _git(*args: str, timeout: float = 60.0) -> subprocess.CompletedProcess[str]:
         ["git", *_GIT_SAFE_CONFIG, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         errors="replace",
         timeout=timeout,
     )
@@ -163,7 +167,7 @@ def _gh(*args: str, timeout: float = 60.0) -> subprocess.CompletedProcess[str]:
     :func:`is_watchable_pr`), so no caller-controlled string reaches argv[0].
     """
     try:
-        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(["gh", *args], capture_output=True, timeout=timeout, **UTF8_TEXT)
     except (OSError, subprocess.SubprocessError) as exc:
         # gh absent / timed out: synthesize a failure so callers need no try block.
         return subprocess.CompletedProcess(
@@ -226,7 +230,12 @@ def setup_isolated_clone(
         # --local hardlinks the object store: no network, near-instant, cheap on disk.
         proc = _git("clone", "--local", shared_clone, dest, timeout=300)
         if proc.returncode != 0:
-            return "", f"git clone --local failed: {(proc.stderr or '').strip()[:200]}"
+            # Redact BEFORE the bound: a slice can cut a credential in the URL git
+            # echoes mid-match, leaving a fragment no downstream pass recognises.
+            return "", (
+                f"git clone --local failed: "
+                f"{redact_via_context((proc.stderr or '').strip())[:200]}"
+            )
         if branch:
             checkout = _git("-C", dest, "checkout", branch, timeout=60)
             if checkout.returncode != 0:
@@ -241,7 +250,7 @@ def setup_isolated_clone(
                 shutil.rmtree(dest, ignore_errors=True)
                 return "", (
                     f"could not check out the pull request head {branch!r}: "
-                    f"{(checkout.stderr or '').strip()[:160]}"
+                    f"{redact_via_context((checkout.stderr or '').strip())[:160]}"
                 )
         _fetch_base_ref(dest, base_ref)
         neutralize_origin(dest)
@@ -1108,7 +1117,17 @@ class PRWatcherRegistry:
         itself stays best-effort (a lost patch must not fail the watcher), but "the patch
         was lost" and "the directory holding the commits may be deleted" are different
         decisions, and conflating them destroyed verified work.
+
+        No clone configured means no working tree to diff — there is nothing to export
+        and nothing to retain. Without this guard the fallback `git diff`/`git status`
+        calls below still ran with `-C ""`, which git treats as no `-C` at all: it walks
+        up from the process's real CWD and operates on whatever repository (or worktree)
+        happens to contain it, spawning a host-side git call — and `require_pinned`'s
+        attributes pin write — against the operator's real checkout instead of this run's
+        clone.
         """
+        if not clone:
+            return True
         try:
             self._export_fix(st, clone, attempt)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1328,7 +1347,7 @@ def publish_if_authorized(pr: str, status: dict[str, Any]) -> tuple[bool, str]:
     proc = _gh("pr", "ready", pr)
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
-        return False, f"gh pr ready failed: {tail[0][:160]}"
+        return False, f"gh pr ready failed: {redact_via_context(tail[0])[:160]}"
     logger.info("watchers: marked %s ready for review (%s)", pr, reason)
     return True, reason
 

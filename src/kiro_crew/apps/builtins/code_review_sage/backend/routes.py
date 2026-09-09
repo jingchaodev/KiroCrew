@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 import threading
 import time
@@ -43,6 +42,8 @@ from aiohttp import web
 
 from kiro_crew import hooks, model_registry
 from kiro_crew.apps.manager import is_app_enabled
+from kiro_crew.atomic_write import atomic_write
+from kiro_crew.loop_lock import LoopBoundLock
 
 logger = logging.getLogger("kirocrew.app.code-review-sage")
 
@@ -75,19 +76,21 @@ from sage_lib import (  # noqa: E402,E501
 # per-change detail.
 _RUNS: list[dict[str, Any]] = []
 _RUNS_MAX = 25
-_LOCK = asyncio.Lock()
+_LOCK = LoopBoundLock()
 # Guards the claim/dedup step below. Runs themselves are NOT serialized: each run
 # owns a private ``data/runs/<run_id>/`` subtree (results + report), so several
 # reviews can be in flight at once. What still needs mutual exclusion is the
 # moment a run decides WHICH changes it owns.
 # Serializes whole runs. Workers hand results back through a directory shared
 # ACROSS runs, so overlapping runs would mean two writers to one path.
-_RUN_LOCK = asyncio.Lock()
+# LoopBoundLock excludes within one loop only; all run starters are route
+# handlers on the app's single gateway loop, so every contender shares it.
+_RUN_LOCK = LoopBoundLock()
 
 # Serialises "start a consolidation" against "delete this namespace". Both are
 # short critical sections; holding one lock across each removes the interleaving
 # rather than trying to place checks around the awaits.
-_NS_OPS_LOCK = asyncio.Lock()
+_NS_OPS_LOCK = LoopBoundLock()
 # reviewed-key -> run_id for every change a LIVE run has claimed. Two runs must
 # never review and post to the same PR concurrently: the old whole-run lock
 # prevented that by refusing to overlap at all; this claim registry gets the same
@@ -145,15 +148,39 @@ def _runs_file() -> Path:
     return store.data_dir() / "runs.json"
 
 
-def _save_runs() -> None:
-    """Atomically persist the run registry (0600). Never raises."""
+def _write_runs(payload: str) -> None:
+    """Blocking half of :func:`_save_runs` — never call this on the event loop.
+
+    This whole function is a blocking syscall sequence — mkdir, temp creation,
+    lockdown (in-process per ``platform_compat``), payload write, replace — and
+    filesystem calls can stall on a slow volume, so it belongs in a worker
+    thread (the same reason ``_write_review_section`` and
+    ``store.remove_run_dir`` are offloaded).
+    """
+    f = _runs_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    # The shared helper already does everything this write needs, and does one
+    # thing the hand-rolled version did not: it replaces through
+    # ``replace_with_retry``, so a transient Windows sharing violation does not
+    # silently lose the save (the defect class tracked in #4701 / #4898). It also
+    # picks a random mkstemp name, applies the owner-only lockdown to the temp
+    # BEFORE the payload lands, and refuses to follow a planted parent link --
+    # the three properties the review worker's writable tree requires, since it
+    # is prompt-injectable and shares this directory.
+    atomic_write(f, payload, restrict_to_owner=True)
+
+
+async def _save_runs() -> None:
+    """Atomically persist the run registry (owner-only). Never raises.
+
+    The registry is serialized HERE, on the loop, so the payload is a consistent
+    snapshot taken under whatever lock the caller holds; only the file write and
+    the lockdown are offloaded. Serializing inside the thread instead would let
+    ``_RUNS`` mutate mid-iteration.
+    """
     try:
-        f = _runs_file()
-        f.parent.mkdir(parents=True, exist_ok=True)
-        tmp = f.with_name(f.name + ".tmp")
-        tmp.write_text(json.dumps(_RUNS, indent=2), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, f)
+        payload = json.dumps(_RUNS, indent=2)
+        await asyncio.to_thread(_write_runs, payload)
     except Exception:  # pragma: no cover - defensive
         logger.warning("failed to persist runs.json", exc_info=True)
 
@@ -236,7 +263,7 @@ async def _record(run: dict) -> None:
             else:
                 evicted.append(str(r.get("run_id") or ""))
         _RUNS[:] = keep
-        _save_runs()
+        await _save_runs()
     for run_id in evicted:
         if run_id:
             await asyncio.to_thread(store.remove_run_dir, run_id)
@@ -430,12 +457,24 @@ async def _run_review_bg(run: dict, changes: list[str]) -> None:
             # the subprocess (and its memory) lives exactly as long as the batch. The
             # holder is reference-counted, so overlapping runs share one runtime and the
             # last one out tears it down.
-            await pool.begin_batch()
+            #
+            # Runtime preflight, read ONCE and reused: when the host cannot spawn a
+            # reviewer (no kiro-cli, ACP runtime unimportable) the batch is never
+            # opened — begin_batch would raise inside the spawn with a generic
+            # message — and the same verdict is handed to run_review, which fails
+            # every change fast with a reason naming the missing runtime. One
+            # reading keeps the bracket and the driver's verdict consistent.
+            # Offloaded: the executable resolution stats candidates across every
+            # PATH entry, and one stale network mount there would stall the loop.
+            runtime_error = await asyncio.to_thread(review_pool.runtime_preflight)
+            if not runtime_error:
+                await pool.begin_batch()
             try:
                 summary = await asyncio.to_thread(
                     review_driver.run_review, changes,  # type: ignore[attr-defined]
                     dispatch=dispatch, progress=_make_progress(run),
                     run_id=run_id, cancelled=lambda: run_id in _CANCELLED,
+                    preflight=lambda: runtime_error,
                     # One reviewer at a time. Workers share the staging directory and
                     # each has shell and file tools, so two running at once means one
                     # can write another change's record between that change's slot
@@ -447,7 +486,8 @@ async def _run_review_bg(run: dict, changes: list[str]) -> None:
                     concurrency=1,
                 )
             finally:
-                await pool.end_batch()
+                if not runtime_error:
+                    await pool.end_batch()
             run["summary"] = summary
             _collect_delivered(run, summary)
             run["report_slug"] = summary.get("report_slug") or run.get("report_slug")
@@ -481,6 +521,21 @@ async def _run_review_bg(run: dict, changes: list[str]) -> None:
                 # repo-review skips it until its head changes. Only repo-review runs
                 # carry head_shas; pasted-link runs skip this (no-op).
                 await asyncio.to_thread(_record_reviewed, run)
+            if run["status"] == "error":
+                # The cause as a TOKEN, beside the sentence rather than instead of
+                # it. `_first_change_failure` collapses the token into English for
+                # `error`, so without this the payload names the cause nowhere and
+                # the dashboard's translator has to recognize causes by their
+                # wording -- which silently reverts a card to untranslated
+                # pass-through the next time a message is reworded, with no test
+                # going red. Set for BOTH error branches above: the summary-level
+                # `error` sentence and the per-change one describe the same
+                # `per_change` records, so the token is derived from those either
+                # way. Absent (never empty-string) when no record carried one, so a
+                # reader cannot mistake "no token" for a token.
+                reason = _first_change_failure(summary)[1]
+                if reason:
+                    run["reason"] = reason
     except Exception as exc:  # pragma: no cover - defensive
         run["status"] = "error"
         run["error"] = str(exc)
@@ -493,22 +548,49 @@ async def _run_review_bg(run: dict, changes: list[str]) -> None:
             _release_claims(run)
         _CANCELLED.discard(run_id)
         async with _LOCK:
-            _save_runs()
+            await _save_runs()
         await _notify_finished(run)
 
 
-def _first_change_error(summary: dict) -> str:
-    """The most useful per-change failure reason, for a run-level error message."""
+def _first_change_failure(summary: dict) -> tuple[str, str]:
+    """The most useful per-change failure, as ``(sentence, reason_token)``.
+
+    Both halves come from the SAME record in one pass, which is the whole reason
+    this is not two functions. The sentence is often built from ``deep_error`` --
+    prose from the spawn -- while the token lives in that record's
+    ``skipped_reason``; a second independent scan for the token would happily
+    return a LATER record's token and pair it with this record's sentence,
+    labelling a failure with an unrelated cause.
+
+    The token half is ``""`` when the chosen record kept no ``skipped_reason``.
+    """
     for rec in summary.get("per_change") or []:
         for key in ("deep_error", "gate_error", "skipped_reason"):
             val = str(rec.get(key) or "").strip()
             if val:
-                return {
+                sentence = {
                     "no_review_recorded": "the reviewer finished but wrote no "
                                           "findings record",
+                    "review_record_incomplete": "the reviewer wrote a findings "
+                                                "record but never completed the "
+                                                "review",
+                    # Reason-level fallback only: a preflight-failed record
+                    # carries the specific runtime message in its error fields,
+                    # which the key order above prefers, and the run-level error
+                    # for that case comes from the summary's own error. Kept so
+                    # the reason itself always renders as a cause, never as a
+                    # bare enum value.
+                    "runtime_unavailable": "the reviewer never ran: its agent "
+                                           "runtime is unavailable on this host",
                     "review_failed": "the review turn failed",
                 }.get(val, val)
-    return ""
+                return sentence, str(rec.get("skipped_reason") or "").strip()
+    return "", ""
+
+
+def _first_change_error(summary: dict) -> str:
+    """The most useful per-change failure reason, for a run-level error message."""
+    return _first_change_failure(summary)[0]
 
 
 def _run_headline(run: dict) -> str:
@@ -913,7 +995,7 @@ async def _handle_run_cancel(request: web.Request) -> web.Response:
                 {"code": "run_not_running", "error": f"run is {run.get('status')}, not running"}, status=409)
         _CANCELLED.add(run_id)
         run["cancel_requested_at"] = _now()
-        _save_runs()
+        await _save_runs()
     return web.json_response({
         "ok": True, "run_id": run_id, "status": "cancelling",
         "message": "queued changes dropped; a review already in progress will finish",
@@ -944,7 +1026,7 @@ async def _handle_run_delete(request: web.Request) -> web.Response:
                           "it to finish"},
                 status=409)
         _RUNS.remove(run)
-        _save_runs()
+        await _save_runs()
     await asyncio.to_thread(store.remove_run_dir, run_id)
     return web.json_response({"ok": True, "run_id": run_id})
 
@@ -1025,7 +1107,7 @@ async def _post_comments_bg(run_id: str, run: dict,
                 rec = by_cid.get(str(r.get("change_id")))
                 if rec is not None:
                     review_driver.apply_post_outcome(rec, r)
-            _save_runs()
+            await _save_runs()
         # Indexing is what stops the re-review; do it on the retry path too, and
         # only after the records above reflect what actually landed.
         await asyncio.to_thread(_record_reviewed, run)
@@ -1035,7 +1117,7 @@ async def _post_comments_bg(run_id: str, run: dict,
         async with _LOCK:
             run["posting"] = False
             run["post_error"] = str(e)
-            _save_runs()
+            await _save_runs()
     finally:
         # Same contract as a review's claims: release on EVERY terminal path, or
         # the change stays unreviewable until the gateway restarts.
@@ -1171,7 +1253,7 @@ async def _handle_run_post(request: web.Request) -> web.Response:
                 _INFLIGHT[_stage_key(cid)] = run_id
         run["posting"] = True
         run["post_error"] = None
-        _save_runs()
+        await _save_runs()
 
     # Keep a strong ref like the review path does, so the poster cannot be
     # garbage-collected mid-flight and leave `posting` set with nothing to clear
@@ -1289,7 +1371,7 @@ async def _handle_run_archive(request: web.Request) -> web.Response:
         run = _find_run(run_id)
         if run is not None:
             run["report_slug"] = slug
-        _save_runs()
+        await _save_runs()
     return web.json_response({"ok": True, "run_id": run_id, "report_slug": slug,
                               "created": True})
 
@@ -1581,10 +1663,9 @@ def _write_review_section(patch: dict) -> dict:
         review["max_concurrent"] = max(1, min(mc, review_pool.MAX_CONCURRENT_CEIL))
 
     cfg["review"] = review
-    tmp = cfg_path.with_name(cfg_path.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, cfg_path)
+    # Same helper, same reasons as ``_write_runs`` -- including the retrying
+    # replace this write also lacked.
+    atomic_write(cfg_path, json.dumps(cfg, indent=2), restrict_to_owner=True)
     return review
 
 
