@@ -63,16 +63,16 @@ def _policy_body(**overrides) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Boot gate flags — strict coercion (#9176)
+# Boot gate flags — strict coercion
 # ──────────────────────────────────────────────────────────────────────────
 class TestBootFlagStrictness:
-    """``boot`` gate flags reject non-boolean JSON (#9176).
+    """``boot`` gate flags reject non-boolean JSON.
 
-    ``bool()`` on the raw value read the string ``"false"`` as ``True`` — the
-    fail-open direction for ``allow_terminal``.  A present-but-not-boolean
-    value must instead be read in that flag's fail-closed direction:
-    ``allow_terminal`` closes to ``False``; ``require_sandbox`` and
-    ``fail_closed`` close to ``True``.
+    ``bool()`` on a raw JSON value turns the string ``"false"`` into ``True``
+    — the fail-open direction for ``allow_terminal``.  A
+    present-but-not-boolean value must be read in that flag's fail-closed
+    direction: ``allow_terminal`` closes to ``False``; ``require_sandbox``
+    and ``fail_closed`` close to ``True``.
     """
 
     # (flag, absent-default, fail-closed direction)

@@ -1586,10 +1586,10 @@ def _coerce_boot_flag(
 
     A real boolean is honoured; an absent key takes ``default``. Any other
     present value — ``"false"``, ``"true"``, ``0``, ``1``, explicit ``null`` —
-    is NOT interpreted: the previous ``bool()`` read turned the string
+    is NOT interpreted: ``bool()`` on a raw JSON value turns the string
     ``"false"`` into ``True``, so a hand-edited or template-rendered policy
-    writing ``"allow_terminal": "false"`` switched the terminal ON while the
-    file read the opposite (#9176). Such a value is warned about and read as
+    writing ``"allow_terminal": "false"`` would switch the terminal ON while
+    the file reads the opposite. Such a value is warned about and read as
     ``closed``, that flag's fail-closed direction (``allow_terminal`` closes
     to ``False``; ``require_sandbox`` and ``fail_closed`` close to ``True``).
     """
