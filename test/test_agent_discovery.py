@@ -925,17 +925,23 @@ class TestSkillGlobsCache:
         first.append("mutation")
         assert "mutation" not in agent_skill_globs("a1", d)
 
-    def test_cache_is_bounded(self, tmp_path: Path) -> None:
-        """Arbitrary agent names cannot grow the cache without limit."""
+    def test_cache_is_bounded(self, tmp_path: Path, monkeypatch) -> None:
+        """Arbitrary agent names cannot grow the cache without limit.
+
+        The cap is patched small so the test exercises the drop-at-cap
+        mechanism without hundreds of directory scans: the mechanism, not
+        the production constant, is what needs pinning.
+        """
         from kiro_crew import agent_discovery as ad
 
         clear_list_agents_cache()
+        monkeypatch.setattr(ad, "_SKILL_GLOBS_CACHE_MAX", 8)
         d = tmp_path / "agents"
         d.mkdir()
         self._write(d, "real", "one")
-        for i in range(ad._SKILL_GLOBS_CACHE_MAX + 10):
+        for i in range(8 + 4):
             agent_skill_globs(f"flood-{i}", d)
-        assert len(ad._SKILL_GLOBS_CACHE) <= ad._SKILL_GLOBS_CACHE_MAX
+        assert len(ad._SKILL_GLOBS_CACHE) <= 8
         # Correctness survives the flood: the real agent still resolves.
         assert "one" in agent_skill_globs("real", d)[0]
 
