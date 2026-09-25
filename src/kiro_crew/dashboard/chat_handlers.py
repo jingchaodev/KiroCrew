@@ -74,6 +74,7 @@ from kiro_crew.dashboard.chat_persistence import (
     _attach_variants,
     _local_turn_generation,
     _local_turn_prompt,
+    _rebase_rehydrated_refresh_mark,
     _reconcile_local_turn_marker,
     _rehydrate_slot_title,
     _remember_reasoning_effort_for_restore,
@@ -11969,6 +11970,13 @@ def _hydrate_slot_from_history(
     _reconcile_local_turn_marker(
         slot, _local_turn_generation(meta), _local_turn_prompt(meta), persisted=all_messages
     )
+    # Same as the two chat_persistence loaders, and after the reconcile for
+    # the same reason: a transcript past the 500-row window restores fewer user
+    # rows than its persisted refresh mark was taken over, so re-base the mark
+    # or the opt-in cadence stays silent after the resume. A mark at or below
+    # the restored count is left alone, so surfacing every row (import's
+    # ``window_limit=None``) changes nothing.
+    _rebase_rehydrated_refresh_mark(slot)
 
 
 async def api_chat_slot_resume(request: web.Request) -> web.Response:
