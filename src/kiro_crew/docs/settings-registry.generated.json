@@ -452,6 +452,14 @@
       "description": "Expand the side panel to the Git tab each time you start a chat in a git project. The Git tab is created either way."
     },
     {
+      "id": "chat.auto-title-refresh-interval-turns",
+      "label": "Auto-title refresh interval (turns)",
+      "tab": "chat",
+      "route": "/settings/chat/sessions?highlight=key%3Adashboard.title_refresh_every_turns",
+      "description": "Re-checks an auto-generated session title at each interval of your turns and renames the session when its topic has moved. The shortest interval is 4 turns. A title you renamed yourself never changes. Default is the built-in schedule (turns 8 and 24). Each refresh uses tokens.",
+      "configKey": "dashboard.title_refresh_every_turns"
+    },
+    {
       "id": "chat.background-effort",
       "label": "Background Effort",
       "tab": "chat",

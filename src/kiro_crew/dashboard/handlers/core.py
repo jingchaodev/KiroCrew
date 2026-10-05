@@ -68,6 +68,7 @@ from kiro_crew.config.sections import (
     FOLDER_SORT_MODES,
     JUDGE_PROVIDERS,
     STT_LANGUAGE_AUTO,
+    TITLE_REFRESH_EVERY_TURNS_MAX,
     transcribe_vocabulary_name,
 )
 from kiro_crew.context_management import RESULT_FILE_MAX_BYTES
@@ -2777,6 +2778,17 @@ _EDITABLE_CONFIG: dict[str, dict] = {
         "min": RECENT_TINT_COUNT_MIN,
         "max": RECENT_TINT_COUNT_MAX,
     },
+    # Auto-title refresh cadence (Settings → Chat → Sessions). The gate admits
+    # the loader's whole domain, 0 (the built-in schedule) through MAX, and the
+    # loader raises a stored 1-3 to MIN, the same as it does for a value
+    # `kirocrew config set` wrote. The row reads back the LOADED value, so it
+    # shows the cadence that runs. chat_title reads the key on every turn, so a
+    # save applies from the next turn with no restart.
+    "dashboard.title_refresh_every_turns": {
+        "type": "int",
+        "min": 0,
+        "max": TITLE_REFRESH_EVERY_TURNS_MAX,
+    },
     # The sidebar's folder sort mode. A view preference the sidebar menu writes and
     # the kirocrew-dashboard MCP server reads back, so the two draw the tree in
     # the same order; the enum is the loader's own list, spelled once.
@@ -3127,7 +3139,8 @@ async def api_kirocrew_config_patch(request: web.Request) -> web.Response:
     elif spec["type"] == "int":
         try:
             value = int(value)
-        except (TypeError, ValueError):
+        # int() raises OverflowError on a non-finite float, which aiohttp's json.loads accepts.
+        except (TypeError, ValueError, OverflowError):
             return _deny("must be an integer", f"{path_key}={value}")
         lo, hi = spec.get("min", 0), spec.get("max", 999999)
         if value < lo or value > hi:

@@ -836,6 +836,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.auto-title-refresh-interval-turns",
+    "label": "Auto-title refresh interval (turns)",
+    "labelKey": "pages.settings.chatPanel.title_refresh_every_turns",
+    "description": "Re-checks an auto-generated session title at each interval of your turns and renames the session when its topic has moved. The shortest interval is 4 turns. A title you renamed yourself never changes. Default is the built-in schedule (turns 8 and 24). Each refresh uses tokens.",
+    "tab": "chat",
+    "type": "stepper",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    },
+    "configKey": "dashboard.title_refresh_every_turns"
+  },
+  {
     "id": "chat.background-effort",
     "label": "Background Effort",
     "labelKey": "pages.settings.chatPanel.background_effort",
