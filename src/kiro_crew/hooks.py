@@ -193,6 +193,7 @@ from kiro_crew.hook_runtime.script_hooks import (  # noqa: F401
     ScriptHookResult,
     ScriptHookStore,
     _hook_subprocess_env,
+    _script_hook_enabled_from,
     run_script_hook,
 )
 from kiro_crew.hook_runtime.script_validation import (  # noqa: F401
@@ -1860,7 +1861,7 @@ class ScriptHook:
             command=data.get("command", ""),
             skills=[str(s) for s in skills if isinstance(s, str)],
             timeout=timeout,
-            enabled=data.get("enabled", True),
+            enabled=_script_hook_enabled_from(data),
             last_run=data.get("last_run", 0.0),
             last_status=data.get("last_status", ""),
             last_error=last_error,
